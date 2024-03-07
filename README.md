@@ -16,9 +16,9 @@ Straigtforward solution designed to streamline and enhance the accessibility of 
 - Cloud architects and system administrators seeking a customizable solution to enhance their AVD deployment with Linux access capabilities.
 
 #### Getting Started:
-To get started with **LinuxBrokerForAVDAccess**, check out our documentation for setup instructions, usage guides, and best practices. Whether you're setting up a new AVD environment or integrating Linux access into your existing infrastructure, our solution provides the tools and flexibility you need to succeed.
+To get started with, check out our documentation for setup instructions, usage guides, and best practices. Whether you're setting up a new AVD environment or integrating Linux access into your existing infrastructure, our solution provides the tools and flexibility you need to succeed.
 
 #### Contribution:
-We believe in the power of community-driven development and encourage contributions to make **LinuxBrokerForAVDAccess** even better. Whether it's reporting issues, suggesting features, or contributing code, your input is invaluable to us.
+We believe in the power of community-driven development and encourage contributions to make the solution even better. Whether it's reporting issues, suggesting features, or contributing code, your input is invaluable to us.
 
-Welcome to **LinuxBrokerForAVDAccess** – your bridge to seamless, scalable, and secure Linux access within Azure Virtual Desktop.
+Welcome! This repo is your bridge to seamless, scalable, and secure Linux access within Azure Virtual Desktop.
