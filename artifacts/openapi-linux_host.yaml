@@ -1,0 +1,47 @@
+openapi: 3.0.0
+info:
+  title: Linux Broker Linux Host API
+  version: 1.0.0
+  description: API for managing the release of virtual machines by hostname.
+servers:
+  - url: /api
+paths:
+  /vms/{hostname}/release:
+    post:
+      operationId: ReleaseVm
+      summary: Release a virtual machine by Hostname
+      description: This endpoint releases a virtual machine identified by its Hostname.
+      parameters:
+        - name: hostname
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Successfully released VM
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Hostname:
+                    type: string
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        "500":
+          description: Failed to release VM
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string

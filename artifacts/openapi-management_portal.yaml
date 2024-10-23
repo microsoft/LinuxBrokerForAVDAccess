@@ -1,0 +1,614 @@
+openapi: 3.0.0
+info:
+  title: Linux Broker Management Portal API
+  version: 1.0.0
+  description: |
+    API for managing linux virtual machines and scaling rules. This includes operations to retrieve, create, update, delete, checkout, and return virtual machines, as well as scaling rule management and history retrieval.
+servers:
+  - url: /api
+paths:
+  /vms:
+    get:
+      operationId: GetVms
+      summary: Retrieve a list of all virtual machines
+      responses:
+        "200":
+          description: A list of VMs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "404":
+          description: No VMs found or database issue
+        "500":
+          description: Unexpected error occurred
+
+  /vms/available:
+    get:
+      operationId: GetAvailableVm
+      summary: Retrieve an available virtual machine
+      responses:
+        "200":
+          description: Details of the available VM
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: No available VM found
+        "500":
+          description: Unexpected error occurred
+
+  /vms/checkout:
+    post:
+      operationId: CheckoutVm
+      summary: Checkout a virtual machine
+      requestBody:
+        description: The VM checkout details
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                avdhost:
+                  type: string
+      responses:
+        "200":
+          description: Successfully checked out VM
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Invalid input
+        "409":
+          description: No available VM found
+        "500":
+          description: Unexpected error occurred
+
+  /vms/{vmid}/update-attributes:
+    post:
+      operationId: UpdateVmAttributes
+      summary: Update attributes of a specific virtual machine
+      parameters:
+        - name: vmid
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        description: The VM attribute update details
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                powerstate:
+                  type: string
+                networkstatus:
+                  type: string
+                vmstatus:
+                  type: string
+      responses:
+        "200":
+          description: Successfully updated VM attributes
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Invalid input
+        "404":
+          description: VM not found or no attributes updated
+        "500":
+          description: Unexpected error occurred
+
+  /vms/{vmid}/delete:
+    post:
+      operationId: DeleteVm
+      summary: Delete a virtual machine
+      parameters:
+        - name: vmid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Successfully deleted VM
+        "400":
+          description: Invalid input
+        "404":
+          description: VM not found or deletion failed
+        "500":
+          description: Unexpected error occurred
+
+  /vms/add:
+    post:
+      operationId: AddVm
+      summary: Add a new virtual machine
+      requestBody:
+        description: The new VM details
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hostname:
+                  type: string
+                ipaddress:
+                  type: string
+                powerstate:
+                  type: string
+                networkstatus:
+                  type: string
+                vmstatus:
+                  type: string
+                username:
+                  type: string
+                avdhost:
+                  type: string
+                description:
+                  type: string
+      responses:
+        "201":
+          description: Successfully added VM
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Invalid input
+        "500":
+          description: Failed to add new VM
+
+  /vms/{vmid}:
+    get:
+      operationId: GetVmDetails
+      summary: Retrieve details of a specific virtual machine
+      parameters:
+        - name: vmid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: VM details retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Invalid input
+        "404":
+          description: VM not found
+        "500":
+          description: Unexpected error occurred
+
+  /vms/{vmid}/return:
+    post:
+      operationId: ReturnVm
+      summary: Return a virtual machine
+      parameters:
+        - name: vmid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Successfully returned VM
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Invalid input
+        "404":
+          description: VM not found or not checked out
+        "500":
+          description: Unexpected error occurred
+
+  /vms/{hostname}/release:
+    post:
+      operationId: ReleaseVm
+      summary: Release a virtual machine by Hostname
+      description: This endpoint releases a virtual machine identified by its Hostname.
+      parameters:
+        - name: hostname
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Successfully released VM
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Hostname:
+                    type: string
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        "500":
+          description: Failed to release VM
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+
+  /vms/released:
+    post:
+      operationId: ReturnReleasedVms
+      summary: Return all released virtual machines
+      responses:
+        "200":
+          description: Successfully returned released VMs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    VMID:
+                      type: integer
+                      description: The ID of the virtual machine
+                    Hostname:
+                      type: string
+                      description: The hostname of the virtual machine
+                    IPAddress:
+                      type: string
+                      description: The IP address of the virtual machine
+                    PowerState:
+                      type: string
+                      description: The power state of the virtual machine
+                    NetworkStatus:
+                      type: string
+                      description: The network status of the virtual machine
+                    VmStatus:
+                      type: string
+                      description: The status of the virtual machine
+                    LastUpdateDate:
+                      type: string
+                      format: date-time
+                      description: The last update date of the virtual machine
+        "500":
+          description: Unexpected error occurred
+
+  /vms/history:
+    post:
+      operationId: GetVmHistory
+      summary: Retrieve the history of virtual machines
+      requestBody:
+        description: The history retrieval criteria
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                startdate:
+                  type: string
+                  format: date
+                enddate:
+                  type: string
+                  format: date
+                limit:
+                  type: integer
+      responses:
+        "200":
+          description: VM history retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "400":
+          description: Invalid input
+        "404":
+          description: No history records found
+        "500":
+          description: Unexpected error occurred
+  
+  /scaling/rules/{ruleid}:
+    get:
+      operationId: GetScalingRuleDetails
+      summary: Retrieve details of a specific scaling rule
+      parameters:
+        - name: ruleid
+          in: path
+          required: true
+          schema:
+            type: integer
+            example: 1
+      responses:
+        "200":
+          description: Scaling rule details retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  RuleID:
+                    type: integer
+                  MinVMs:
+                    type: integer
+                  MaxVMs:
+                    type: integer
+                  ScaleUpRatio:
+                    type: number
+                    format: float
+                  ScaleUpIncrement:
+                    type: integer
+                  ScaleDownRatio:
+                    type: number
+                    format: float
+                  ScaleDownIncrement:
+                    type: integer
+                  LastChecked:
+                    type: string
+                    format: date-time
+        "400":
+          description: Invalid input
+        "404":
+          description: Scaling rule not found
+        "500":
+          description: Unexpected error occurred
+
+  /scaling/rules:
+    get:
+      operationId: GetScalingRules
+      summary: Retrieve all scaling rules
+      responses:
+        "200":
+          description: Scaling rules retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "404":
+          description: No scaling rules found
+        "500":
+          description: Unexpected error occurred
+  
+  /scaling/rules/create:
+    post:
+      operationId: CreateScalingRule
+      summary: Create a new scaling rule
+      requestBody:
+        description: The scaling rule details
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                minvms:
+                  type: integer
+                maxvms:
+                  type: integer
+                scaleupratio:
+                  type: number
+                  format: float
+                scaleupincrement:
+                  type: integer
+                scaledownratio:
+                  type: number
+                  format: float
+                scaledownincrement:
+                  type: integer
+      responses:
+        "201":
+          description: Successfully created scaling rule
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Invalid input
+        "500":
+          description: Failed to create scaling rule
+
+  /scaling/rules/{ruleid}/update:
+    post:
+      operationId: UpdateScalingRule
+      summary: Update a specific scaling rule
+      parameters:
+        - name: ruleid
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The ID of the scaling rule to update
+      requestBody:
+        description: The scaling rule update details
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                minvms:
+                  type: integer
+                  description: The minimum number of VMs. Use "null" if no change.
+                maxvms:
+                  type: integer
+                  description: The maximum number of VMs. Use "null" if no change.
+                scaleupratio:
+                  type: number
+                  format: float
+                  description: The ratio to scale up. Use "null" if no change.
+                scaleupincrement:
+                  type: integer
+                  description: The number of VMs to scale up. Use "null" if no change.
+                scaledownratio:
+                  type: number
+                  format: float
+                  description: The ratio to scale down. Use "null" if no change.
+                scaledownincrement:
+                  type: integer
+                  description: The number of VMs to scale down. Use "null" if no change.
+      responses:
+        "200":
+          description: Scaling rules updated successfully
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                type: string
+        "500":
+          description: Unexpected error occurred
+          content:
+            application/json:
+              schema:
+                type: string
+
+  /scaling/rules/{ruleid}/delete:
+    post:
+      operationId: DeleteScalingRule
+      summary: Delete a specific scaling rule
+      parameters:
+        - name: ruleid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Scaling rule deleted successfully
+          content:
+            application/json:
+              schema:
+                type: string
+        "404":
+          description: Scaling rule not found
+        "500":
+          description: Scaling rule deletion failed
+
+  /scaling/log:
+    post:
+      operationId: GetScalingActivityLog
+      summary: Retrieve the scaling activity log
+      requestBody:
+        description: The scaling activity log retrieval criteria
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                startdate:
+                  type: string
+                  format: date
+                enddate:
+                  type: string
+                  format: date
+                limit:
+                  type: integer
+      responses:
+        "200":
+          description: Successfully retrieved scaling activity log
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "400":
+          description: Invalid input
+        "404":
+          description: No log records found
+        "500":
+          description: Unexpected error occurred
+
+  /scaling/rules/history:
+    post:
+      operationId: GetVMScalingRulesHistory
+      summary: Retrieve the history of scaling rules
+      requestBody:
+        description: The history retrieval criteria
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                startdate:
+                  type: string
+                  format: date
+                enddate:
+                  type: string
+                  format: date
+                limit:
+                  type: integer
+      responses:
+        "200":
+          description: Scaling rule history retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "400":
+          description: Invalid input
+        "404":
+          description: No history records found
+        "500":
+          description: Unexpected error occurred
+  
+  /scaling/trigger:
+    post:
+      operationId: TriggerScalingLogic
+      summary: Trigger the scaling logic for virtual machines
+      description: |
+        This endpoint triggers the scaling logic for virtual machines based on predefined scaling rules.
+      responses:
+        "200":
+          description: Successfully triggered the scaling logic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  PoweredOnVMs:
+                    type: array
+                    description: List of VMs that were powered on
+                    items:
+                      type: string
+                  PoweredOffVMs:
+                    type: array
+                    description: List of VMs that were powered off
+                    items:
+                      type: string
+        "500":
+          description: Internal server error or failure to trigger scaling logic
