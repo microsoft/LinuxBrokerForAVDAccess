@@ -6,14 +6,15 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
 
-LOCK_FILE="/tmp/release-session.lock"
+LOCK_FILE="/tmp/release-session.lockfile"
 
 if [ -e "$LOCK_FILE" ]; then
     log "Another instance of the script is already running. Exiting."
     exit 1
+else
+    touch "$LOCK_FILE"
 fi
 
-touch "$LOCK_FILE"
 log "Script started, lock file created."
 
 trap "rm -f $LOCK_FILE; log 'Script exiting, lock file removed.'" EXIT INT TERM
@@ -58,12 +59,21 @@ release_vm() {
 
     local http_status=$(tail -n1 response.json)
 
-    if [ "$http_status" -eq 200 ]; then
+    local json_hostname=$(echo "$http_status" | jq -r '.Hostname')
+
+    if [ "$json_hostname" == "$hostname" ]; then
         log "INFO: Successfully released VM with Hostname: $hostname"
         cat response.json >> "$LOG_FILE"
     else
         log "ERROR: Failed to release VM with Hostname: $hostname (HTTP Status: $http_status)"
         cat response.json >> "$LOG_FILE"
+    fi
+
+    local xvnc_pid=$(ps h -C Xvnc -o pid,user | awk -v user="$username" '$2 == user {print $1}')
+    log "Xvnc PID for user $username: $xvnc_pid"
+    if [ -n "$xvnc_pid" ]; then
+        sudo kill -9 $xvnc_pid
+        log "Terminated Xvnc process $xvnc_pid for user $username."
     fi
 
     rm -f response.json
@@ -86,12 +96,6 @@ logoff_user() {
                 log "Logged off user $username session $session_id after 20 minutes delay."
             done
 
-            local xvnc_pid=$(ps h -C Xvnc -o pid,user | awk -v user="$username" '$2 == user {print $1}')
-            if [ -n "$xvnc_pid" ]; then
-                sudo kill -9 $xvnc_pid
-                log "Terminated Xvnc process $xvnc_pid for user $username."
-            fi
-
         else
             log "User $username is now logged in. Cancelling scheduled logoff."
         fi
@@ -111,13 +115,14 @@ while true; do
     cat $CURRENT_USERS_DETAILS | tee -a "$LOG_FILE"
 
     while IFS= read -r line; do
-        log "Processing line: $line"
         pid=$(echo $line | awk '{print $1}')
         username=$(echo $line | awk '{print $2}')
         start_time=$(echo $line | awk '{print $3}')
         status=$(echo $line | awk '{print $NF}' | xargs)
 
-        log "PID: $pid, Username: $username, Start Time: $start_time, Status: $status"
+        if ! [[ "$start_time" == *"START_TIME"* ]]; then
+            log "PID: $pid, Username: $username, Start Time: $start_time, Status: $status"
+        fi
 
         if [[ "$status" == *"disconnected"* ]]; then
             log "User $username is disconnected. Calling release_vm and scheduling logoff."
@@ -125,7 +130,13 @@ while true; do
             release_vm
 
             logoff_user "$username"
+
+            break
+        elif [[ "$status" == *"active"* ]]; then
+            log "User $username is active. No action to perform."
+            break
         fi
+
     done < "$CURRENT_USERS_DETAILS"
 
     > $CURRENT_USERS_DETAILS
