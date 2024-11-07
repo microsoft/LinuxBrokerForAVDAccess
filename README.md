@@ -1,24 +1,249 @@
-### Linux Broker for AVD Access
+# Linux Broker for Azure Virtual Desktop (AVD) Access
 
-Straigtforward solution designed to streamline and enhance the accessibility of Linux Virtual Machines (VMs) within the Azure Virtual Desktop (AVD) environment. Our custom-built connection broker system focuses on delivering a seamless, scalable, and secure access pathway for remote users to Linux desktops, leveraging the power and flexibility of AVD.
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-#### Features:
-- **Scalable Access**: Dynamically manage user connections to Linux VMs, ensuring optimal resource allocation and scalability to meet varying demand levels.
-- **Scalable Linux Machines**: Dynamicaly manage the number of available Linux VMs, for efficient resource allocation and cost management.
-- **Customized User Experience**: Tailored connection flows allow for a bespoke user experience, catering to specific needs and preferences while maintaining high performance and reliability.
-- **Enhanced Security**: Integrates with AVD's robust security framework to provide secure access channels, protecting your Linux environments and data at every touchpoint.
-- **Simplified Management**: A user-friendly management interface allows for easy setup, monitoring, and maintenance of Linux VM connections, reducing administrative overhead.
-- **AVD Integration**: Seamlessly integrates with Azure Virtual Desktop, allowing users to benefit from the full range of AVD features while accessing Linux resources.
+## Purpose
 
-#### Ideal For:
-- Organizations leveraging Azure Cloud services looking to provide their workforce with remote access to Linux desktops.
-- Teams requiring a scalable, secure, and efficient way to manage Linux VMs in a virtual desktop environment.
-- Cloud architects and system administrators seeking a customizable solution to enhance their AVD deployment with Linux access capabilities.
+The **Linux Broker for AVD Access** is a solution designed to manage and broker user access to Linux hosts via Azure Virtual Desktop (AVD). It provides a scalable and efficient way to connect users to Linux virtual machines (VMs) using either Remote Desktop Protocol (RDP) for full desktop experiences or XRPA (X Remote Application) for virtualized applications.
 
-#### Getting Started:
-To get started with, check out our documentation for setup instructions, usage guides, and best practices. Whether you're setting up a new AVD environment or integrating Linux access into your existing infrastructure, our solution provides the tools and flexibility you need to succeed.
+This solution leverages Azure services such as managed identities, security groups, Azure App Service, Azure Functions, and Azure SQL Database to provide secure and efficient brokering, session management, and scaling of Linux hosts.
 
-#### Contribution:
-We believe in the power of community-driven development and encourage contributions to make the solution even better. Whether it's reporting issues, suggesting features, or contributing code, your input is invaluable to us.
+## Architecture Description
 
-Welcome! This repo is your bridge to seamless, scalable, and secure Linux access within Azure Virtual Desktop.
+The solution consists of the following components:
+
+- **Azure Virtual Desktop (AVD)**: Provides the interface for users to access Linux hosts. Users can connect via the AVD web client or any supported AVD client.
+
+- **Broker Agent (`Connect-LinuxBroker.ps1`)**: A PowerShell script running on each AVD host that acts as an agent to broker connections to Linux hosts. It connects to the Broker API using managed identity to check out a Linux VM and initiate the appropriate connection (RDP or XRPA).
+
+- **Linux Hosts Cluster**: A set of Linux VMs that users connect to. Each Linux host has managed identity enabled and runs a Session Release Agent.
+
+- **Session Release Agent**: A cron job running on each Linux host that checks for disconnected user sessions (both XRDP and XRPA) and initiates a 20-minute logoff process, releasing the VM for other users while allowing the disconnected user to reconnect within that time frame.
+
+- **Broker API**: A RESTful API running on Azure App Service that handles interactions between the Broker Agent, Session Release Agent, and the Broker Database. It uses managed identities and Azure Key Vault for secure access to resources.
+
+- **Broker Database**: An Azure SQL Database that stores information about virtual machines, scaling rules, and scaling activity. It includes the following tables:
+  - `virtual_machines`: Stores information about Linux VMs, including hostname, IP address, power state, network status, VM status, connected username, AVD host, and VM ID.
+  - `vm_scaling_rules`: Stores scaling rules for the Linux host cluster.
+  - `vm_scaling_activity`: Logs scaling activities such as VMs being turned on or off.
+
+- **Azure Function for Scaling Tasks**: An Azure Function that runs on a schedule to manage scaling of Linux hosts based on the scaling rules. It updates VM network statuses, turns VMs on or off, and performs health checks on the Linux hosts.
+
+- **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as adding/deleting VMs, checking out VMs, releasing/returning VMs, modifying VM statuses, and viewing logs.
+
+- **Azure Key Vault**: Stores sensitive information such as SSH keys and database passwords, accessed securely by the Broker API using managed identity.
+
+- **Managed Identities and Security Groups**: Used throughout the solution to securely authenticate and authorize different components. AVD hosts and Linux hosts have managed identities and are members of respective security groups.
+
+The architecture ensures secure, efficient, and scalable management of Linux host access via AVD.
+
+![Architecture Diagram](images/architecture.jpg)
+
+## List of Services
+
+- **Azure Virtual Desktop (AVD)**: Provides virtual desktop infrastructure.
+- **Broker Agent (`Connect-LinuxBroker.ps1`)**: PowerShell script acting as an agent on AVD hosts.
+- **Linux Hosts Cluster**: The set of Linux VMs users connect to.
+- **Session Release Agent**: Cron job on Linux hosts for session management.
+- **Broker API**: RESTful API for brokering connections and managing VMs.
+- **Broker Database**: Azure SQL Database for storing VM and scaling data.
+- **Azure Function for Scaling Tasks**: Manages scaling of Linux hosts.
+- **Service Management Portal**: Front-end application for administrators.
+- **Azure Key Vault**: Secure storage for SSH keys and passwords.
+- **Managed Identities**: Used for secure authentication between components.
+- **Security Groups**: Controls access permissions for managed identities.
+
+## User Workflow
+
+1. **User Logs into AVD**: The user accesses the AVD web client or any supported client.
+2. **Selects Linux Host Connection**: The user selects a desktop icon for full RDP session or an application for XRPA session.
+3. **Broker Agent Initiates Connection**:
+   - The Broker Agent script (`Connect-LinuxBroker.ps1`) connects to the Broker API using the AVD host's managed identity.
+   - It checks out an available Linux VM for the user.
+   - The user's ID is added to the Linux host with a unique 25-character password.
+   - The user is added to appropriate user groups on the Linux host for RDP or XRPA access.
+4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP or XRPA and can work as needed.
+5. **Session Management**:
+   - If the user disconnects or logs off, the Session Release Agent on the Linux host detects the disconnected session.
+   - A 20-minute timer is initiated to allow the user to reconnect.
+   - If the user reconnects within 20 minutes, they resume their session.
+   - If not, the user's account is removed from the Linux host, and the VM is made available for other users.
+
+## Admin Workflow
+
+1. **Access Service Management Portal**: Admins log into the front-end portal.
+2. **Manage VMs**:
+   - **Add VMs**: Register new Linux VMs into the system.
+   - **Delete VMs**: Remove VMs from the system.
+   - **Update VM Attributes**: Modify VM statuses (e.g., set to maintenance).
+3. **Manage Scaling Rules**:
+   - **Create/Update/Delete Scaling Rules**: Adjust scaling rules to control the minimum and maximum number of VMs, scale-up/down ratios, and increments.
+4. **Monitor System**:
+   - **View VM Details**: Access detailed information about VMs.
+   - **View Scaling Activity Logs**: Monitor scaling activities and history.
+   - **View VM History**: Track the usage and status changes of VMs.
+
+## RBAC Permissions
+
+The solution uses Role-Based Access Control (RBAC) to secure access:
+
+- **Management Portal Admins**:
+  - **Roles**: `User` and `FullAccess` on the Broker API.
+  - **Permissions**: Access to the management portal and ability to manage VMs and scaling rules.
+- **Broker Agent (AVD Hosts)**:
+  - **Role**: `AVDHost` on the Broker API.
+  - **Permissions**: Access to the `checkout` API endpoint.
+  - **Requirements**: Must be using managed identity and be a member of the `LinuxBroker-AVDHost-VMs` security group.
+- **Session Release Agent (Linux Hosts)**:
+  - **Role**: `LinuxHost` on the Broker API.
+  - **Permissions**: Access to release VMs and update statuses.
+  - **Requirements**: Managed identity and membership in `LinuxBroker-LinuxHost-VMs` security group.
+- **Azure Function (Scaling Tasks)**:
+  - **Role**: `ScheduledTask` on the Broker API.
+  - **Permissions**: Access to APIs for getting VMs, updating attributes, releasing VMs, and triggering scaling.
+- **Broker API**:
+  - **Permissions**: Has API permissions to Microsoft Graph for directory and group read access to validate managed identities and security group memberships.
+- **Managed Identities**:
+  - **AVD Hosts and Linux Hosts**: Each has a managed identity used for authentication.
+  - **Security Groups**: Managed identities are added to respective security groups to control API access.
+
+## Repository Structure
+
+```
+LinuxBrokerForAVDAccess/
+├── api/
+│   ├── .env
+│   ├── app.py
+│   ├── config.py
+│   ├── env.example
+│   └── requirements.txt
+├── artifacts/
+│   └── architecture.vsdx
+├── avd_host/
+│   └── broker/
+│       └── Connect-LinuxBroker.ps1
+├── custom_script_extensions/
+│   ├── Configure-AVD-Host.ps1
+│   ├── Configure-RHEL7-Host.sh
+│   ├── Configure-RHEL8-Host.sh
+│   └── Configure-RHEL9-Host.sh
+├── front_end/
+│   ├── static/
+│   │   ├── bootstrap/
+│   │   │   ├── css/
+│   │   │   │   └── bootstrap-grid.css
+│   │   │   └── js/
+│   │   │       └── bootstrap.bundle.js
+│   │   ├── images/
+│   │   │   └── azure-icon.svg
+│   │   └── favicon.ico
+│   ├── templates/
+│   │   ├── scaling/
+│   │   │   ├── create_rule.html
+│   │   │   ├── delete_rule.html
+│   │   │   ├── scaling_activity_log.html
+│   │   │   ├── scaling_rules_history.html
+│   │   │   ├── update_rule.html
+│   │   │   ├── view_all_rules.html
+│   │   │   └── view_rule_details.html
+│   │   ├── vm/
+│   │   │   ├── add_vm.html
+│   │   │   ├── checkout_vm.html
+│   │   │   ├── delete_vm.html
+│   │   │   ├── release_vm.html
+│   │   │   ├── return_vm.html
+│   │   │   ├── update_vm_attributes.html
+│   │   │   ├── view_all_vms.html
+│   │   │   ├── view_vm_details.html
+│   │   │   └── vm_history.html
+│   │   ├── base.html
+│   │   ├── index.html
+│   │   └── profile.html
+│   ├── .env
+│   ├── app.py
+│   ├── config.py
+│   ├── env.example
+│   ├── function_authentication.py
+│   ├── requirements.txt
+│   ├── route_authentication.py
+│   ├── route_scaling_management.py
+│   ├── route_user.py
+│   └── route_vm_management.py
+├── images/
+│   ├── architecture.jpg
+│   └── icon-rhel.png
+├── linux_host/
+│   └── session_release_buffer/
+│       ├── release-session.sh
+│       └── xrdp-who-xnc.sh
+├── sql_queries/
+│   ├── 001_create_table-vm_scaling_rules.sql
+│   ├── 002_create_table-vm_scaling_activity_log.sql
+│   ├── 003_create_table-virtual_machines.sql
+│   ├── 004_add_user-managed_identity.sql
+│   ├── 005_create_procedure-CheckoutVm.sql
+│   ├── 006_create_procedure-DeleteVm.sql
+│   ├── 007_create_procedure-AddVm.sql
+│   ├── 008_create_procedure-GetVmDetails.sql
+│   ├── 009_create_procedure-ReturnVm.sql
+│   ├── 010_create_procedure-GetScalingRules.sql
+│   ├── 011_create_procedure-UpdateScalingRule.sql
+│   ├── 012_create_procedure-TriggerScalingLogic.sql
+│   ├── 013_create_procedure-GetScalingActivityLog.sql
+│   ├── 014_create_procedure-GetVms.sql
+│   ├── 015_create_procedure-CreateScalingRule.sql
+│   ├── 016_create_procedure-ReleaseVm.sql
+│   ├── 017_create_procedure-UpdateVmAttributes.sql
+│   ├── 018_create_procedure-ReturnReleasedVms.sql
+│   ├── 019_create_procedure-DeleteScalingRule.sql
+│   ├── 020_create_procedure-GetVmHistory.sql
+│   ├── 021_create_procedure-GetVmScalingRulesHistory.sql
+│   ├── 022_create_procedure-GetScalingRuleDetails.sql
+│   └── 023_create_procedure-GetDeletedVirtualMachines.sql
+├── task/
+│   ├── function_app.py
+│   ├── host.json
+│   ├── local.settings.json
+│   └── requirements.txt
+├── CODE_OF_CONDUCT.md
+├── LICENSE
+├── README.md
+├── SECURITY.md
+└── SUPPORT.md
+```
+
+## Additional Details
+
+### Scaling Rules
+
+- **Minimum VMs Running**: The minimum number of Linux VMs to keep powered on.
+- **Maximum VMs Running**: The maximum number of Linux VMs allowed to be powered on.
+- **Scale-Up Ratio**: The ratio of used VMs to total VMs at which the system should scale up (e.g., when 80% of VMs are in use).
+- **Scale-Up Increment**: The number of VMs to add when scaling up.
+- **Scale-Down Ratio**: The ratio at which to scale down the number of running VMs (e.g., when usage drops below 30%).
+- **Scale-Down Increment**: The number of VMs to remove when scaling down.
+
+### Session Release Mechanism
+
+- **Session Monitoring**: The Session Release Agent monitors user sessions for disconnections.
+- **Release State**: When a session is disconnected, the VM enters a 'released' state, allowing the user to reconnect within 20 minutes.
+- **Session Termination**: If the user does not reconnect within the 20-minute window, their account is removed from the Linux host, and the VM becomes available for other users.
+
+### Security and Authentication
+
+- **Managed Identities**: Used for secure authentication between Azure resources without storing credentials.
+- **Azure Key Vault**: Stores SSH keys and database passwords securely, accessed via managed identities.
+- **API Permissions**: Specific API permissions are granted to components to restrict access based on roles.
+- **Logging and Monitoring**: All activities are logged to Azure Application Insights and Log Analytics Workspace.
+
+## Getting Started
+
+*(Instructions on deployment, configuration, and usage will be provided here.)*
+
+## Contributing
+
+Contributions are welcome! Please read the [CONTRIBUTING](CONTRIBUTING.md) guidelines for more information.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

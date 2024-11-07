@@ -1,4 +1,9 @@
 #!/bin/bash
+
+# Forked from Evanlinde github repository
+# https://github.com/evanlinde/xrdp-who
+# Continues use of the MIT license
+
 #
 # Print info about xrdp Xvnc sessions
 #

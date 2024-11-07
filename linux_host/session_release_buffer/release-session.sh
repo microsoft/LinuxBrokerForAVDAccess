@@ -18,18 +18,18 @@ log "Script started, lock file created."
 
 trap "rm -f $LOCK_FILE; log 'Script exiting, lock file removed.'" EXIT INT TERM
 
-SCRIPT_PATH_TO_CHECK_XRDP_USERS_INFO="xrdp-who-xnc.sh"
-CURRENT_USERS_DETAILS="xrdp-loggedin-users.txt"
+LOCATION_PATH="/usr/local/bin"
+SCRIPT_PATH_TO_CHECK_XRDP_USERS_INFO="$LOCATION_PATH/xrdp-who-xnc.sh"
+CURRENT_USERS_DETAILS="$LOCATION_PATH/xrdp-loggedin-users.txt"
 
 hostname=$(hostname)
 
 get_access_token() {
-    local resource=$1
+    local resource="api://YOUR_LINUX_BROKER_API_CLIENT_ID"
     local imds_endpoint="http://169.254.169.254/metadata/identity/oauth2/token"
     local api_version="2018-02-01"
     local uri="$imds_endpoint?api-version=$api_version&resource=$resource"
 
-    log "Obtaining access token for resource: $resource"
     local headers="Metadata:true"
     local access_token=$(curl -s --header "$headers" "$uri" | jq -r '.access_token')
 
@@ -38,15 +38,14 @@ get_access_token() {
         exit 1
     fi
 
-    log "Access token obtained successfully."
     echo "$access_token"
 }
 
 release_vm() {
-    local api_base_url="https://linuxbroker-api2.azurewebsites.net/api"
+    local api_base_url="https://YOUR_LINUX_BROKER_API_URL/api"
     local release_vm_url="$api_base_url/vms/$hostname/release"
 
-    local access_token=$(get_access_token "api://4c1b2eb9-92bd-49c4-bee2-c007f1908d96")
+    local access_token=$(get_access_token)
 
     if [ -z "$access_token" ]; then
         log "ERROR: Unable to obtain access token."
@@ -86,6 +85,13 @@ logoff_user() {
                 loginctl terminate-session $session_id
                 log "Logged off user $username session $session_id after 20 minutes delay."
             done
+
+            local xvnc_pid=$(ps h -C Xvnc -o pid,user | awk -v user="$username" '$2 == user {print $1}')
+            if [ -n "$xvnc_pid" ]; then
+                sudo kill -9 $xvnc_pid
+                log "Terminated Xvnc process $xvnc_pid for user $username."
+            fi
+
         else
             log "User $username is now logged in. Cancelling scheduled logoff."
         fi
@@ -101,10 +107,19 @@ while true; do
         continue
     fi
 
-    while IFS=, read -r pid username start_time status; do
-        status=$(echo $status | xargs)
+    log "Contents of $CURRENT_USERS_DETAILS:"
+    cat $CURRENT_USERS_DETAILS | tee -a "$LOG_FILE"
 
-        if [[ "$status" == "disconnected" ]]; then
+    while IFS= read -r line; do
+        log "Processing line: $line"
+        pid=$(echo $line | awk '{print $1}')
+        username=$(echo $line | awk '{print $2}')
+        start_time=$(echo $line | awk '{print $3}')
+        status=$(echo $line | awk '{print $NF}' | xargs)
+
+        log "PID: $pid, Username: $username, Start Time: $start_time, Status: $status"
+
+        if [[ "$status" == *"disconnected"* ]]; then
             log "User $username is disconnected. Calling release_vm and scheduling logoff."
             
             release_vm
@@ -113,6 +128,9 @@ while true; do
         fi
     done < "$CURRENT_USERS_DETAILS"
 
+    > $CURRENT_USERS_DETAILS
+
     log "Sleeping for 60 seconds before next check."
     sleep 60
 done
+
