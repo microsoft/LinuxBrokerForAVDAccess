@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Set PATH variable
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 LOG_FILE="/var/log/release-session.log"
 LOCK_FILE="/tmp/release-session.lockfile"
 LOCATION_PATH="/usr/local/bin"
@@ -19,9 +22,8 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - [$RUN_MODE] - $1" | tee -a "$LOG_FILE"
 }
 
-# Use flock for locking
 exec 200>"$LOCK_FILE"
-if ! flock -n 200; then
+if ! /usr/bin/flock -n 200; then
     log "Another instance of the script is already running. Exiting."
     exit 1
 fi
@@ -37,7 +39,7 @@ get_access_token() {
     local uri="$imds_endpoint?api-version=$api_version&resource=$resource"
 
     local headers="Metadata:true"
-    local access_token=$(curl -s --header "$headers" "$uri" | jq -r '.access_token')
+    local access_token=$(/usr/bin/curl -s --header "$headers" "$uri" | /usr/bin/jq -r '.access_token')
 
     if [ "$access_token" == "null" ]; then
         log "ERROR: Failed to obtain access token."
@@ -57,12 +59,12 @@ release_vm() {
         exit 1
     fi
 
-    local response=$(curl -s -w "%{http_code}" -o response.json -X POST "$release_vm_url" \
+    local response=$(/usr/bin/curl -s -w "%{http_code}" -o response.json -X POST "$release_vm_url" \
         -H "Authorization: Bearer $access_token" \
         -H "Content-Type: application/json")
 
     local http_status=$(tail -n1 response.json)
-    local json_hostname=$(echo "$http_status" | jq -r '.Hostname')
+    local json_hostname=$(echo "$http_status" | /usr/bin/jq -r '.Hostname')
 
     if [ "$json_hostname" == "$hostname" ]; then
         log "INFO: Successfully released VM with Hostname: $hostname"
