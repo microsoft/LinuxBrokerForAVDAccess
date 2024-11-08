@@ -11,22 +11,20 @@ CURRENT_USERS_DETAILS="$LOCATION_PATH/xrdp-loggedin-users.txt"
 PREVIOUS_USERS_FILE="/tmp/previous_users.txt"
 hostname=$(hostname)
 
-parent_cmd=$(ps -p $PPID -o cmd=)
-if echo "$parent_cmd" | grep -q "cron"; then
-    RUN_MODE="cron"
-else
-    RUN_MODE="manual"
-fi
+# Default run mode
+RUN_MODE="manual"
+
+# Check for '--cron' argument
+for arg in "$@"; do
+    if [ "$arg" == "--cron" ]; then
+        RUN_MODE="cron"
+        break
+    fi
+done
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - [$RUN_MODE] - $1" | tee -a "$LOG_FILE"
 }
-
-exec 200>"$LOCK_FILE"
-if ! /usr/bin/flock -n 200; then
-    log "Another instance of the script is already running. Exiting."
-    exit 1
-fi
 
 log "Script started, lock acquired."
 
@@ -77,7 +75,7 @@ release_vm() {
     local xvnc_pid=$(ps h -C Xvnc -o pid,user | awk -v user="$username" '$2 == user {print $1}')
     log "Xvnc PID for user $username: $xvnc_pid"
     if [ -n "$xvnc_pid" ]; then
-        sudo kill -9 $xvnc_pid
+        kill -9 $xvnc_pid
         log "Terminated Xvnc process $xvnc_pid for user $username."
     fi
 
