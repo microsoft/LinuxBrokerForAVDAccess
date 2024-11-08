@@ -8,20 +8,27 @@ CURRENT_USERS_DETAILS="$LOCATION_PATH/xrdp-loggedin-users.txt"
 PREVIOUS_USERS_FILE="/tmp/previous_users.txt"
 hostname=$(hostname)
 
-log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
-}
-
-if [ -e "$LOCK_FILE" ]; then
-    log "Another instance of the script is already running. Exiting."
-    exit 1
+parent_cmd=$(ps -p $PPID -o cmd=)
+if echo "$parent_cmd" | grep -q "cron"; then
+    RUN_MODE="cron"
 else
-    touch "$LOCK_FILE"
+    RUN_MODE="manual"
 fi
 
-log "Script started, lock file created."
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - [$RUN_MODE] - $1" | tee -a "$LOG_FILE"
+}
 
-trap "rm -f $LOCK_FILE; log 'Script exiting, lock file removed.'" EXIT INT TERM
+# Use flock for locking
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    log "Another instance of the script is already running. Exiting."
+    exit 1
+fi
+
+log "Script started, lock acquired."
+
+trap "log 'Script exiting.'" EXIT INT TERM
 
 get_access_token() {
     local resource="api://YOUR_LINUX_BROKER_API_CLIENT_ID"
@@ -119,7 +126,7 @@ while true; do
         status=$(echo $line | awk '{print $NF}' | xargs)
         current_users+=("$username")
 
-        if ! [[ "$start_time" == *"START_TIME"* ]]; then
+        if ! [[ -z "$start_time" || "$start_time" == *"START_TIME"* ]]; then
             log "PID: $pid, Username: $username, Start Time: $start_time, Status: $status"
         fi
 
@@ -127,6 +134,9 @@ while true; do
             log "User $username is disconnected. Calling release_vm and scheduling logoff."
             release_vm
             logoff_user "$username"
+
+            current_users=("${current_users[@]/$username}")
+            
             break
         elif [[ "$status" == *"active"* ]]; then
             log "User $username is active. No action to perform."

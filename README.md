@@ -37,7 +37,7 @@ The solution consists of the following components:
 
 The architecture ensures secure, efficient, and scalable management of Linux host access via AVD.
 
-![Architecture Diagram](images/architecture.jpg)
+![Architecture](images/architecture.png)
 
 ## List of Services
 
@@ -107,110 +107,11 @@ The solution uses Role-Based Access Control (RBAC) to secure access:
   - **AVD Hosts and Linux Hosts**: Each has a managed identity used for authentication.
   - **Security Groups**: Managed identities are added to respective security groups to control API access.
 
-## Repository Structure
+![RBAC](images/rbac.png)
 
-```
-LinuxBrokerForAVDAccess/
-├── api/
-│   ├── .env
-│   ├── app.py
-│   ├── config.py
-│   ├── env.example
-│   └── requirements.txt
-├── artifacts/
-│   └── architecture.vsdx
-├── avd_host/
-│   └── broker/
-│       └── Connect-LinuxBroker.ps1
-├── custom_script_extensions/
-│   ├── Configure-AVD-Host.ps1
-│   ├── Configure-RHEL7-Host.sh
-│   ├── Configure-RHEL8-Host.sh
-│   └── Configure-RHEL9-Host.sh
-├── front_end/
-│   ├── static/
-│   │   ├── bootstrap/
-│   │   │   ├── css/
-│   │   │   │   └── bootstrap-grid.css
-│   │   │   └── js/
-│   │   │       └── bootstrap.bundle.js
-│   │   ├── images/
-│   │   │   └── azure-icon.svg
-│   │   └── favicon.ico
-│   ├── templates/
-│   │   ├── scaling/
-│   │   │   ├── create_rule.html
-│   │   │   ├── delete_rule.html
-│   │   │   ├── scaling_activity_log.html
-│   │   │   ├── scaling_rules_history.html
-│   │   │   ├── update_rule.html
-│   │   │   ├── view_all_rules.html
-│   │   │   └── view_rule_details.html
-│   │   ├── vm/
-│   │   │   ├── add_vm.html
-│   │   │   ├── checkout_vm.html
-│   │   │   ├── delete_vm.html
-│   │   │   ├── release_vm.html
-│   │   │   ├── return_vm.html
-│   │   │   ├── update_vm_attributes.html
-│   │   │   ├── view_all_vms.html
-│   │   │   ├── view_vm_details.html
-│   │   │   └── vm_history.html
-│   │   ├── base.html
-│   │   ├── index.html
-│   │   └── profile.html
-│   ├── .env
-│   ├── app.py
-│   ├── config.py
-│   ├── env.example
-│   ├── function_authentication.py
-│   ├── requirements.txt
-│   ├── route_authentication.py
-│   ├── route_scaling_management.py
-│   ├── route_user.py
-│   └── route_vm_management.py
-├── images/
-│   ├── architecture.jpg
-│   └── icon-rhel.png
-├── linux_host/
-│   └── session_release_buffer/
-│       ├── release-session.sh
-│       └── xrdp-who-xnc.sh
-├── sql_queries/
-│   ├── 001_create_table-vm_scaling_rules.sql
-│   ├── 002_create_table-vm_scaling_activity_log.sql
-│   ├── 003_create_table-virtual_machines.sql
-│   ├── 004_add_user-managed_identity.sql
-│   ├── 005_create_procedure-CheckoutVm.sql
-│   ├── 006_create_procedure-DeleteVm.sql
-│   ├── 007_create_procedure-AddVm.sql
-│   ├── 008_create_procedure-GetVmDetails.sql
-│   ├── 009_create_procedure-ReturnVm.sql
-│   ├── 010_create_procedure-GetScalingRules.sql
-│   ├── 011_create_procedure-UpdateScalingRule.sql
-│   ├── 012_create_procedure-TriggerScalingLogic.sql
-│   ├── 013_create_procedure-GetScalingActivityLog.sql
-│   ├── 014_create_procedure-GetVms.sql
-│   ├── 015_create_procedure-CreateScalingRule.sql
-│   ├── 016_create_procedure-ReleaseVm.sql
-│   ├── 017_create_procedure-UpdateVmAttributes.sql
-│   ├── 018_create_procedure-ReturnReleasedVms.sql
-│   ├── 019_create_procedure-DeleteScalingRule.sql
-│   ├── 020_create_procedure-GetVmHistory.sql
-│   ├── 021_create_procedure-GetVmScalingRulesHistory.sql
-│   ├── 022_create_procedure-GetScalingRuleDetails.sql
-│   └── 023_create_procedure-GetDeletedVirtualMachines.sql
-├── task/
-│   ├── function_app.py
-│   ├── host.json
-│   ├── local.settings.json
-│   └── requirements.txt
-├── CODE_OF_CONDUCT.md
-├── LICENSE
-├── README.md
-├── SECURITY.md
-└── SUPPORT.md
-```
+## Database Setup
+
+The database component is essential for storing VM information, scaling rules, and activity logs. For detailed instructions on setting up the Azure SQL Database and deploying the stored procedures, please refer to the [Database Setup Documentation](sql_queries/README.md).
 
 ## Additional Details
 
@@ -239,6 +140,8 @@ LinuxBrokerForAVDAccess/
 ## Getting Started
 
 *(Instructions on deployment, configuration, and usage will be provided here.)*
+
+While we work on more detailed instructions, you can deploy the web apps from VS Code or running az web deploy. You can deploy function using VS Code. To support managed identity versus using SAS keys, there are a number of permissions that must be applied, please use the RBAC section to facility implementing them. We will release detailed instructions with video guidance over the coming weeks.
 
 ## Contributing
 
