@@ -22,13 +22,14 @@ function Write-Log {
         [ValidateSet("INFO", "WARNING", "ERROR")]
         [string]$Level = "INFO"
     )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    
     try {
-        Write-Host "[$timestamp][$Level] $Message"
+        #$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        #Write-Host "[$timestamp][$Level] $Message"
         Write-EventLog -LogName $logName -Source $sourceName -EntryType $Level -EventId 1 -Message $Message
     }
     catch {
-        Write-Host "Failed to write to event log: $_"
+        #Write-Host "Failed to write to event log: $_"
     }
 }
 
@@ -47,9 +48,9 @@ function Get-AccessToken {
     }
 
     try {
-        #Write-Log "Requesting access token for resource: $Resource" "INFO"
+        Write-Log "Requesting access token for resource: $Resource" "INFO"
         $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers
-        #Write-Log "Access token obtained successfully." "INFO"
+        Write-Log "Access token obtained successfully." "INFO"
         return $response.access_token
     }
     catch {
@@ -77,7 +78,7 @@ $authHeader = @{
 # Attempt to get an available VM or a checked-out VM
 while ($attemptCount -lt $maxAttempts) {
     $attemptCount++
-    #Write-Log "Attempt $attemptCount of $maxAttempts Checking for an available or already checked-out VM..." "INFO"
+    Write-Log "Attempt $attemptCount of $maxAttempts Checking for an available or already checked-out VM..." "INFO"
 
     try {
         # Prepare the payload
@@ -87,17 +88,15 @@ while ($attemptCount -lt $maxAttempts) {
         }
 
         # Invoke the API to checkout a VM with authentication
-        #Write-Log "Attempting to checkout a VM via API with Managed Identity authentication..." "INFO"
+        Write-Log "Attempting to checkout a VM via API with Managed Identity authentication..." "INFO"
         $checkoutResponse = Invoke-RestMethod -Uri $checkoutVmUrl -Method POST `
             -ContentType "application/json" `
             -Body ($checkoutPayload | ConvertTo-Json) `
             -Headers $authHeader
-
-        write-host $checkoutResponse
         
         if ($checkoutResponse.VMID) {
             $hasExistingCheckedInVM = $true
-            #Write-Log "Successfully checked out or retrieved an existing VM (VMID: $($checkoutResponse.VMID), Hostname: $($checkoutResponse.Hostname))." "INFO"
+            Write-Log "Successfully checked out or retrieved an existing VM (VMID: $($checkoutResponse.VMID), Hostname: $($checkoutResponse.Hostname))." "INFO"
             break
         }
         else {
@@ -116,34 +115,34 @@ if ($hasExistingCheckedInVM -and $checkoutResponse.IPAddress) {
 
     # Store or update credentials in Credential Manager
     try {
-        #Write-Log "Updating Windows Credential Manager with credentials for $hostname..." "INFO"
+        Write-Log "Updating Windows Credential Manager with credentials for $hostname..." "INFO"
         
         # Delete all existing credentials in Credential Manager
-        #Write-Log "Deleting all existing credentials in Credential Manager..." "INFO"
+        Write-Log "Deleting all existing credentials in Credential Manager..." "INFO"
         
         cmdkey /list | ForEach-Object {
             if ($_ -match "Target: (.+)") {
                 $target = $matches[1]
                 cmdkey /delete:$target | Out-Null
-                #Write-Log "Deleted credential for $target" "INFO"
+                Write-Log "Deleted credential for $target" "INFO"
             }
         }
 
         New-StoredCredential -Target $hostname -UserName $localUsername -Password $checkoutResponse.password -Persist LocalMachine | Out-Null
         New-StoredCredential -Target $ipAddress -UserName $localUsername -Password $checkoutResponse.password -Persist LocalMachine | Out-Null
 
-        #Write-Log "Credentials for $hostname updated successfully in Credential Manager." "INFO"
+        Write-Log "Credentials for $hostname updated successfully in Credential Manager." "INFO"
     }
     catch {
         Write-Log "Failed to update credentials in Credential Manager: $_" "ERROR"
     }
 
-    #Write-Log "Connecting to $hostname (IP: $ipAddress) using Remote Desktop Connection..." "INFO"
+    Write-Log "Connecting to $hostname (IP: $ipAddress) using Remote Desktop Connection..." "INFO"
     try {
         # Launch mstsc with the hostname or IP address
         Start-Process mstsc.exe -ArgumentList "/v:$ipAddress"
 
-        #Write-Log "Successfully connected to $hostname (IP: $ipAddress) using Remote Desktop Connection." "INFO"
+        Write-Log "Successfully connected to $hostname (IP: $ipAddress) using Remote Desktop Connection." "INFO"
     }
     catch {
         Write-Log "Failed to connect to $hostname (IP: $ipAddress) using Remote Desktop Connection: $_" "ERROR"
