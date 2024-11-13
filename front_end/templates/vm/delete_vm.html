@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Delete VM{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>Delete Virtual Machine</h2>
+    <p>Are you sure you want to delete the following VM?</p>
+    <ul>
+        <li><strong>Hostname:</strong> {{ vm_details.hostname }}</li>
+        <li><strong>IP Address:</strong> {{ vm_details.ipaddress }}</li>
+        <li><strong>Power State:</strong> {{ vm_details.powerstate }}</li>
+        <li><strong>Network Status:</strong> {{ vm_details.networkstatus }}</li>
+        <li><strong>VM Status:</strong> {{ vm_details.vmstatus }}</li>
+        <li><strong>Username:</strong> {{ vm_details.username }}</li>
+        <li><strong>AVD Host:</strong> {{ vm_details.avdhost }}</li>
+        <li><strong>Description:</strong> {{ vm_details.description }}</li>
+    </ul>
+    <form action="{{ url_for('delete_vm', vmid=vm_details.vmid) }}" method="post">
+        <button type="submit" class="btn btn-danger">Delete VM</button>
+        <a href="{{ url_for('view_all_vms') }}" class="btn btn-secondary">Cancel</a>
+    </form>
+    
+    
+    
+</div>
+{% endblock %}

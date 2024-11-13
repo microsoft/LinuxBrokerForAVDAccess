@@ -1,0 +1,24 @@
+
+# Azure Functions artifacts
+bin
+obj
+appsettings.json
+local.settings.json
+
+# Azurite artifacts
+__blobstorage__
+__queuestorage__
+__azurite_db*__.json
+.python_packages
+__pycache__
+.venv
+
+# Azure App Service artifacts
+.env
+.pem
+
+# Configured custom script extensions, powershell scripts, and linux scripts
+priv-*
+
+# Visual Studio Code
+.vscode

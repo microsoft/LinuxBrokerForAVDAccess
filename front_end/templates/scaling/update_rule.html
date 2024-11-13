@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Update Scaling Rule{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>Update Scaling Rule</h2>
+    
+    <!-- Form to update an existing scaling rule -->
+    <form action="{{ url_for('update_rule', ruleid=rule.RuleID) }}" method="post">
+        <div class="form-group">
+            <label for="minVMs">Minimum VMs</label>
+            <input type="number" class="form-control" id="minVMs" name="minvms" value="{{ rule.MinVMs }}" required>
+        </div>
+        <div class="form-group">
+            <label for="maxVMs">Maximum VMs</label>
+            <input type="number" class="form-control" id="maxVMs" name="maxvms" value="{{ rule.MaxVMs }}" required>
+        </div>
+        <div class="form-group">
+            <label for="scaleUpRatio">Scale Up Ratio (%)</label>
+            <input type="number" step="0.01" class="form-control" id="scaleUpRatio" name="scaleupratio" value="{{ rule.ScaleUpRatio }}" required>
+        </div>
+        <div class="form-group">
+            <label for="scaleUpIncrement">Scale Up Increment</label>
+            <input type="number" class="form-control" id="scaleUpIncrement" name="scaleupincrement" value="{{ rule.ScaleUpIncrement }}" required>
+        </div>
+        <div class="form-group">
+            <label for="scaleDownRatio">Scale Down Ratio (%)</label>
+            <input type="number" step="0.01" class="form-control" id="scaleDownRatio" name="scaledownratio" value="{{ rule.ScaleDownRatio }}" required>
+        </div>
+        <div class="form-group">
+            <label for="scaleDownIncrement">Scale Down Increment</label>
+            <input type="number" class="form-control" id="scaleDownIncrement" name="scaledownincrement" value="{{ rule.ScaleDownIncrement }}" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Update Rule</button>
+        <a href="{{ url_for('view_rule_details', ruleid=rule.RuleID) }}" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock %}

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}Delete Scaling Rule{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>Delete Scaling Rule</h2>
+    
+    <div class="alert alert-warning">
+        <p>Are you sure you want to delete the following scaling rule?</p>
+    </div>
+    
+    <!-- Displaying the rule details -->
+    <div class="card">
+        <div class="card-body">
+            <h5 class="card-title">Rule ID: {{ rule['RuleID'] }}</h5>
+            <p class="card-text">
+                <strong>Minimum VMs:</strong> {{ rule['MinVMs'] }}<br>
+                <strong>Maximum VMs:</strong> {{ rule['MaxVMs'] }}<br>
+                <strong>Scale Up Ratio:</strong> {{ rule['ScaleUpRatio'] }}%<br>
+                <strong>Scale Up Increment:</strong> {{ rule['ScaleUpIncrement'] }}<br>
+                <strong>Scale Down Ratio:</strong> {{ rule['ScaleDownRatio'] }}%<br>
+                <strong>Scale Down Increment:</strong> {{ rule['ScaleDownIncrement'] }}
+            </p>
+        </div>
+    </div>
+
+    <!-- Form to confirm deletion -->
+    <form method="POST" action="{{ url_for('delete_rule', ruleid=rule['RuleID']) }}" class="mt-4">
+        <button type="submit" class="btn btn-danger">Delete Rule</button>
+        <a href="{{ url_for('view_all_rules') }}" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock %}

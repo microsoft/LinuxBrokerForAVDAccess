@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Scaling Rules{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>All Scaling Rules</h2>
+    
+    <!-- Action Buttons -->
+    <div class="mb-3">
+        <a href="{{ url_for('create_rule') }}" class="btn btn-success btn-sm">Add New Rule</a>
+        <a href="{{ url_for('scaling_activity_log') }}" class="btn btn-secondary btn-sm">View Scaling Activity Log</a>
+        <a href="{{ url_for('scaling_rules_history') }}" class="btn btn-info btn-sm">View Scaling Rules History</a>
+    </div>
+
+    <!-- Handle case where no rules are found -->
+    {% if rules|length == 0 %}
+    <div class="alert alert-info" role="alert">
+        No scaling rules found.
+    </div>
+    {% else %}
+    <!-- Table displaying all scaling rules -->
+    <table class="table table-striped table-hover table-bordered">
+        <thead class="thead-dark">
+            <tr>
+                <th scope="col">Rule ID</th>
+                <th scope="col">Min VMs</th>
+                <th scope="col">Max VMs</th>
+                <th scope="col">Scale Up Ratio (%)</th>
+                <th scope="col">Scale Up Increment</th>
+                <th scope="col">Scale Down Ratio (%)</th>
+                <th scope="col">Scale Down Increment</th>
+                <th scope="col">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for rule in rules %}
+            <tr>
+                <td>{{ rule['RuleID'] }}</td>
+                <td>{{ rule['MinVMs'] }}</td>
+                <td>{{ rule['MaxVMs'] }}</td>
+                <td>{{ rule['ScaleUpRatio'] }}</td>
+                <td>{{ rule['ScaleUpIncrement'] }}</td>
+                <td>{{ rule['ScaleDownRatio'] }}</td>
+                <td>{{ rule['ScaleDownIncrement'] }}</td>
+                <td>
+                    <a href="{{ url_for('view_rule_details', ruleid=rule['RuleID']) }}" class="btn btn-info btn-sm" aria-label="View details of rule {{ rule['RuleID'] }}">Details</a>
+                    <a href="{{ url_for('update_rule', ruleid=rule['RuleID']) }}" class="btn btn-warning btn-sm" aria-label="Edit rule {{ rule['RuleID'] }}">Edit</a>
+                    <form action="{{ url_for('delete_rule', ruleid=rule['RuleID']) }}" method="post" class="d-inline-block" onsubmit="return confirm('Are you sure you want to delete this rule?');">
+                        <button type="submit" class="btn btn-danger btn-sm" aria-label="Delete Rule {{ rule.RuleID }}">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+{% endblock %}

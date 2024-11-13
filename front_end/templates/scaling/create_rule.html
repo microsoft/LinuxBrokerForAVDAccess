@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Create Scaling Rule{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>Create New Scaling Rule</h2>
+    
+    <!-- Form to create a new scaling rule -->
+    <form method="POST" action="{{ url_for('create_rule') }}">
+        <div class="form-group">
+            <label for="minVMs">Minimum VMs</label>
+            <input type="number" class="form-control" id="minVMs" name="minvms" required>
+        </div>
+        <div class="form-group">
+            <label for="maxVMs">Maximum VMs</label>
+            <input type="number" class="form-control" id="maxVMs" name="maxvms" required>
+        </div>
+        <div class="form-group">
+            <label for="scaleUpRatio">Scale Up Ratio (%)</label>
+            <input type="number" step="0.01" class="form-control" id="scaleUpRatio" name="scaleupratio" required>
+        </div>
+        <div class="form-group">
+            <label for="scaleUpIncrement">Scale Up Increment</label>
+            <input type="number" class="form-control" id="scaleUpIncrement" name="scaleupincrement" required>
+        </div>
+        <div class="form-group">
+            <label for="scaleDownRatio">Scale Down Ratio (%)</label>
+            <input type="number" step="0.01" class="form-control" id="scaleDownRatio" name="scaledownratio" required>
+        </div>
+        <div class="form-group">
+            <label for="scaleDownIncrement">Scale Down Increment</label>
+            <input type="number" class="form-control" id="scaleDownIncrement" name="scaledownincrement" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Create Rule</button>
+        <a href="{{ url_for('view_all_rules') }}" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock %}

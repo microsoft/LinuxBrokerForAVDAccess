@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block title %}Checkout VM{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>Checkout Virtual Machine</h2>
+    <form action="{{ url_for('checkout_vm') }}" method="post">
+        <div class="form-group">
+            <label for="username">Username</label>
+            <input type="text" class="form-control" id="username" name="username" placeholder="Enter your username" required>
+        </div>
+
+        <div class="form-group">
+            <label for="avdhost">AVD Host</label>
+            <input type="text" class="form-control" id="avdhost" name="avdhost" placeholder="Enter the AVD host" required>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Checkout VM</button>
+        <a href="{{ url_for('view_all_vms') }}" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock %}

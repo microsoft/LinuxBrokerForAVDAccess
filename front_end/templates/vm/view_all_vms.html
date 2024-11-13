@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}View All VMs - Linux Broker Management Portal{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2>All Virtual Machines</h2>
+
+    <!-- Action Buttons -->
+    <div class="d-flex justify-content-between mb-3">
+        <div>
+            <a href="{{ url_for('add_vm') }}" class="btn btn-success btn-sm">Add New VM</a>
+            <a href="{{ url_for('vm_history') }}" class="btn btn-secondary btn-sm">View VM History</a>
+        </div>
+        <div>
+            <a href="{{ url_for('checkout_vm') }}" class="btn btn-dark btn-sm">Checkout VM</a>
+        </div>
+    </div>
+
+    <!-- Handle case where no VMs are found -->
+    {% if vms|length == 0 %}
+    <div class="alert alert-info" role="alert">
+        No virtual machines found.
+    </div>
+    {% else %}
+    <!-- Table to display VMs -->
+    <table class="table table-striped table-hover table-bordered">
+        <thead class="thead-dark">
+            <tr>
+                <th scope="col">VMID</th>
+                <th scope="col">Hostname</th>
+                <th scope="col">IPAddress</th>
+                <th scope="col">PowerState</th>
+                <th scope="col">NetworkStatus</th>
+                <th scope="col">VmStatus</th>
+                <th scope="col">Username</th>
+                <th scope="col">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for vm in vms %}
+            <tr>
+                <td>{{ vm.VMID }}</td>
+                <td>{{ vm.Hostname }}</td>
+                <td>{{ vm.IPAddress }}</td>
+                <td>{{ vm.PowerState }}</td>
+                <td>{{ vm.NetworkStatus }}</td>
+                <td>{{ vm.VmStatus }}</td>
+                <td>{{ vm.Username }}</td>
+                <td>
+                    <a href="{{ url_for('view_vm_details', vmid=vm.VMID) }}" class="btn btn-info btn-sm" aria-label="View details of VM {{ vm.VMID }}">Details</a>
+                    <a href="{{ url_for('update_vm_attributes', vmid=vm.VMID) }}" class="btn btn-warning btn-sm" aria-label="Edit VM {{ vm.VMID }}">Edit</a>
+                    <form action="{{ url_for('delete_vm', vmid=vm.VMID) }}" method="post" class="d-inline-block" onsubmit="return confirm('Are you sure you want to delete this VM?');">
+                        <button type="submit" class="btn btn-danger btn-sm" aria-label="Delete VM {{ vm.VMID }}">Delete</button>
+                    </form>                    
+                    <form action="{{ url_for('release_vm', hostname=vm.Hostname) }}" method="post" class="d-inline-block" onsubmit="return confirm('Are you sure you want to release this VM?');">
+                        <button type="submit" class="btn btn-secondary btn-sm" aria-label="Release VM {{ vm.Hostname }}">Release</button>
+                    </form>
+                    <form action="{{ url_for('return_vm', vmid=vm.VMID) }}" method="post" class="d-inline-block" onsubmit="return confirm('Are you sure you want to return this VM?');">
+                        <button type="submit" class="btn btn-primary btn-sm" aria-label="Return VM {{ vm.VMID }}">Return</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+{% endblock %}

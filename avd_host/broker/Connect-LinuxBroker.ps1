@@ -1,3 +1,8 @@
+param (
+    [Parameter(Mandatory = $false, HelpMessage = "Specify 'desktop' to use Remote Desktop, or provide the name of the application to run via xrpa.")]
+    [string]$Mode = "desktop"
+)
+
 $ProgressPreference = 'SilentlyContinue'
 
 # Automatically collect local Windows hostname and username
@@ -5,7 +10,7 @@ $localHostname = $env:COMPUTERNAME
 $localUsername = $env:USERNAME
 
 # Define the API endpoints
-$apiBaseUrl = "https://YOUR_LINUX_BROKER_API_URL/api"
+$apiBaseUrl = "https://your_linuxbroker_api_base_url/api"
 $checkoutVmUrl = "$apiBaseUrl/vms/checkout"
 
 # Define the maximum number of update attempts
@@ -60,7 +65,7 @@ function Get-AccessToken {
 }
 
 # Define the API's Application ID URI (use the updated valid URL)
-$apiAppIdUri = "api://YOUR_LINUX_BROKER_API_CLIENT_ID"  # Replace with your API's actual Application ID URI
+$apiAppIdUri = "api://your_linuxbroker_api_client_id"  # Replace with your API's actual Application ID URI
 
 # Obtain the access token using Managed Identity
 $accessToken = Get-AccessToken -Resource $apiAppIdUri
@@ -137,15 +142,26 @@ if ($hasExistingCheckedInVM -and $checkoutResponse.IPAddress) {
         Write-Log "Failed to update credentials in Credential Manager: $_" "ERROR"
     }
 
-    Write-Log "Connecting to $hostname (IP: $ipAddress) using Remote Desktop Connection..." "INFO"
-    try {
-        # Launch mstsc with the hostname or IP address
-        Start-Process mstsc.exe -ArgumentList "/v:$ipAddress"
+    if ($Mode -ieq "desktop") {
+        Write-Log "Connecting to $hostname (IP: $ipAddress) using Remote Desktop Connection..." "INFO"
+        try {
+            # Launch mstsc with the hostname or IP address
+            Start-Process mstsc.exe -ArgumentList "/v:$ipAddress"
 
-        Write-Log "Successfully connected to $hostname (IP: $ipAddress) using Remote Desktop Connection." "INFO"
+            Write-Log "Successfully connected to $hostname (IP: $ipAddress) using Remote Desktop Connection." "INFO"
+        }
+        catch {
+            Write-Log "Failed to connect to $hostname (IP: $ipAddress) using Remote Desktop Connection: $_" "ERROR"
+        }
     }
-    catch {
-        Write-Log "Failed to connect to $hostname (IP: $ipAddress) using Remote Desktop Connection: $_" "ERROR"
+    else {
+        Write-Log "Running xrpa command to launch application: $Mode" "INFO"
+        try {
+            # Add XRPA command
+        }
+        catch {
+            Write-Log "Failed to launch application '$Mode' using xrpa: $_" "ERROR"
+        }
     }
 }
 else {

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}Add New VM{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>Add New Virtual Machine</h2>
+    <form action="{{ url_for('add_vm') }}" method="post">
+        <div class="mb-3">
+            <label for="hostname" class="form-label">Hostname</label>
+            <input type="text" class="form-control" id="hostname" name="hostname" required>
+        </div>
+        <div class="mb-3">
+            <label for="ipaddress" class="form-label">IP Address</label>
+            <input type="text" class="form-control" id="ipaddress" name="ipaddress" required>
+        </div>
+        <div class="mb-3">
+            <label for="powerstate" class="form-label">Power State</label>
+            <select class="form-select" id="powerstate" name="powerstate" required>
+                <option value="On">On</option>
+                <option value="Off">Off</option>
+            </select>
+        </div>
+        <div class="mb-3">
+            <label for="networkstatus" class="form-label">Network Status</label>
+            <select class="form-select" id="networkstatus" name="networkstatus" required>
+                <option value="Reachable">Reachable</option>
+                <option value="Unreachable">Unreachable</option>
+            </select>
+        </div>
+        <div class="mb-3">
+            <label for="vmstatus" class="form-label">VM Status</label>
+            <select class="form-select" id="vmstatus" name="vmstatus" required>
+                <option value="Available">Available</option>
+                <option value="CheckedOut">Checked Out</option>
+                <option value="Maintenance">Maintenance</option>
+                <option value="Released">Released</option>
+            </select>
+        </div>
+        <div class="mb-3">
+            <label for="username" class="form-label">Username</label>
+            <input type="text" class="form-control" id="username" name="username">
+        </div>
+        <div class="mb-3">
+            <label for="avdhost" class="form-label">AVD Host</label>
+            <input type="text" class="form-control" id="avdhost" name="avdhost">
+        </div>
+        <div class="mb-3">
+            <label for="description" class="form-label">Description</label>
+            <textarea class="form-control" id="description" name="description" rows="3"></textarea>
+        </div>
+        <button type="submit" class="btn btn-primary">Add VM</button>
+        <a href="{{ url_for('view_all_vms') }}" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock %}

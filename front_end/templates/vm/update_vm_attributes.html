@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Update VM Attributes{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>Update VM Attributes</h2>
+    <form action="{{ url_for('update_vm_attributes', vmid=vm.VMID) }}" method="post">
+        <div class="form-group">
+            <label for="powerstate">Power State</label>
+            <select class="form-control" id="powerstate" name="powerstate" required>
+                <option value="On" {% if vm.PowerState == 'On' %}selected{% endif %}>On</option>
+                <option value="Off" {% if vm.PowerState == 'Off' %}selected{% endif %}>Off</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="networkstatus">Network Status</label>
+            <select class="form-control" id="networkstatus" name="networkstatus" required>
+                <option value="Reachable" {% if vm.NetworkStatus == 'Reachable' %}selected{% endif %}>Reachable</option>
+                <option value="Unreachable" {% if vm.NetworkStatus == 'Unreachable' %}selected{% endif %}>Unreachable</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="vmstatus">VM Status</label>
+            <select class="form-control" id="vmstatus" name="vmstatus" required>
+                <option value="Available" {% if vm.VmStatus == 'Available' %}selected{% endif %}>Available</option>
+                <option value="CheckedOut" {% if vm.VmStatus == 'CheckedOut' %}selected{% endif %}>Checked Out</option>
+                <option value="Maintenance" {% if vm.VmStatus == 'Maintenance' %}selected{% endif %}>Maintenance</option>
+                <option value="Released" {% if vm.VmStatus == 'Released' %}selected{% endif %}>Released</option>
+            </select>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Update VM</button>
+        <a href="{{ url_for('view_vm_details', vmid=vm.VMID) }}" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock %}

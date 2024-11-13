@@ -1,0 +1,12 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "DefaultEndpointsProtocol=https;AccountName=YOUR_STORAGE_ACCOUNT;AccountKey=YOUR_STORAGE_KEY;EndpointSuffix=core.windows.net",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsFeatureFlags": "EnableWorkerIndexing",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+    "API_CLIENT_ID": "your_linuxbroker_api_client_id",
+    "API_URL": "https://your_linuxbroker_api_base_url/api",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "InstrumentationKey=YOUR_INSTRUMENTATION_KEY;IngestionEndpoint=YOUR_INGESTION_ENDPOINT;LiveEndpoint=YOUR_LIVE_ENDPOINT;ApplicationId=YOUR_APPLICATION_ID"
+  }
+}

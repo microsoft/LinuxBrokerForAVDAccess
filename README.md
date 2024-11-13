@@ -8,6 +8,8 @@ The **Linux Broker for AVD Access** is a solution designed to manage and broker 
 
 This solution leverages Azure services such as managed identities, security groups, Azure App Service, Azure Functions, and Azure SQL Database to provide secure and efficient brokering, session management, and scaling of Linux hosts.
 
+https://github.com/user-attachments/assets/46dcf413-a54c-4512-ac04-08dfc8d3a2d4
+
 ## Architecture Description
 
 The solution consists of the following components:
@@ -113,6 +115,31 @@ The solution uses Role-Based Access Control (RBAC) to secure access:
 
 The database component is essential for storing VM information, scaling rules, and activity logs. For detailed instructions on setting up the Azure SQL Database and deploying the stored procedures, please refer to the [Database Setup Documentation](sql_queries/README.md).
 
+## Custom Script Extension
+
+The **Custom Script Extensions** automate the configuration of both the AVD hosts and Linux hosts, ensuring they are prepared to support user access and integration with the Linux Broker for AVD solution.
+
+### **AVD Host Configuration**
+
+The custom script extension for the AVD host:
+
+- **Installs the Linux Broker Agent**: Downloads and sets up the Linux Broker Agent (`Connect-LinuxBroker.ps1`) on the AVD host.
+- **Configures Required Libraries**: Installs necessary authentication libraries to enable secure communication with the Broker API using managed identity.
+- **Prepares the Host for User Connection**: Configures the AVD host to support seamless user connections, allowing them to access the Linux desktop via Azure Virtual Desktop.
+
+### **Linux Host Configuration**
+
+The custom script extensions support the following Linux distributions:
+
+- **Red Hat Enterprise Linux (RHEL) 7, 8, and 9**
+- **Ubuntu 24 Desktop**
+
+These scripts:
+
+- **Install XRDP and XRPA**: Set up XRDP for full desktop access (RDP) and XRPA for application virtualization, enabling users to connect via AVD.
+- **Configure Authentication**: Sets up authentication mechanisms for secure user access.
+- **Deploy the Linux Session Release Agent**: Installs the session release agent, a crucial component that monitors user sessions and manages session disconnection. It ensures that disconnected sessions are properly released, allowing VMs to be efficiently reused by other users.
+
 ## Additional Details
 
 ### Scaling Rules
@@ -136,6 +163,32 @@ The database component is essential for storing VM information, scaling rules, a
 - **Azure Key Vault**: Stores SSH keys and database passwords securely, accessed via managed identities.
 - **API Permissions**: Specific API permissions are granted to components to restrict access based on roles.
 - **Logging and Monitoring**: All activities are logged to Azure Application Insights and Log Analytics Workspace.
+
+### AVD Host Sizing Recommendations
+
+- [Session host virtual machine sizing guidelines for Azure Virtual Desktop and Remote Desktop Services | Microsoft Learn](https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/virtual-machine-recs#multi-session-recommendations)
+
+Given that AVD acts as a pass-through in this solution, starting with **light to medium workload sizing** is recommended. This provides a good balance of performance and efficiency without overprovisioning resources. The following table outlines the suggested configurations:
+
+| Workload Type | Maximum Users per vCPU | Minimum Configuration             | Example Azure Instances                                      | Minimum Profile Storage |
+| ------------- | ---------------------- | --------------------------------- | ------------------------------------------------------------ | ----------------------- |
+| Light         | 6 users per vCPU       | 8 vCPUs, 16 GB RAM, 32 GB storage | D8s_v5, D8s_v4, F8s_v2, D8as_v4, D16s_v5, D16s_v4, F16s_v2, D16as_v4 | 30 GB                   |
+| Medium        | 4 users per vCPU       | 8 vCPUs, 16 GB RAM, 32 GB storage | D8s_v5, D8s_v4, F8s_v2, D8as_v4, D16s_v5, D16s_v4, F16s_v2, D16as_v4 | 30 GB                   |
+
+#### **Key Considerations:**
+
+1. **Start with Light Workloads**:
+   - For initial deployments, use light workload sizing (6 users per vCPU). This provides a good balance, allowing up to 48 users on an 8-core VM.
+   - This configuration aligns well with the pass-through nature of the solution, minimizing unnecessary overhead.
+2. **Adjust for Medium Workloads if Necessary**:
+   - If users experience performance degradation, consider switching to a medium workload configuration (4 users per vCPU).
+   - This reduces the user density per core and provides more headroom for CPU-intensive operations.
+3. **VM Sizing Recommendations**:
+   - Use VMs with at least 8 vCPUs and 16 GB of RAM. This configuration avoids stability issues seen with smaller VMs and provides sufficient resources for user sessions.
+   - Avoid using VMs with more than 24 vCPUs to prevent diminishing returns due to increased synchronization overhead.
+4. **Optimize for Multi-Session Workloads**:
+   - Use multiple smaller VMs (e.g., 8-core instances) rather than fewer large VMs. This allows for better load balancing and resource management.
+   - Smaller VMs can be shut down when not in use, conserving resources and reducing costs. Use Azure autoscale to manage VM power states based on demand.
 
 ## Getting Started
 

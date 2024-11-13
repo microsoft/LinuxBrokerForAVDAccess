@@ -1,0 +1,12 @@
+Flask==2.2.2
+gunicorn
+Werkzeug==2.2.2
+pyodbc==4.0.35
+azure-identity==1.19.0
+azure-mgmt-compute==33.0.0
+pyjwt==2.9.0
+cryptography==43.0.3
+requests==2.26.0
+flask_caching==2.3.0
+pymssql==2.3.1
+azure-keyvault-secrets==4.9.0

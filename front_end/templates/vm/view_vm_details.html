@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}VM Details{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>VM Details</h2>
+    <div class="card">
+        <div class="card-body">
+            <h5 class="card-title">{{ vm.Hostname }}</h5>
+            <p class="card-text"><strong>VMID:</strong> {{ vm.VMID }}</p>
+            <p class="card-text"><strong>IP Address:</strong> {{ vm.IPAddress }}</p>
+            <p class="card-text"><strong>Power State:</strong> {{ vm.PowerState }}</p>
+            <p class="card-text"><strong>Network Status:</strong> {{ vm.NetworkStatus }}</p>
+            <p class="card-text"><strong>VM Status:</strong> {{ vm.VmStatus }}</p>
+            <p class="card-text"><strong>Username:</strong> {{ vm.Username }}</p>
+            <p class="card-text"><strong>AVD Host:</strong> {{ vm.AvdHost }}</p>
+            <p class="card-text"><strong>Last Updated:</strong> {{ vm.LastUpdateDate }}</p>
+            <p class="card-text"><strong>Description:</strong> {{ vm.Description }}</p>
+
+            <a href="{{ url_for('view_all_vms') }}" class="btn btn-info">Back to VM List</a>
+            <a href="{{ url_for('update_vm_attributes', vmid=vm.VMID) }}" class="btn btn-warning">Update Attributes</a>
+            
+            <form action="{{ url_for('delete_vm', vmid=vm.VMID) }}" method="post" class="d-inline-block" onsubmit="return confirm('Are you sure you want to delete this VM?');">
+                <button type="submit" class="btn btn-danger" aria-label="Delete VM {{ vm.VMID }}">Delete</button>
+            </form>            
+            
+            <form action="{{ url_for('release_vm', hostname=vm.Hostname) }}" method="post" class="d-inline-block" onsubmit="return confirm('Are you sure you want to release this VM?');">
+                <button type="submit" class="btn btn-secondary" aria-label="Release VM {{ vm.Hostname }}">Release</button>
+            </form>
+            
+            
+            <form action="{{ url_for('return_vm', vmid=vm.VMID) }}" method="post" class="d-inline-block" onsubmit="return confirm('Are you sure you want to return this VM?');">
+                <button type="submit" class="btn btn-primary" aria-label="Return VM {{ vm.VMID }}">Return</button>
+            </form>
+            
+        </div>
+    </div>
+</div>
+{% endblock %}

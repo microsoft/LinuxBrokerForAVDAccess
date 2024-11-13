@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block title %}Return VM{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2>Return Virtual Machine</h2>
+    <form action="{{ url_for('return_vm') }}" method="post">
+        <div class="form-group">
+            <label for="vmid">VM ID</label>
+            <input type="text" class="form-control" id="vmid" name="vmid" placeholder="Enter the VM ID" required>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Return VM</button>
+        <a href="{{ url_for('view_all_vms') }}" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock %}
