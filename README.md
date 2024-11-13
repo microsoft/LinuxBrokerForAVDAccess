@@ -8,7 +8,6 @@ The **Linux Broker for AVD Access** is a solution designed to manage and broker 
 
 This solution leverages Azure services such as managed identities, security groups, Azure App Service, Azure Functions, and Azure SQL Database to provide secure and efficient brokering, session management, and scaling of Linux hosts.
 
-https://github.com/user-attachments/assets/46dcf413-a54c-4512-ac04-08dfc8d3a2d4
 
 ## Architecture Description
 
