@@ -36,7 +36,7 @@ ps h -C Xvnc -o user:20,pid,lstart,cmd | while read username pid dt1 dt2 dt3 dt4
     # Parse the Xvnc command for geometry (resolution) and color depth (bits)
     read geometry colorbits <<< $(echo ${xvnc_cmd} | awk '{for(i=i;i<=NF;i++){if($i=="-geometry"){geom=$(++i)} if($i=="-depth"){bits=$(++i)}} print geom,bits}');
     # Check if the session is active by looking for its PID in the socket state (ss) command output
-    ss -tep 2>/dev/null | grep -q pid\=${pid}, && status="${GREEN}active${ENDCOLOR}" || status="${RED}disconnected${ENDCOLOR}";
+    sudo ss -tep 2>/dev/null | grep -q pid\=${pid}, && status="${GREEN}active${ENDCOLOR}" || status="${RED}disconnected${ENDCOLOR}";
     # Print the session details using the format string defined earlier
     printf "${_printf}" ${pid} ${username} "${start_time}" ${geometry} ${colorbits} "${status}";
 done

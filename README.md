@@ -4,7 +4,7 @@
 
 ## Purpose
 
-The **Linux Broker for AVD Access** is a solution designed to manage and broker user access to Linux hosts via Azure Virtual Desktop (AVD). It provides a scalable and efficient way to connect users to Linux virtual machines (VMs) using either Remote Desktop Protocol (RDP) for full desktop experiences or XRPA (X Remote Application) for virtualized applications.
+The **Linux Broker for AVD Access** is a solution designed to manage and broker user access to Linux hosts via Azure Virtual Desktop (AVD). It provides a scalable and efficient way to connect users to Linux virtual machines (VMs) using either Remote Desktop Protocol (RDP) for full desktop experiences or xpra (X Remote Application) for virtualized applications.
 
 This solution leverages Azure services such as managed identities, security groups, Azure App Service, Azure Functions, and Azure SQL Database to provide secure and efficient brokering, session management, and scaling of Linux hosts.
 
@@ -15,11 +15,11 @@ The solution consists of the following components:
 
 - **Azure Virtual Desktop (AVD)**: Provides the interface for users to access Linux hosts. Users can connect via the AVD web client or any supported AVD client.
 
-- **Broker Agent (`Connect-LinuxBroker.ps1`)**: A PowerShell script running on each AVD host that acts as an agent to broker connections to Linux hosts. It connects to the Broker API using managed identity to check out a Linux VM and initiate the appropriate connection (RDP or XRPA).
+- **Broker Agent (`Connect-LinuxBroker.ps1`)**: A PowerShell script running on each AVD host that acts as an agent to broker connections to Linux hosts. It connects to the Broker API using managed identity to check out a Linux VM and initiate the appropriate connection (RDP or xpra).
 
 - **Linux Hosts Cluster**: A set of Linux VMs that users connect to. Each Linux host has managed identity enabled and runs a Session Release Agent.
 
-- **Session Release Agent**: A cron job running on each Linux host that checks for disconnected user sessions (both XRDP and XRPA) and initiates a 20-minute logoff process, releasing the VM for other users while allowing the disconnected user to reconnect within that time frame.
+- **Session Release Agent**: A cron job running on each Linux host that checks for disconnected user sessions (both XRDP and xpra) and initiates a 20-minute logoff process, releasing the VM for other users while allowing the disconnected user to reconnect within that time frame.
 
 - **Broker API**: A RESTful API running on Azure App Service that handles interactions between the Broker Agent, Session Release Agent, and the Broker Database. It uses managed identities and Azure Key Vault for secure access to resources.
 
@@ -57,13 +57,13 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 ## User Workflow
 
 1. **User Logs into AVD**: The user accesses the AVD web client or any supported client.
-2. **Selects Linux Host Connection**: The user selects a desktop icon for full RDP session or an application for XRPA session.
+2. **Selects Linux Host Connection**: The user selects a desktop icon for full RDP session or an application for xpra session.
 3. **Broker Agent Initiates Connection**:
    - The Broker Agent script (`Connect-LinuxBroker.ps1`) connects to the Broker API using the AVD host's managed identity.
    - It checks out an available Linux VM for the user.
    - The user's ID is added to the Linux host with a unique 25-character password.
-   - The user is added to appropriate user groups on the Linux host for RDP or XRPA access.
-4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP or XRPA and can work as needed.
+   - The user is added to appropriate user groups on the Linux host for RDP or xpra access.
+4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP or xpra and can work as needed.
 5. **Session Management**:
    - If the user disconnects or logs off, the Session Release Agent on the Linux host detects the disconnected session.
    - A 20-minute timer is initiated to allow the user to reconnect.
@@ -135,7 +135,7 @@ The custom script extensions support the following Linux distributions:
 
 These scripts:
 
-- **Install XRDP and XRPA**: Set up XRDP for full desktop access (RDP) and XRPA for application virtualization, enabling users to connect via AVD.
+- **Install XRDP and xpra**: Set up XRDP for full desktop access (RDP) and xpra for application virtualization, enabling users to connect via AVD.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the session release agent, a crucial component that monitors user sessions and manages session disconnection. It ensures that disconnected sessions are properly released, allowing VMs to be efficiently reused by other users.
 

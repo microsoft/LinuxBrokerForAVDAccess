@@ -1,5 +1,5 @@
 param (
-    [Parameter(Mandatory = $false, HelpMessage = "Specify 'desktop' to use Remote Desktop, or provide the name of the application to run via xrpa.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Specify 'desktop' to use Remote Desktop, or provide the name of the application to run via xpra.")]
     [string]$Mode = "desktop"
 )
 
@@ -7,7 +7,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 # Automatically collect local Windows hostname and username
 $localHostname = $env:COMPUTERNAME
-$localUsername = $env:USERNAME
+$localUsername = $env:USERNAME -replace '[^a-zA-Z0-9_]', ''
 
 # Define the API endpoints
 $apiBaseUrl = "https://your_linuxbroker_api_base_url/api"
@@ -155,12 +155,12 @@ if ($hasExistingCheckedInVM -and $checkoutResponse.IPAddress) {
         }
     }
     else {
-        Write-Log "Running xrpa command to launch application: $Mode" "INFO"
+        Write-Log "Running xpra command to launch application: $Mode" "INFO"
         try {
-            # Add XRPA command
+            # Add XPRA command
         }
         catch {
-            Write-Log "Failed to launch application '$Mode' using xrpa: $_" "ERROR"
+            Write-Log "Failed to launch application '$Mode' using xpra: $_" "ERROR"
         }
     }
 }

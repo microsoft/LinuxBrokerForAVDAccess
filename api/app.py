@@ -9,6 +9,7 @@ import string
 import time
 import threading
 import logging
+import re
 
 from flask import Flask, jsonify, request
 from azure.identity import DefaultAzureCredential
@@ -22,7 +23,7 @@ from config import *
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.153'
+app.config['VERSION'] = '0.154'
 
 cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 
@@ -455,6 +456,7 @@ def checkout_vm():
         if not username or not avdhost:
             return "Please provide 'username' and 'avdhost' in the request body.", 400
 
+        username = re.sub(r'[^a-zA-Z0-9_]', '', username)
         user_password = generate_secure_password()
 
         conn = get_db_connection()
