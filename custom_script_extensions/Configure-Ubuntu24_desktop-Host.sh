@@ -20,6 +20,9 @@ CURRENT_USERS_DETAILS="$output_directory/xrdp-loggedin-users.txt"
 
 CRON_SCHEDULE="0 * * * *" 
 
+YOUR_LINUXBROKER_API_CLIENT_ID="my_actual_client_id"
+YOUR_LINUXBROKER_API_URL="my.actual.linuxbroker.api.url"
+
 # ===============================
 # Execution
 
@@ -103,6 +106,9 @@ fi
 
 echo "Downloading release-session.sh..."
 sudo wget -O "$SCRIPT_PATH" "$release_session_url"
+
+sudo sed -i "s|YOUR_LINUX_BROKER_API_CLIENT_ID|$YOUR_LINUXBROKER_API_CLIENT_ID|g" "$SCRIPT_PATH"
+sudo sed -i "s|YOUR_LINUX_BROKER_API_URL|$YOUR_LINUXBROKER_API_URL|g" "$SCRIPT_PATH"
 
 echo "Downloading xrdp-who-xnc.sh..."
 sudo wget -O "$output_directory/xrdp-who-xnc.sh" "$xrdp_who_xnc_url"
