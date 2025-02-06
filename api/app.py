@@ -172,6 +172,28 @@ def is_member_of_group(service_principal_id, group_ids):
         print("Graph API error: %s - %s", response.status_code, response.text)
         return False
 
+def delete_remote_user(hostname: str, username: str) -> bool:
+    pem_file_path = retrieve_pem_key_from_key_vault(VAULT_URL, KEY_NAME)
+
+    try:
+        host_fqdn = f"avdadmin@{hostname}.{DOMAIN_NAME}"
+        delete_user_command = f"sudo userdel -r {username} 2>/dev/null || echo 'User {username} does not exist'"
+
+        result = subprocess.run(
+            ['ssh', '-i', pem_file_path, '-o', 'StrictHostKeyChecking=no', host_fqdn, delete_user_command],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode == 0:
+            return True
+        else:
+            print(f"Failed to delete user '{username}' on VM '{hostname}'. Error: {result.stderr}")
+            return False
+    except Exception as e:
+        print(f"Error deleting user '{username}' on VM '{hostname}': {e}")
+        return False
+
 @cache.memoize(timeout=300)
 def is_member_of_group_cached(user_oid, group_ids):
     return is_member_of_group(user_oid, group_ids)
@@ -674,10 +696,22 @@ def return_released_vm_api():
         if not rows:
             return "No VMs to return at this time.", 200
 
+        for row in rows:
+            hostname = row.get("Hostname")
+            username = row.get("Username")
+
+            if hostname and username:
+                success = delete_remote_user(hostname, username)
+                if success:
+                    print(f"Successfully deleted user {username} from {hostname}")
+                else:
+                    print(f"Failed to delete user {username} from {hostname}")
+
         return jsonify(rows), 200
 
     except Exception as e:
         return f"Error: {str(e)}", 500
+
 
 @app.route('/api/vms/history', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
