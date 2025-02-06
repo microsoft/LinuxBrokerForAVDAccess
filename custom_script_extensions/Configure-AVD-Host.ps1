@@ -7,6 +7,9 @@ $moduleName = "SqlServer"
 # URL of the script to download
 $url = "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/avd_host/broker/Connect-LinuxBroker.ps1"
 
+# Define the Linux Broker API Base URL
+$linuxBrokerApiBaseUrl = "https://your_linuxbroker_api_fqdn_here/api"
+
 # Check if the folder exists, if not, create it
 $folderPath = "C:\Temp"
 
@@ -36,6 +39,15 @@ try {
 
 } catch {
     Write-Host "Failed to download the script. Error: $_" -ForegroundColor Red
+}
+
+# Modify the API base URL in the script
+try {
+    (Get-Content $outputPath) -replace 'https://your_linuxbroker_api_base_url/api', $linuxBrokerApiBaseUrl | Set-Content $outputPath
+    Write-Host "Updated API Base URL in $outputPath"
+} catch {
+    Write-Host "Failed to update API Base URL. Error: $_" -ForegroundColor Red
+    exit 1
 }
 
 
