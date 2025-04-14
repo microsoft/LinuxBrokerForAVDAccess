@@ -1,6 +1,6 @@
 Flask==2.2.2
 gunicorn
-Werkzeug==2.2.2
+Werkzeug==3.0.6
 pyodbc==4.0.35
 azure-identity==1.17.1
 azure-mgmt-compute==33.0.0
