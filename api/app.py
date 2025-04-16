@@ -23,7 +23,7 @@ from config import *
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.154'
+app.config['VERSION'] = '0.155'
 
 cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 
@@ -501,7 +501,7 @@ def checkout_vm():
             "password": user_password
         }
 
-        print(f"================= Response data: {response_data}")    
+        #print(f"================= Response data: {response_data}")    
 
         return jsonify(response_data), 200
 
