@@ -10,7 +10,7 @@ xpra_repo_path="/etc/yum.repos.d/xpra.repo"
 xpra_url="https://raw.githubusercontent.com/Xpra-org/xpra/master/packaging/repos/almalinux/xpra.repo"
 microsoft_packages_url="https://packages.microsoft.com/config/rhel/8/packages-microsoft-prod.rpm"
 release_session_url="https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/linux_host/session_release_buffer/RHEL/release-session.sh"
-xrdp_who_xnc_url="https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/linux_host/session_release_buffer/xrdp-who-xnc.sh"
+xrdp_who_xorg_url="https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/linux_host/session_release_buffer/xrdp-who-xorg.sh"
 
 arch=$( /bin/arch )
 remoteAccessTool="both"  # Options: "xrdp", "xpra", or "both"
@@ -125,11 +125,11 @@ sudo wget -O "$SCRIPT_PATH" "$release_session_url"
 sudo sed -i "s|YOUR_LINUX_BROKER_API_CLIENT_ID|$YOUR_LINUXBROKER_API_CLIENT_ID|g" "$SCRIPT_PATH"
 sudo sed -i "s|YOUR_LINUX_BROKER_API_URL|$YOUR_LINUXBROKER_API_URL|g" "$SCRIPT_PATH"
 
-echo "Downloading xrdp-who-xnc.sh..."
-sudo wget -O "$output_directory/xrdp-who-xnc.sh" "$xrdp_who_xnc_url"
+echo "Downloading xrdp-who-xorg.sh..."
+sudo wget -O "$output_directory/xrdp-who-xorg.sh" "$xrdp_who_xorg_url"
 
 sudo chmod +x "$SCRIPT_PATH" 
-sudo chmod +x "$output_directory/xrdp-who-xnc.sh"
+sudo chmod +x "$output_directory/xrdp-who-xorg.sh"
 echo "Downloaded scripts are now executable."
 
 sudo touch "$LOG_FILE" "$CURRENT_USERS_DETAILS"
