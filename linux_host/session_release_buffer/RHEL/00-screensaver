@@ -1,0 +1,7 @@
+# Disable screen saver
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/desktop/screensaver]
+lock-enabled=true
+lock-delay=uint32 0
