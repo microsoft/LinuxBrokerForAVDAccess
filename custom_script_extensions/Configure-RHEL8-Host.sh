@@ -160,12 +160,10 @@ CRON_JOB="$CRON_SCHEDULE /usr/bin/flock -n $LOCK_FILE $SCRIPT_PATH --cron"
 
 if (sudo crontab -l 2>/dev/null | grep -F "$SCRIPT_PATH"); then
     echo "Cron job already exists in root's crontab. No changes made."
-    echo "System configuration complete."
-    exit 0
+else
+    (sudo crontab -l 2>/dev/null; echo "$CRON_JOB") | sudo crontab -
+    echo "Cron job added to root's crontab successfully."
 fi
-
-(sudo crontab -l 2>/dev/null; echo "$CRON_JOB") | sudo crontab -
-echo "Cron job added to root's crontab successfully."
 
 # XRDP.ini - change default X windows from Xvnc to Xorg
 # Enable [Xorg] block: uncomment the header and specific lines
