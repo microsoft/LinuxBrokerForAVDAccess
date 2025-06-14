@@ -56,8 +56,7 @@ param adminPassword string
 param linuxBrokerApiBaseUrl string
 // Linux Broker Configuration Script URI
 @description('URI for the AVD Linux Broker configuration script')
-// TODO update this to the latest version of the script
-param linuxBrokerConfigScriptUri string = 'https://raw.githubusercontent.com/cocallaw/LinuxBrokerForAVDAccess/refs/heads/AVD-PS-Updates/custom_script_extensions/Configure-AVD-Host.ps1'
+param linuxBrokerConfigScriptUri string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-AVD-Host.ps1'
 
 // Multisession image without Office
 var osImage = 'microsoftwindowsdesktop:Windows-11:win11-24h2-avd:latest'
