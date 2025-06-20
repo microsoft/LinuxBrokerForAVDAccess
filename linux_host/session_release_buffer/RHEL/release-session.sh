@@ -8,7 +8,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 LOG_FILE="/var/log/release-session.log"
 LOCK_FILE="/tmp/release-session.lockfile"
 LOCATION_PATH="/usr/local/bin"
-SCRIPT_PATH_TO_CHECK_XRDP_USERS_INFO="$LOCATION_PATH/xrdp-who-xnc.sh"
+SCRIPT_PATH_TO_CHECK_XRDP_USERS_INFO="$LOCATION_PATH/xrdp-who-xorg.sh"
 CURRENT_USERS_DETAILS="$LOCATION_PATH/xrdp-loggedin-users.txt"
 PREVIOUS_USERS_FILE="/tmp/previous_users.txt"
 hostname=$(hostname)
@@ -50,7 +50,7 @@ get_access_token() {
 }
 
 release_vm() {
-    local api_base_url="https://YOUR_LINUX_BROKER_API_URL/api"
+    local api_base_url="YOUR_LINUX_BROKER_API_URL"
     local release_vm_url="$api_base_url/vms/$hostname/release"
     local access_token=$(get_access_token)
 
@@ -74,11 +74,11 @@ release_vm() {
         cat response.json >> "$LOG_FILE"
     fi
 
-    local xvnc_pid=$(ps h -C Xvnc -o pid,user | awk -v user="$username" '$2 == user {print $1}')
-    log "Xvnc PID for user $username: $xvnc_pid"
-    if [ -n "$xvnc_pid" ]; then
-        kill -9 $xvnc_pid
-        log "Terminated Xvnc process $xvnc_pid for user $username."
+     local xorg_pid=$(ps h -C Xorg -o pid,user | awk -v user="$username" '$2 == user {print $1}')
+     log "Xorg PID for user $username: $xorg_pid"
+     if [ -n "$xorg_pid" ]; then
+         kill -9 $xorg_pid
+         log "Terminated Xorg process $xorg_pid for user $username."
     fi
 
     rm -f response.json
