@@ -1,19 +1,16 @@
 param location string = resourceGroup().location
 param tags object = {}
 
-// Network Parameters
 param vnetName string
 param subnetName string
 param vnetResourceGroup string
 
-// VM Parameters - General
 param vmNamePrefix string
 param vmSize string
 @minValue(1)
 @maxValue(20)
 param numberOfVMs int
 
-// VM Parameters - Authentication
 @allowed([
   'Password'
   'SSH'
@@ -24,12 +21,11 @@ param adminUsername string
 param adminPassword string
 param sshPublicKey string = ''
 
-// VM Parameters - OS Image
 @allowed([
-  '7-LVM' // RHEL 7
-  '8-LVM' // RHEL 8
-  '9-LVM' // RHEL 9
-  '24_04-lts' // Ubuntu 24.04
+  '7-LVM'
+  '8-LVM'
+  '9-LVM'
+  '24_04-lts'
 ])
 param OSVersion string
 
@@ -87,10 +83,8 @@ var imageConfigs = {
   }
 }
 
-// Selected configuration based on OSVersion parameter
 var selectedConfig = imageConfigs[OSVersion]
 
-// Retrieve existing VNet and Subnet
 resource existingVNet 'Microsoft.Network/virtualNetworks@2021-05-01' existing = {
   name: vnetName
   scope: resourceGroup(vnetResourceGroup)
@@ -101,7 +95,6 @@ resource existingSubnet 'Microsoft.Network/virtualNetworks/subnets@2021-05-01' e
   name: subnetName
 }
 
-// Create Network Interfaces
 resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = [
   for (name, i) in vmNames: {
     name: '${name}-nic'
@@ -127,7 +120,6 @@ resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = [
   }
 ]
 
-// Create Linux VMs 
 resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
   for (name, i) in vmNames: {
     name: name
@@ -189,7 +181,6 @@ resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
   }
 ]
 
-// Apply Script Based on Image OS
 resource linuxCustomScriptExtension 'Microsoft.Compute/virtualMachines/extensions@2022-03-01' = [
   for (name, i) in vmNames: {
     name: '${name}/customScript'

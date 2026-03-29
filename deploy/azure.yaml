@@ -1,0 +1,32 @@
+name: linuxbrokerforavdaccess
+metadata:
+  template: linuxbrokerforavdaccess@0.0.1
+infra:
+  provider: bicep
+  path: ./bicep
+workflows:
+  up:
+    steps:
+      - azd: provision
+hooks:
+  preprovision:
+    windows:
+      shell: pwsh
+      run: ./Initialize-DeploymentEnvironment.ps1
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./Post-Provision.ps1
+services:
+  frontend:
+    project: ../front_end
+    host: appservice
+    language: py
+  api:
+    project: ../api
+    host: appservice
+    language: py
+  task:
+    project: ../task
+    host: function
+    language: py

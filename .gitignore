@@ -16,6 +16,7 @@ __pycache__
 # Azure App Service artifacts
 .env
 .pem
+.azure
 
 # Configured custom script extensions, powershell scripts, and linux scripts
 priv-*

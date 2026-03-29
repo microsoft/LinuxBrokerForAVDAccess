@@ -191,9 +191,22 @@ Given that AVD acts as a pass-through in this solution, starting with **light to
 
 ## Getting Started
 
-*(Instructions on deployment, configuration, and usage will be provided here.)*
+The consolidated deployment entrypoint for this repository is in `deploy/`.
 
-While we work on more detailed instructions, you can deploy the web apps from VS Code or running az web deploy. You can deploy function using VS Code. To support managed identity versus using SAS keys, there are a number of permissions that must be applied, please use the RBAC section to facility implementing them. We will release detailed instructions with video guidance over the coming weeks.
+- AZD manifest: `deploy/azure.yaml`
+- Bicep entrypoint: `deploy/bicep/main.bicep`
+- Parameter template: `deploy/bicep/main.parameters.json`
+- Deployment scripts: `deploy/*.ps1`
+
+From the repository root, use the following flow:
+
+```powershell
+Set-Location .\deploy
+azd env new <environment-name>
+azd up
+```
+
+Before running `azd up`, populate the required Entra application and secret values in your azd environment or parameter file. The deployment scripts under `deploy/` handle the environment bootstrap, post-provision role assignment, container image builds, and database initialization paths used by this solution.
 
 ## Contributing
 
