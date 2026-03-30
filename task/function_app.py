@@ -1,6 +1,7 @@
 import requests
 import logging
 import os
+import socket
 
 import azure.functions as func
 from azure.identity import ManagedIdentityCredential
@@ -110,14 +111,13 @@ def test_vm_connectivity(mytimer: func.TimerRequest) -> None:
 
             # Use os.system to test connectivity to port 22 using curl
             try:
-                # Command to test port 22 with curl
-                command = f"curl -v telnet://{ip_address}:22 > /dev/null 2>&1"
-                
-                # Execute the command using os.system
-                response_code = os.system(command)
-
-                # Determine network status based on the result of the curl command
-                network_status = 'Reachable' if response_code == 0 else 'Unreachable'
+                alive = False
+                try:
+                    with socket.create_connection((ip_address, 22), timeout=3):
+                        alive = True
+                except (socket.timeout, socket.error):
+                    alive = False
+                network_status = 'Reachable' if alive else 'Unreachable'
                 logging.info(f"VMID: {vm_id}, IP Address: {ip_address}, Network Status: {network_status}")
 
             except Exception as e:
@@ -126,10 +126,9 @@ def test_vm_connectivity(mytimer: func.TimerRequest) -> None:
 
             # Prepare the data for updating VM attributes
             update_data = {
-                "vmid": vm_id,
-                "powerstate": "null",  # No change to PowerState
+                "powerstate": None,  # No change to PowerState
                 "networkstatus": network_status,  # Update NetworkStatus
-                "vmstatus": "null"  # No change to VmStatus
+                "vmstatus": None  # No change to VmStatus
             }
 
             # Construct the API URL for updating VM attributes
