@@ -360,6 +360,78 @@ function Ensure-DefaultEnvValue {
     return $existing
 }
 
+function Ensure-EnvValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
+    )
+
+    $existing = Get-AzdEnvValue -Key $Key
+    if ($existing -ne $Value) {
+        Set-AzdEnvValue -Key $Key -Value $Value
+    }
+
+    return $Value
+}
+
+function Get-RequiredAzdEnvValue {
+    param([Parameter(Mandatory = $true)][string]$Key)
+
+    $value = Get-AzdEnvValue -Key $Key
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw "Required azd environment value '$Key' is missing."
+    }
+
+    return $value
+}
+
+function ConvertTo-BoolParameterValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $false)][bool]$DefaultValue = $false
+    )
+
+    $value = Get-AzdEnvValue -Key $Key
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $DefaultValue
+    }
+
+    switch ($value.Trim().ToLowerInvariant()) {
+        'true' { return $true }
+        'false' { return $false }
+        default { throw "azd environment value '$Key' must be 'true' or 'false', but was '$value'." }
+    }
+}
+
+function ConvertTo-IntParameterValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $false)][int]$DefaultValue = 0
+    )
+
+    $value = Get-AzdEnvValue -Key $Key
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $DefaultValue
+    }
+
+    $parsedValue = 0
+    if (-not [int]::TryParse($value, [ref]$parsedValue)) {
+        throw "azd environment value '$Key' must be an integer, but was '$value'."
+    }
+
+    return $parsedValue
+}
+
+function Add-BicepParameterValue {
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$ParameterCollection,
+        [Parameter(Mandatory = $true)][string]$ParameterName,
+        [Parameter(Mandatory = $true)]$Value
+    )
+
+    $ParameterCollection[$ParameterName] = @{ value = $Value }
+}
+
 function Get-JsonFilePath {
     $path = [System.IO.Path]::GetTempFileName()
     return [System.IO.Path]::ChangeExtension($path, '.json')
@@ -758,7 +830,7 @@ $cloudContext = Get-CloudContext
 
 $frontendAppDisplayName = "$AppName-$EnvironmentName-frontend-ar"
 $apiAppDisplayName = "$AppName-$EnvironmentName-api-ar"
-$frontendAppServiceName = "$AppName-$EnvironmentName-fe"
+$frontendAppServiceName = "fe-$AppName-$EnvironmentName"
 $avdGroupName = "$AppName-$EnvironmentName-avd-hosts-sg"
 $linuxGroupName = "$AppName-$EnvironmentName-linux-hosts-sg"
 
@@ -771,7 +843,7 @@ Ensure-DefaultEnvValue -Key 'tenantId' -ValueFactory { $defaultTenantId } | Out-
 
 Ensure-DefaultEnvValue -Key 'SQL_ADMIN_LOGIN' -ValueFactory { 'brokeradmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'SQL_DATABASE_NAME' -ValueFactory { 'LinuxBroker' } | Out-Null
-Ensure-DefaultEnvValue -Key 'APP_SERVICE_PLAN_SKU' -ValueFactory { 'P1v3' } | Out-Null
+Ensure-DefaultEnvValue -Key 'APP_SERVICE_PLAN_SKU' -ValueFactory { 'P2mv3' } | Out-Null
 Ensure-DefaultEnvValue -Key 'LINUX_HOST_ADMIN_LOGIN_NAME' -ValueFactory { 'avdadmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'DOMAIN_NAME' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'NFS_SHARE' -ValueFactory { '' } | Out-Null
@@ -798,7 +870,7 @@ Ensure-DefaultEnvValue -Key 'avdMaxSessionLimit' -ValueFactory { '5' } | Out-Nul
 Ensure-DefaultEnvValue -Key 'vmSubscriptionId' -ValueFactory { $subscription.id } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlAdminLogin' -ValueFactory { 'brokeradmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlDatabaseName' -ValueFactory { 'LinuxBroker' } | Out-Null
-Ensure-DefaultEnvValue -Key 'appServicePlanSku' -ValueFactory { 'P1v3' } | Out-Null
+Ensure-DefaultEnvValue -Key 'appServicePlanSku' -ValueFactory { 'P2mv3' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostAdminLoginName' -ValueFactory { 'avdadmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'domainName' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'nfsShare' -ValueFactory { '' } | Out-Null
@@ -810,6 +882,14 @@ if ($detectedIp) { Write-Host "Detected client IP for SQL firewall: $detectedIp"
 Ensure-DefaultEnvValue -Key 'flaskKey' -ValueFactory { Get-AzdEnvValue -Key 'FLASK_SESSION_SECRET' } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlAdminPassword' -ValueFactory { Get-AzdEnvValue -Key 'SQL_ADMIN_PASSWORD' } | Out-Null
 Ensure-DefaultEnvValue -Key 'hostAdminPassword' -ValueFactory { Get-AzdEnvValue -Key 'HOST_ADMIN_PASSWORD' } | Out-Null
+
+if ((Get-AzdEnvValue -Key 'APP_SERVICE_PLAN_SKU') -eq 'P1v3') {
+    Ensure-EnvValue -Key 'APP_SERVICE_PLAN_SKU' -Value 'P2mv3' | Out-Null
+}
+
+if ((Get-AzdEnvValue -Key 'appServicePlanSku') -eq 'P1v3') {
+    Ensure-EnvValue -Key 'appServicePlanSku' -Value 'P2mv3' | Out-Null
+}
 
 $deployLinuxHostsValue = Get-AzdEnvValue -Key 'deployLinuxHosts'
 $linuxHostAuthTypeValue = Get-AzdEnvValue -Key 'linuxHostAuthType'
@@ -869,24 +949,48 @@ Write-Host 'Automatic admin consent was attempted for the configured application
 # so env values set above would not be picked up through ${...} references or
 # auto-mapping. Writing the file here guarantees the deployment gets real values.
 $bicepParametersPath = Join-Path $PSScriptRoot 'bicep' 'main.parameters.json'
+$bicepParameterEntries = [ordered]@{}
+
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'environmentName' -Value '${AZURE_ENV_NAME}'
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'location' -Value '${AZURE_LOCATION}'
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'appName' -Value (Get-RequiredAzdEnvValue -Key 'appName')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'tenantId' -Value (Get-RequiredAzdEnvValue -Key 'tenantId')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'frontendClientId' -Value (Get-RequiredAzdEnvValue -Key 'frontendClientId')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'frontendClientSecret' -Value (Get-RequiredAzdEnvValue -Key 'frontendClientSecret')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'apiClientId' -Value (Get-RequiredAzdEnvValue -Key 'apiClientId')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'apiClientSecret' -Value (Get-RequiredAzdEnvValue -Key 'apiClientSecret')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostSshPrivateKey' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostSshPrivateKey')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostSshPublicKey' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostSshPublicKey')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdHostGroupId' -Value (Get-RequiredAzdEnvValue -Key 'avdHostGroupId')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostGroupId' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostGroupId')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'sqlAdminLogin' -Value (Get-RequiredAzdEnvValue -Key 'sqlAdminLogin')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'sqlAdminPassword' -Value (Get-RequiredAzdEnvValue -Key 'sqlAdminPassword')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'flaskKey' -Value (Get-RequiredAzdEnvValue -Key 'flaskKey')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'domainName' -Value (Get-AzdEnvValue -Key 'domainName')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'nfsShare' -Value (Get-AzdEnvValue -Key 'nfsShare')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostAdminLoginName' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostAdminLoginName')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'hostAdminPassword' -Value (Get-RequiredAzdEnvValue -Key 'hostAdminPassword')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'vmHostResourceGroup' -Value (Get-AzdEnvValue -Key 'vmHostResourceGroup')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'vmSubscriptionId' -Value (Get-RequiredAzdEnvValue -Key 'vmSubscriptionId')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'allowedClientIp' -Value (Get-AzdEnvValue -Key 'allowedClientIp')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'appServicePlanSku' -Value (Get-RequiredAzdEnvValue -Key 'appServicePlanSku')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'deployLinuxHosts' -Value (ConvertTo-BoolParameterValue -Key 'deployLinuxHosts')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'deployAvdHosts' -Value (ConvertTo-BoolParameterValue -Key 'deployAvdHosts')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostVmNamePrefix' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostVmNamePrefix')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostVmSize' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostVmSize')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostCount' -Value (ConvertTo-IntParameterValue -Key 'linuxHostCount')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostAuthType' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostAuthType')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostOsVersion' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostOsVersion')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdHostPoolName' -Value (Get-RequiredAzdEnvValue -Key 'avdHostPoolName')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdSessionHostCount' -Value (ConvertTo-IntParameterValue -Key 'avdSessionHostCount')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdMaxSessionLimit' -Value (ConvertTo-IntParameterValue -Key 'avdMaxSessionLimit' -DefaultValue 5)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdVmNamePrefix' -Value (Get-RequiredAzdEnvValue -Key 'avdVmNamePrefix')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdVmSize' -Value (Get-RequiredAzdEnvValue -Key 'avdVmSize')
+
 $bicepParameters = [ordered]@{
     '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
     contentVersion = '1.0.0.0'
-    parameters = [ordered]@{
-        environmentName     = @{ value = '${AZURE_ENV_NAME}' }
-        location            = @{ value = '${AZURE_LOCATION}' }
-        appName             = @{ value = (Get-AzdEnvValue -Key 'appName') }
-        tenantId            = @{ value = (Get-AzdEnvValue -Key 'tenantId') }
-        frontendClientId    = @{ value = (Get-AzdEnvValue -Key 'frontendClientId') }
-        frontendClientSecret = @{ value = (Get-AzdEnvValue -Key 'frontendClientSecret') }
-        apiClientId         = @{ value = (Get-AzdEnvValue -Key 'apiClientId') }
-        apiClientSecret     = @{ value = (Get-AzdEnvValue -Key 'apiClientSecret') }
-        linuxHostSshPrivateKey = @{ value = (Get-AzdEnvValue -Key 'linuxHostSshPrivateKey') }
-        sqlAdminPassword    = @{ value = (Get-AzdEnvValue -Key 'sqlAdminPassword') }
-        flaskKey            = @{ value = (Get-AzdEnvValue -Key 'flaskKey') }
-        hostAdminPassword   = @{ value = (Get-AzdEnvValue -Key 'hostAdminPassword') }
-        allowedClientIp     = @{ value = (Get-AzdEnvValue -Key 'allowedClientIp') }
-    }
+    parameters = $bicepParameterEntries
 }
 
 $bicepParameters | ConvertTo-Json -Depth 10 | Set-Content -Path $bicepParametersPath -Encoding utf8

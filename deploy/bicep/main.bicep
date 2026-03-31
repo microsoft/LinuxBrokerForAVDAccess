@@ -76,7 +76,7 @@ param vmSubscriptionId string = subscription().subscriptionId
 param allowedClientIp string = ''
 
 @description('App Service plan SKU name.')
-param appServicePlanSku string = 'P1v3'
+param appServicePlanSku string = 'P2mv3'
 
 @description('Deploy Linux broker host VMs.')
 param deployLinuxHosts bool = false

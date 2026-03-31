@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.25.53.49325",
-      "templateHash": "6576658425850583710"
+      "templateHash": "16092647517579810232"
     }
   },
   "parameters": {
@@ -169,7 +169,7 @@
     },
     "appServicePlanSku": {
       "type": "string",
-      "defaultValue": "P1v3",
+      "defaultValue": "P2mv3",
       "metadata": {
         "description": "App Service plan SKU name."
       }
@@ -425,7 +425,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.25.53.49325",
-              "templateHash": "8643162257687112754"
+              "templateHash": "14112124161390832818"
             }
           },
           "parameters": {
@@ -511,7 +511,7 @@
             },
             "appServicePlanSku": {
               "type": "string",
-              "defaultValue": "P1v3"
+              "defaultValue": "P2mv3"
             },
             "deployLinuxHosts": {
               "type": "bool",
@@ -694,6 +694,7 @@
               "CLIENT_ID": "[parameters('frontendClientId')]",
               "FLASK_KEY": "[parameters('flaskKey')]",
               "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "[parameters('frontendClientSecret')]",
+              "OTEL_SERVICE_NAME": "[variables('frontendAppName')]",
               "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
               "TENANT_ID": "[parameters('tenantId')]",
               "WEBSITE_AUTH_AAD_ALLOWED_TENANTS": "[parameters('tenantId')]"
@@ -1487,7 +1488,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.25.53.49325",
-                      "templateHash": "3371409296139664791"
+                      "templateHash": "4807701873718480196"
                     }
                   },
                   "parameters": {
@@ -1504,7 +1505,7 @@
                     },
                     "skuName": {
                       "type": "string",
-                      "defaultValue": "P1v3"
+                      "defaultValue": "P2mv3"
                     }
                   },
                   "resources": [
@@ -1576,6 +1577,9 @@
                   "authSettings": {
                     "value": "[variables('frontendAuthSettings')]"
                   },
+                  "healthCheckPath": {
+                    "value": "/health"
+                  },
                   "alwaysOn": {
                     "value": true
                   },
@@ -1590,7 +1594,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.25.53.49325",
-                      "templateHash": "15351606689998843173"
+                      "templateHash": "876570250764564740"
                     }
                   },
                   "parameters": {
@@ -1625,6 +1629,10 @@
                       "type": "object",
                       "defaultValue": {}
                     },
+                    "healthCheckPath": {
+                      "type": "string",
+                      "defaultValue": ""
+                    },
                     "alwaysOn": {
                       "type": "bool",
                       "defaultValue": true
@@ -1633,6 +1641,9 @@
                       "type": "bool",
                       "defaultValue": true
                     }
+                  },
+                  "variables": {
+                    "webSiteConfig": "[union(createObject('alwaysOn', parameters('alwaysOn'), 'acrUseManagedIdentityCreds', parameters('useManagedIdentityForRegistry'), 'linuxFxVersion', format('DOCKER|{0}', parameters('containerImageName')), 'minTlsVersion', '1.2'), if(empty(parameters('healthCheckPath')), createObject(), createObject('healthCheckPath', parameters('healthCheckPath'))))]"
                   },
                   "resources": [
                     {
@@ -1648,12 +1659,7 @@
                       "properties": {
                         "serverFarmId": "[parameters('serverFarmId')]",
                         "httpsOnly": true,
-                        "siteConfig": {
-                          "alwaysOn": "[parameters('alwaysOn')]",
-                          "acrUseManagedIdentityCreds": "[parameters('useManagedIdentityForRegistry')]",
-                          "linuxFxVersion": "[format('DOCKER|{0}', parameters('containerImageName'))]",
-                          "minTlsVersion": "1.2"
-                        }
+                        "siteConfig": "[variables('webSiteConfig')]"
                       }
                     },
                     {
@@ -1777,6 +1783,7 @@
                       "LINUX_HOST_GROUP_ID": "[parameters('linuxHostGroupId')]",
                       "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "[parameters('apiClientSecret')]",
                       "NFS_SHARE": "[parameters('nfsShare')]",
+                      "OTEL_SERVICE_NAME": "[variables('apiAppName')]",
                       "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
                       "TENANT_ID": "[parameters('tenantId')]",
                       "VAULT_URL": "[reference(resourceId('Microsoft.Resources/deployments', 'keyVault'), '2022-09-01').outputs.vaultUri.value]",
@@ -1786,6 +1793,9 @@
                   },
                   "authSettings": {
                     "value": "[variables('apiAuthSettings')]"
+                  },
+                  "healthCheckPath": {
+                    "value": "/health"
                   },
                   "alwaysOn": {
                     "value": true
@@ -1801,7 +1811,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.25.53.49325",
-                      "templateHash": "15351606689998843173"
+                      "templateHash": "876570250764564740"
                     }
                   },
                   "parameters": {
@@ -1836,6 +1846,10 @@
                       "type": "object",
                       "defaultValue": {}
                     },
+                    "healthCheckPath": {
+                      "type": "string",
+                      "defaultValue": ""
+                    },
                     "alwaysOn": {
                       "type": "bool",
                       "defaultValue": true
@@ -1844,6 +1858,9 @@
                       "type": "bool",
                       "defaultValue": true
                     }
+                  },
+                  "variables": {
+                    "webSiteConfig": "[union(createObject('alwaysOn', parameters('alwaysOn'), 'acrUseManagedIdentityCreds', parameters('useManagedIdentityForRegistry'), 'linuxFxVersion', format('DOCKER|{0}', parameters('containerImageName')), 'minTlsVersion', '1.2'), if(empty(parameters('healthCheckPath')), createObject(), createObject('healthCheckPath', parameters('healthCheckPath'))))]"
                   },
                   "resources": [
                     {
@@ -1859,12 +1876,7 @@
                       "properties": {
                         "serverFarmId": "[parameters('serverFarmId')]",
                         "httpsOnly": true,
-                        "siteConfig": {
-                          "alwaysOn": "[parameters('alwaysOn')]",
-                          "acrUseManagedIdentityCreds": "[parameters('useManagedIdentityForRegistry')]",
-                          "linuxFxVersion": "[format('DOCKER|{0}', parameters('containerImageName'))]",
-                          "minTlsVersion": "1.2"
-                        }
+                        "siteConfig": "[variables('webSiteConfig')]"
                       }
                     },
                     {
@@ -2150,6 +2162,12 @@
                   },
                   "OSVersion": {
                     "value": "[parameters('linuxHostOsVersion')]"
+                  },
+                  "linuxBrokerApiBaseUrl": {
+                    "value": "[variables('frontendApiBaseUrl')]"
+                  },
+                  "linuxBrokerApiClientId": {
+                    "value": "[parameters('apiClientId')]"
                   }
                 },
                 "template": {
@@ -2159,7 +2177,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.25.53.49325",
-                      "templateHash": "10371371812490226963"
+                      "templateHash": "7373843181961101080"
                     }
                   },
                   "parameters": {
@@ -2190,6 +2208,12 @@
                       "type": "int",
                       "minValue": 1,
                       "maxValue": 20
+                    },
+                    "linuxBrokerApiBaseUrl": {
+                      "type": "string"
+                    },
+                    "linuxBrokerApiClientId": {
+                      "type": "string"
                     },
                     "authType": {
                       "type": "string",
@@ -2238,7 +2262,7 @@
                         },
                         "script": {
                           "uri": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL7-Host.sh",
-                          "cmd": "bash Configure-RHEL7-Host.sh"
+                          "cmd": "[format('bash Configure-RHEL7-Host.sh \"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]"
                         }
                       },
                       "8-LVM": {
@@ -2250,7 +2274,7 @@
                         },
                         "script": {
                           "uri": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL8-Host.sh",
-                          "cmd": "bash Configure-RHEL8-Host.sh"
+                          "cmd": "[format('bash Configure-RHEL8-Host.sh \"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]"
                         }
                       },
                       "9-LVM": {
@@ -2262,7 +2286,7 @@
                         },
                         "script": {
                           "uri": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL9-Host.sh",
-                          "cmd": "bash Configure-RHEL9-Host.sh"
+                          "cmd": "[format('bash Configure-RHEL9-Host.sh \"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]"
                         }
                       },
                       "24_04-lts": {
@@ -2274,7 +2298,7 @@
                         },
                         "script": {
                           "uri": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh",
-                          "cmd": "bash Configure-Ubuntu24_desktop-Host.sh"
+                          "cmd": "[format('bash Configure-Ubuntu24_desktop-Host.sh \"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]"
                         }
                       }
                     },

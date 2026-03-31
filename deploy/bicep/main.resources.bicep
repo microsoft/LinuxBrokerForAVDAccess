@@ -29,7 +29,7 @@ param hostAdminPassword string
 param vmHostResourceGroup string = ''
 param vmSubscriptionId string = subscription().subscriptionId
 param allowedClientIp string = ''
-param appServicePlanSku string = 'P1v3'
+param appServicePlanSku string = 'P2mv3'
 param deployLinuxHosts bool = false
 param deployAvdHosts bool = false
 param linuxHostVmNamePrefix string = 'lnxhost'
@@ -259,6 +259,7 @@ var frontendSettings = {
   CLIENT_ID: frontendClientId
   FLASK_KEY: flaskKey
   MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: frontendClientSecret
+  OTEL_SERVICE_NAME: frontendAppName
   SCM_DO_BUILD_DURING_DEPLOYMENT: 'false'
   TENANT_ID: tenantId
   WEBSITE_AUTH_AAD_ALLOWED_TENANTS: tenantId
@@ -277,6 +278,7 @@ var apiSettings = {
   LINUX_HOST_GROUP_ID: linuxHostGroupId
   MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: apiClientSecret
   NFS_SHARE: nfsShare
+  OTEL_SERVICE_NAME: apiAppName
   SCM_DO_BUILD_DURING_DEPLOYMENT: 'false'
   TENANT_ID: tenantId
   VAULT_URL: keyVault.outputs.vaultUri
@@ -308,6 +310,7 @@ module frontendApp 'modules/apps/container-web-app.bicep' = {
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
     appSettings: frontendSettings
     authSettings: frontendAuthSettings
+    healthCheckPath: '/health'
     alwaysOn: true
     useManagedIdentityForRegistry: true
   }
@@ -327,6 +330,7 @@ module apiApp 'modules/apps/container-web-app.bicep' = {
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
     appSettings: apiSettings
     authSettings: apiAuthSettings
+    healthCheckPath: '/health'
     alwaysOn: true
     useManagedIdentityForRegistry: true
   }
@@ -408,6 +412,8 @@ module linuxHosts 'modules/Linux/main.bicep' = if (deployLinuxHosts && linuxHost
     adminPassword: hostAdminPassword
     sshPublicKey: linuxHostSshPublicKey
     OSVersion: linuxHostOsVersion
+    linuxBrokerApiBaseUrl: frontendApiBaseUrl
+    linuxBrokerApiClientId: apiClientId
   }
 }
 

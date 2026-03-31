@@ -78,6 +78,7 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 
 - `appName`: base name for generated resources.
 - `AZURE_LOCATION`: deployment region.
+- `appServicePlanSku`: App Service plan SKU. The deployment baseline defaults to Premium v3 `P2mv3` for 4 vCPUs and 32 GB memory.
 - `allowedClientIp`: your public client IP for SQL bootstrap from the local machine.
 - `deployLinuxHosts`: `true` or `false`.
 - `deployAvdHosts`: `true` or `false`.
@@ -190,6 +191,8 @@ Important deployment characteristics:
 - SQL public network access is enabled.
 - Azure services are allowed through the SQL firewall.
 - A client-IP firewall rule is added only if `allowedClientIp` is set.
+- The frontend and API App Services enable App Service health checks on `/health`.
+- The frontend and API apps are instrumented with Azure Monitor OpenTelemetry and receive `APPLICATIONINSIGHTS_CONNECTION_STRING` and `OTEL_SERVICE_NAME` through app settings.
 - Linux host auth defaults to `SSH`.
 - Key Vault stores `db-password` and `linux-host`.
 - The API app receives Key Vault Secrets User access so it can read those secrets at runtime.

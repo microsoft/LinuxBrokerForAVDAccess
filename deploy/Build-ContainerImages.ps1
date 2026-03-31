@@ -22,6 +22,50 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Invoke-AzCommandWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Command,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxAttempts = 4,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InitialDelaySeconds = 5
+    )
+
+    $lastError = ''
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $commandOutput = & $Command 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+
+        $lastError = $commandOutput.Trim()
+        if ($attempt -ge $MaxAttempts) {
+            break
+        }
+
+        $delaySeconds = [Math]::Min($InitialDelaySeconds * [Math]::Pow(2, $attempt - 1), 30)
+        Write-Warning "$Description failed on attempt $attempt of $MaxAttempts. Retrying in $([int]$delaySeconds) seconds."
+        if (-not [string]::IsNullOrWhiteSpace($lastError)) {
+            Write-Warning $lastError
+        }
+
+        Start-Sleep -Seconds ([int]$delaySeconds)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($lastError)) {
+        throw "Failed to $Description after $MaxAttempts attempts."
+    }
+
+    throw "Failed to $Description after $MaxAttempts attempts. Last error: $lastError"
+}
+
 if ([string]::IsNullOrWhiteSpace($EnvironmentName)) {
     $EnvironmentName = if (-not [string]::IsNullOrWhiteSpace($env:AZURE_ENV_NAME)) {
         $env:AZURE_ENV_NAME
@@ -91,19 +135,16 @@ try {
         }
     }
 
-    az webapp restart --name $FrontendAppName --resource-group $ResourceGroupName | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to restart frontend app '$FrontendAppName'."
+    Invoke-AzCommandWithRetry -Description "restart frontend app '$FrontendAppName'" -Command {
+        az webapp restart --name $FrontendAppName --resource-group $ResourceGroupName --only-show-errors --output none
     }
 
-    az webapp restart --name $ApiAppName --resource-group $ResourceGroupName | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to restart API app '$ApiAppName'."
+    Invoke-AzCommandWithRetry -Description "restart API app '$ApiAppName'" -Command {
+        az webapp restart --name $ApiAppName --resource-group $ResourceGroupName --only-show-errors --output none
     }
 
-    az functionapp restart --name $TaskAppName --resource-group $ResourceGroupName | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to restart task app '$TaskAppName'."
+    Invoke-AzCommandWithRetry -Description "restart task app '$TaskAppName'" -Command {
+        az functionapp restart --name $TaskAppName --resource-group $ResourceGroupName --only-show-errors --output none
     }
 }
 finally {

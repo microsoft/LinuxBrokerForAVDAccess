@@ -7,8 +7,18 @@ param containerRegistryLoginServer string
 param applicationInsightsConnectionString string
 param appSettings object = {}
 param authSettings object = {}
+param healthCheckPath string = ''
 param alwaysOn bool = true
 param useManagedIdentityForRegistry bool = true
+
+var webSiteConfig = union({
+  alwaysOn: alwaysOn
+  acrUseManagedIdentityCreds: useManagedIdentityForRegistry
+  linuxFxVersion: 'DOCKER|${containerImageName}'
+  minTlsVersion: '1.2'
+}, empty(healthCheckPath) ? {} : {
+  healthCheckPath: healthCheckPath
+})
 
 resource webApp 'Microsoft.Web/sites@2023-12-01' = {
   name: appName
@@ -21,12 +31,7 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
   properties: {
     serverFarmId: serverFarmId
     httpsOnly: true
-    siteConfig: {
-      alwaysOn: alwaysOn
-      acrUseManagedIdentityCreds: useManagedIdentityForRegistry
-      linuxFxVersion: 'DOCKER|${containerImageName}'
-      minTlsVersion: '1.2'
-    }
+    siteConfig: webSiteConfig
   }
 }
 

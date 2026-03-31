@@ -11,6 +11,12 @@ import threading
 import logging
 import re
 
+from azure.monitor.opentelemetry import configure_azure_monitor
+
+connection_string = os.environ.get('APPLICATIONINSIGHTS_CONNECTION_STRING')
+if connection_string:
+    configure_azure_monitor(connection_string=connection_string, logger_name='linuxbroker.api')
+
 from flask import Flask, jsonify, request
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
@@ -31,7 +37,25 @@ cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 # Logging Configuration
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('linuxbroker.api')
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'status': 'unhealthy'}), 503
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1')
+        cursor.fetchone()
+        return jsonify({'status': 'healthy', 'version': app.config['VERSION']}), 200
+    except Exception as e:
+        logger.error("Health check failed: %s", e)
+        return jsonify({'status': 'unhealthy'}), 503
+    finally:
+        conn.close()
 
 # ===============================
 # Functions
@@ -433,7 +457,7 @@ def get_all_vms():
         conn.close()
 
         if not rows:
-            return "No VMs found.", 404
+            return jsonify([]), 200
 
         return jsonify(rows), 200
 

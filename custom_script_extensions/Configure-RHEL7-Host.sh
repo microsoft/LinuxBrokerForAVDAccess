@@ -2,6 +2,24 @@
 
 # Installs and configures the necessary packages for Linux Broker for AVD Access on RHEL 7
 
+LINUXBROKER_API_BASE_URL="${1:-}"
+LINUXBROKER_API_CLIENT_ID="${2:-}"
+
+if [ -z "$LINUXBROKER_API_BASE_URL" ] || [ -z "$LINUXBROKER_API_CLIENT_ID" ]; then
+    echo "Linux Broker API base URL and client ID are required."
+    exit 1
+fi
+
+case "$LINUXBROKER_API_BASE_URL" in
+    https://*) ;;
+    *)
+        echo "Linux Broker API base URL must start with https://"
+        exit 1
+        ;;
+esac
+
+LINUXBROKER_API_BASE_URL="${LINUXBROKER_API_BASE_URL%/}"
+
 # ===============================
 # Variables
 
@@ -28,8 +46,8 @@ CURRENT_USERS_DETAILS="$output_directory/xrdp-loggedin-users.txt"
 
 CRON_SCHEDULE="0 * * * *"
 
-YOUR_LINUXBROKER_API_CLIENT_ID="my_actual_client_id"
-YOUR_LINUXBROKER_API_URL="my.actual.linuxbroker.api.url"
+YOUR_LINUXBROKER_API_CLIENT_ID="$LINUXBROKER_API_CLIENT_ID"
+YOUR_LINUXBROKER_API_BASE_URL="$LINUXBROKER_API_BASE_URL"
 
 # ===============================
 # Execution
@@ -122,7 +140,8 @@ echo "Downloading release-session.sh..."
 sudo wget -O "$SCRIPT_PATH" "$release_session_url"
 
 sudo sed -i "s|YOUR_LINUX_BROKER_API_CLIENT_ID|$YOUR_LINUXBROKER_API_CLIENT_ID|g" "$SCRIPT_PATH"
-sudo sed -i "s|YOUR_LINUX_BROKER_API_URL|$YOUR_LINUXBROKER_API_URL|g" "$SCRIPT_PATH"
+sudo sed -i "s|YOUR_LINUX_BROKER_API_BASE_URL|$YOUR_LINUXBROKER_API_BASE_URL|g" "$SCRIPT_PATH"
+sudo sed -i "s|YOUR_LINUX_BROKER_API_URL|$YOUR_LINUXBROKER_API_BASE_URL|g" "$SCRIPT_PATH"
 
 echo "Downloading xrdp-who-xnc.sh..."
 sudo wget -O "$output_directory/xrdp-who-xnc.sh" "$xrdp_who_xnc_url"

@@ -2,6 +2,7 @@ Flask==2.2.2
 gunicorn
 Werkzeug==2.2.2
 pyodbc==4.0.35
+azure-monitor-opentelemetry==1.8.7
 azure-identity==1.17.1
 azure-mgmt-compute==33.0.0
 pyjwt==2.9.0

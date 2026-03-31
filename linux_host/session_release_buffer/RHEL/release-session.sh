@@ -50,7 +50,7 @@ get_access_token() {
 }
 
 release_vm() {
-    local api_base_url="YOUR_LINUX_BROKER_API_URL"
+    local api_base_url="YOUR_LINUX_BROKER_API_BASE_URL"
     local release_vm_url="$api_base_url/vms/$hostname/release"
     local access_token=$(get_access_token)
 

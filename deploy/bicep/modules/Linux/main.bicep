@@ -10,6 +10,8 @@ param vmSize string
 @minValue(1)
 @maxValue(20)
 param numberOfVMs int
+param linuxBrokerApiBaseUrl string
+param linuxBrokerApiClientId string
 
 @allowed([
   'Password'
@@ -59,7 +61,7 @@ var imageConfigs = {
     }
     script: {
       uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL7-Host.sh'
-      cmd: 'bash Configure-RHEL7-Host.sh'
+      cmd: 'bash Configure-RHEL7-Host.sh "${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
     }
   }
   '8-LVM': {
@@ -71,7 +73,7 @@ var imageConfigs = {
     }
     script: {
       uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL8-Host.sh'
-      cmd: 'bash Configure-RHEL8-Host.sh'
+      cmd: 'bash Configure-RHEL8-Host.sh "${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
     }
   }
   '9-LVM': {
@@ -83,7 +85,7 @@ var imageConfigs = {
     }
     script: {
       uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL9-Host.sh'
-      cmd: 'bash Configure-RHEL9-Host.sh'
+      cmd: 'bash Configure-RHEL9-Host.sh "${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
     }
   }
   '24_04-lts': {
@@ -95,7 +97,7 @@ var imageConfigs = {
     }
     script: {
       uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh'
-      cmd: 'bash Configure-Ubuntu24_desktop-Host.sh'
+      cmd: 'bash Configure-Ubuntu24_desktop-Host.sh "${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
     }
   }
 }

@@ -1,7 +1,7 @@
 param location string = resourceGroup().location
 param tags object = {}
 param appServicePlanName string
-param skuName string = 'P1v3'
+param skuName string = 'P2mv3'
 
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: appServicePlanName

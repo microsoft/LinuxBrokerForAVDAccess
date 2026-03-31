@@ -214,7 +214,9 @@ azd env new <environment-name>
 azd up
 ```
 
-Before running `azd up`, review the detailed guide and set any environment-specific values you need, especially networking, host counts, VM sizes, and SQL firewall access. The deployment scripts under `deploy/` now handle the Entra bootstrap, SSH key flow, post-provision role assignment, container image builds, SQL initialization, and Linux host SQL registration used by this solution.
+The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps.
+
+Before running `azd up`, review the detailed guide and set any environment-specific values you need, especially networking, host counts, VM sizes, App Service plan sizing, and SQL firewall access. The deployment scripts under `deploy/` now handle the Entra bootstrap, SSH key flow, App Service health checks on `/health`, Application Insights wiring for the frontend and API, post-provision role assignment, container image builds, SQL initialization, and Linux host SQL registration used by this solution.
 
 ## Contributing
 
