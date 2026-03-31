@@ -30,7 +30,24 @@ param sshPublicKey string = ''
 param OSVersion string
 
 var vmNames = [for i in range(1, numberOfVMs): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
-var adminPass = authType == 'Password' ? adminPassword : sshPublicKey
+var adminCredentials = authType == 'Password' ? {
+  adminPassword: adminPassword
+} : {}
+var linuxConfiguration = authType == 'SSH'
+  ? {
+      disablePasswordAuthentication: true
+      ssh: {
+        publicKeys: [
+          {
+            path: '/home/${adminUsername}/.ssh/authorized_keys'
+            keyData: sshPublicKey
+          }
+        ]
+      }
+    }
+  : {
+      disablePasswordAuthentication: false
+    }
 
 var imageConfigs = {
   '7-LVM': {
@@ -132,26 +149,11 @@ resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
       hardwareProfile: {
         vmSize: vmSize
       }
-      osProfile: {
+      osProfile: union({
         computerName: vmNames[i]
         adminUsername: adminUsername
-        adminPassword: adminPass
-        linuxConfiguration: authType == 'SSH'
-          ? {
-              disablePasswordAuthentication: true
-              ssh: {
-                publicKeys: [
-                  {
-                    path: '/home/${adminUsername}/.ssh/authorized_keys'
-                    keyData: sshPublicKey
-                  }
-                ]
-              }
-            }
-          : {
-              disablePasswordAuthentication: false
-            }
-      }
+        linuxConfiguration: linuxConfiguration
+      }, adminCredentials)
       networkProfile: {
         networkInterfaces: [
           {

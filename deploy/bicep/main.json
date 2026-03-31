@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.25.53.49325",
-      "templateHash": "2150617746229150476"
+      "templateHash": "6576658425850583710"
     }
   },
   "parameters": {
@@ -23,7 +23,6 @@
     },
     "location": {
       "type": "string",
-      "defaultValue": "[deployment().location]",
       "metadata": {
         "description": "Azure region for all resources."
       }
@@ -44,32 +43,44 @@
     },
     "tenantId": {
       "type": "string",
+      "defaultValue": "",
       "metadata": {
         "description": "Tenant ID used by the frontend and API applications."
       }
     },
     "frontendClientId": {
       "type": "string",
+      "defaultValue": "",
       "metadata": {
         "description": "Frontend Entra app client ID."
       }
     },
     "frontendClientSecret": {
       "type": "securestring",
+      "defaultValue": "",
       "metadata": {
         "description": "Frontend Entra app client secret."
       }
     },
     "apiClientId": {
       "type": "string",
+      "defaultValue": "",
       "metadata": {
         "description": "API Entra app client ID."
       }
     },
     "apiClientSecret": {
       "type": "securestring",
+      "defaultValue": "",
       "metadata": {
         "description": "API Entra app client secret."
+      }
+    },
+    "linuxHostSshPrivateKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Linux host SSH private key stored in Key Vault for broker-managed SSH access."
       }
     },
     "avdHostGroupId": {
@@ -95,12 +106,14 @@
     },
     "sqlAdminPassword": {
       "type": "securestring",
+      "defaultValue": "",
       "metadata": {
         "description": "SQL administrator password."
       }
     },
     "flaskKey": {
       "type": "securestring",
+      "defaultValue": "",
       "metadata": {
         "description": "Flask session key for the frontend app."
       }
@@ -128,6 +141,7 @@
     },
     "hostAdminPassword": {
       "type": "securestring",
+      "defaultValue": "",
       "metadata": {
         "description": "Admin password used for Linux and AVD host provisioning."
       }
@@ -197,7 +211,7 @@
     },
     "linuxHostAuthType": {
       "type": "string",
-      "defaultValue": "Password",
+      "defaultValue": "SSH",
       "allowedValues": [
         "Password",
         "SSH"
@@ -322,6 +336,9 @@
           "apiClientSecret": {
             "value": "[parameters('apiClientSecret')]"
           },
+          "linuxHostSshPrivateKey": {
+            "value": "[parameters('linuxHostSshPrivateKey')]"
+          },
           "avdHostGroupId": {
             "value": "[parameters('avdHostGroupId')]"
           },
@@ -408,7 +425,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.25.53.49325",
-              "templateHash": "17774190860254507244"
+              "templateHash": "8643162257687112754"
             }
           },
           "parameters": {
@@ -442,6 +459,9 @@
               "type": "string"
             },
             "apiClientSecret": {
+              "type": "securestring"
+            },
+            "linuxHostSshPrivateKey": {
               "type": "securestring"
             },
             "avdHostGroupId": {
@@ -515,7 +535,7 @@
             },
             "linuxHostAuthType": {
               "type": "string",
-              "defaultValue": "Password",
+              "defaultValue": "SSH",
               "allowedValues": [
                 "Password",
                 "SSH"
@@ -592,9 +612,92 @@
             "effectiveVmResourceGroup": "[if(empty(parameters('vmHostResourceGroup')), resourceGroup().name, parameters('vmHostResourceGroup'))]",
             "keyVaultSecretsUserRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
             "acrPullRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
-            "databasePasswordSecretName": "db-admin-password",
-            "apiSecretName": "api-client-secret",
-            "frontendApiBaseUrl": "[format('https://{0}.azurewebsites.net/api', variables('apiAppName'))]"
+            "databasePasswordSecretName": "db-password",
+            "linuxHostPrivateKeySecretName": "linux-host",
+            "frontendApiBaseUrl": "[format('https://{0}.azurewebsites.net/api', variables('apiAppName'))]",
+            "tenantIssuerUrl": "[format('{0}{1}/v2.0', environment().authentication.loginEndpoint, parameters('tenantId'))]",
+            "frontendAllowedAudiences": [
+              "[parameters('frontendClientId')]",
+              "[format('api://{0}', parameters('frontendClientId'))]"
+            ],
+            "apiAllowedAudiences": [
+              "[parameters('apiClientId')]",
+              "[format('api://{0}', parameters('apiClientId'))]"
+            ],
+            "frontendAuthSettings": {
+              "platform": {
+                "enabled": true,
+                "runtimeVersion": "~1"
+              },
+              "globalValidation": {
+                "requireAuthentication": false,
+                "unauthenticatedClientAction": "AllowAnonymous"
+              },
+              "httpSettings": {
+                "requireHttps": true,
+                "routes": {
+                  "apiPrefix": "/.auth"
+                }
+              },
+              "identityProviders": {
+                "azureActiveDirectory": {
+                  "enabled": true,
+                  "registration": {
+                    "clientId": "[parameters('frontendClientId')]",
+                    "clientSecretSettingName": "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET",
+                    "openIdIssuer": "[variables('tenantIssuerUrl')]"
+                  },
+                  "validation": {
+                    "allowedAudiences": "[variables('frontendAllowedAudiences')]"
+                  }
+                }
+              },
+              "login": {
+                "preserveUrlFragmentsForLogins": true,
+                "tokenStore": {
+                  "enabled": true
+                }
+              }
+            },
+            "apiAuthSettings": {
+              "platform": {
+                "enabled": true,
+                "runtimeVersion": "~1"
+              },
+              "globalValidation": {
+                "requireAuthentication": false,
+                "unauthenticatedClientAction": "AllowAnonymous"
+              },
+              "httpSettings": {
+                "requireHttps": true,
+                "routes": {
+                  "apiPrefix": "/.auth"
+                }
+              },
+              "identityProviders": {
+                "azureActiveDirectory": {
+                  "enabled": true,
+                  "registration": {
+                    "clientId": "[parameters('apiClientId')]",
+                    "clientSecretSettingName": "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET",
+                    "openIdIssuer": "[variables('tenantIssuerUrl')]"
+                  },
+                  "validation": {
+                    "allowedAudiences": "[variables('apiAllowedAudiences')]"
+                  }
+                }
+              }
+            },
+            "frontendSettings": {
+              "API_CLIENT_ID": "[parameters('apiClientId')]",
+              "API_URL": "[variables('frontendApiBaseUrl')]",
+              "CLIENT_ID": "[parameters('frontendClientId')]",
+              "FLASK_KEY": "[parameters('flaskKey')]",
+              "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "[parameters('frontendClientSecret')]",
+              "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
+              "TENANT_ID": "[parameters('tenantId')]",
+              "WEBSITE_AUTH_AAD_ALLOWED_TENANTS": "[parameters('tenantId')]"
+            }
           },
           "resources": [
             {
@@ -1044,7 +1147,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.25.53.49325",
-                      "templateHash": "15020683059166618150"
+                      "templateHash": "11175018908924583799"
                     }
                   },
                   "parameters": {
@@ -1088,6 +1191,10 @@
                     "name": {
                       "type": "string",
                       "value": "[parameters('storageAccountName')]"
+                    },
+                    "connectionString": {
+                      "type": "string",
+                      "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix={2}', parameters('storageAccountName'), listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-05-01').keys[0].value, environment().suffixes.storage)]"
                     }
                   }
                 }
@@ -1115,14 +1222,8 @@
                   "sqlAdminPassword": {
                     "value": "[parameters('sqlAdminPassword')]"
                   },
-                  "frontendClientSecret": {
-                    "value": "[parameters('frontendClientSecret')]"
-                  },
-                  "apiClientSecret": {
-                    "value": "[parameters('apiClientSecret')]"
-                  },
-                  "hostAdminPassword": {
-                    "value": "[parameters('hostAdminPassword')]"
+                  "linuxHostSshPrivateKey": {
+                    "value": "[parameters('linuxHostSshPrivateKey')]"
                   }
                 },
                 "template": {
@@ -1132,7 +1233,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.25.53.49325",
-                      "templateHash": "13548772835488998202"
+                      "templateHash": "11314698381309119362"
                     }
                   },
                   "parameters": {
@@ -1150,13 +1251,7 @@
                     "sqlAdminPassword": {
                       "type": "securestring"
                     },
-                    "frontendClientSecret": {
-                      "type": "securestring"
-                    },
-                    "apiClientSecret": {
-                      "type": "securestring"
-                    },
-                    "hostAdminPassword": {
+                    "linuxHostSshPrivateKey": {
                       "type": "securestring"
                     }
                   },
@@ -1184,7 +1279,7 @@
                     {
                       "type": "Microsoft.KeyVault/vaults/secrets",
                       "apiVersion": "2023-07-01",
-                      "name": "[format('{0}/{1}', parameters('keyVaultName'), 'db-admin-password')]",
+                      "name": "[format('{0}/{1}', parameters('keyVaultName'), 'db-password')]",
                       "properties": {
                         "value": "[parameters('sqlAdminPassword')]"
                       },
@@ -1195,31 +1290,9 @@
                     {
                       "type": "Microsoft.KeyVault/vaults/secrets",
                       "apiVersion": "2023-07-01",
-                      "name": "[format('{0}/{1}', parameters('keyVaultName'), 'frontend-client-secret')]",
+                      "name": "[format('{0}/{1}', parameters('keyVaultName'), 'linux-host')]",
                       "properties": {
-                        "value": "[parameters('frontendClientSecret')]"
-                      },
-                      "dependsOn": [
-                        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
-                      ]
-                    },
-                    {
-                      "type": "Microsoft.KeyVault/vaults/secrets",
-                      "apiVersion": "2023-07-01",
-                      "name": "[format('{0}/{1}', parameters('keyVaultName'), 'api-client-secret')]",
-                      "properties": {
-                        "value": "[parameters('apiClientSecret')]"
-                      },
-                      "dependsOn": [
-                        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
-                      ]
-                    },
-                    {
-                      "type": "Microsoft.KeyVault/vaults/secrets",
-                      "apiVersion": "2023-07-01",
-                      "name": "[format('{0}/{1}', parameters('keyVaultName'), 'host-admin-password')]",
-                      "properties": {
-                        "value": "[parameters('hostAdminPassword')]"
+                        "value": "[parameters('linuxHostSshPrivateKey')]"
                       },
                       "dependsOn": [
                         "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
@@ -1238,14 +1311,6 @@
                     "vaultUri": {
                       "type": "string",
                       "value": "[reference(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), '2023-07-01').vaultUri]"
-                    },
-                    "frontendAuthKeyUri": {
-                      "type": "string",
-                      "value": "[reference(resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), 'frontend-client-secret'), '2023-07-01').secretUriWithVersion]"
-                    },
-                    "apiAuthKeyUri": {
-                      "type": "string",
-                      "value": "[reference(resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), 'api-client-secret'), '2023-07-01').secretUriWithVersion]"
                     }
                   }
                 }
@@ -1506,16 +1571,10 @@
                     "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2022-09-01').outputs.applicationInsightsConnectionString.value]"
                   },
                   "appSettings": {
-                    "value": {
-                      "API_CLIENT_ID": "[parameters('apiClientId')]",
-                      "API_URL": "[variables('frontendApiBaseUrl')]",
-                      "CLIENT_ID": "[parameters('frontendClientId')]",
-                      "FLASK_KEY": "[parameters('flaskKey')]",
-                      "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "[format('@Microsoft.KeyVault(SecretUri={0})', reference(resourceId('Microsoft.Resources/deployments', 'keyVault'), '2022-09-01').outputs.frontendAuthKeyUri.value)]",
-                      "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
-                      "TENANT_ID": "[parameters('tenantId')]",
-                      "WEBSITE_AUTH_AAD_ALLOWED_TENANTS": "[parameters('tenantId')]"
-                    }
+                    "value": "[variables('frontendSettings')]"
+                  },
+                  "authSettings": {
+                    "value": "[variables('frontendAuthSettings')]"
                   },
                   "alwaysOn": {
                     "value": true
@@ -1531,7 +1590,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.25.53.49325",
-                      "templateHash": "18437243938497326171"
+                      "templateHash": "15351606689998843173"
                     }
                   },
                   "parameters": {
@@ -1559,6 +1618,10 @@
                       "type": "string"
                     },
                     "appSettings": {
+                      "type": "object",
+                      "defaultValue": {}
+                    },
+                    "authSettings": {
                       "type": "object",
                       "defaultValue": {}
                     },
@@ -1600,6 +1663,17 @@
                       "properties": "[union(createObject('APPLICATIONINSIGHTS_CONNECTION_STRING', parameters('applicationInsightsConnectionString'), 'DOCKER_REGISTRY_SERVER_URL', format('https://{0}', parameters('containerRegistryLoginServer')), 'WEBSITES_ENABLE_APP_SERVICE_STORAGE', 'false'), parameters('appSettings'))]",
                       "dependsOn": [
                         "[resourceId('Microsoft.Web/sites', parameters('appName'))]"
+                      ]
+                    },
+                    {
+                      "condition": "[not(empty(parameters('authSettings')))]",
+                      "type": "Microsoft.Web/sites/config",
+                      "apiVersion": "2023-12-01",
+                      "name": "[format('{0}/{1}', parameters('appName'), 'authsettingsV2')]",
+                      "properties": "[parameters('authSettings')]",
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Web/sites', parameters('appName'))]",
+                        "[resourceId('Microsoft.Web/sites/config', parameters('appName'), 'appsettings')]"
                       ]
                     },
                     {
@@ -1654,7 +1728,6 @@
               "dependsOn": [
                 "[resourceId('Microsoft.Resources/deployments', 'appServicePlan')]",
                 "[resourceId('Microsoft.Resources/deployments', 'containerRegistry')]",
-                "[resourceId('Microsoft.Resources/deployments', 'keyVault')]",
                 "[resourceId('Microsoft.Resources/deployments', 'observability')]"
               ]
             },
@@ -1699,10 +1772,10 @@
                       "DB_USERNAME": "[parameters('sqlAdminLogin')]",
                       "DOMAIN_NAME": "[parameters('domainName')]",
                       "GRAPH_API_ENDPOINT": "https://graph.microsoft.com/.default",
-                      "KEY_NAME": "[variables('apiSecretName')]",
+                      "KEY_NAME": "[variables('linuxHostPrivateKeySecretName')]",
                       "LINUX_HOST_ADMIN_LOGIN_NAME": "[parameters('linuxHostAdminLoginName')]",
                       "LINUX_HOST_GROUP_ID": "[parameters('linuxHostGroupId')]",
-                      "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "[format('@Microsoft.KeyVault(SecretUri={0})', reference(resourceId('Microsoft.Resources/deployments', 'keyVault'), '2022-09-01').outputs.apiAuthKeyUri.value)]",
+                      "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "[parameters('apiClientSecret')]",
                       "NFS_SHARE": "[parameters('nfsShare')]",
                       "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
                       "TENANT_ID": "[parameters('tenantId')]",
@@ -1710,6 +1783,9 @@
                       "VM_RESOURCE_GROUP": "[variables('effectiveVmResourceGroup')]",
                       "VM_SUBSCRIPTION_ID": "[parameters('vmSubscriptionId')]"
                     }
+                  },
+                  "authSettings": {
+                    "value": "[variables('apiAuthSettings')]"
                   },
                   "alwaysOn": {
                     "value": true
@@ -1725,7 +1801,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.25.53.49325",
-                      "templateHash": "18437243938497326171"
+                      "templateHash": "15351606689998843173"
                     }
                   },
                   "parameters": {
@@ -1753,6 +1829,10 @@
                       "type": "string"
                     },
                     "appSettings": {
+                      "type": "object",
+                      "defaultValue": {}
+                    },
+                    "authSettings": {
                       "type": "object",
                       "defaultValue": {}
                     },
@@ -1794,6 +1874,17 @@
                       "properties": "[union(createObject('APPLICATIONINSIGHTS_CONNECTION_STRING', parameters('applicationInsightsConnectionString'), 'DOCKER_REGISTRY_SERVER_URL', format('https://{0}', parameters('containerRegistryLoginServer')), 'WEBSITES_ENABLE_APP_SERVICE_STORAGE', 'false'), parameters('appSettings'))]",
                       "dependsOn": [
                         "[resourceId('Microsoft.Web/sites', parameters('appName'))]"
+                      ]
+                    },
+                    {
+                      "condition": "[not(empty(parameters('authSettings')))]",
+                      "type": "Microsoft.Web/sites/config",
+                      "apiVersion": "2023-12-01",
+                      "name": "[format('{0}/{1}', parameters('appName'), 'authsettingsV2')]",
+                      "properties": "[parameters('authSettings')]",
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Web/sites', parameters('appName'))]",
+                        "[resourceId('Microsoft.Web/sites/config', parameters('appName'), 'appsettings')]"
                       ]
                     },
                     {
@@ -1885,17 +1976,17 @@
                     "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2022-09-01').outputs.applicationInsightsConnectionString.value]"
                   },
                   "storageConnectionString": {
-                    "value": "[createObject('API_CLIENT_ID', parameters('apiClientId'), 'API_URL', variables('frontendApiBaseUrl'), 'AzureWebJobsStorage', format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix={2}', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.name.value, listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2023-05-01').keys[0].value, environment().suffixes.storage), 'FUNCTIONS_EXTENSION_VERSION', '~4', 'FUNCTIONS_WORKER_RUNTIME', 'python', 'SCM_DO_BUILD_DURING_DEPLOYMENT', 'false', 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING', format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix={2}', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.name.value, listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2023-05-01').keys[0].value, environment().suffixes.storage), 'WEBSITE_CONTENTSHARE', toLower(take(format('{0}content', variables('taskAppName')), 63))).AzureWebJobsStorage]"
+                    "value": "[createObject('API_CLIENT_ID', parameters('apiClientId'), 'API_URL', variables('frontendApiBaseUrl'), 'AzureWebJobsStorage', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.connectionString.value, 'FUNCTIONS_EXTENSION_VERSION', '~4', 'FUNCTIONS_WORKER_RUNTIME', 'python', 'SCM_DO_BUILD_DURING_DEPLOYMENT', 'false', 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.connectionString.value, 'WEBSITE_CONTENTSHARE', toLower(take(format('{0}content', variables('taskAppName')), 63))).AzureWebJobsStorage]"
                   },
                   "appSettings": {
                     "value": {
                       "API_CLIENT_ID": "[parameters('apiClientId')]",
                       "API_URL": "[variables('frontendApiBaseUrl')]",
-                      "AzureWebJobsStorage": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix={2}', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.name.value, listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2023-05-01').keys[0].value, environment().suffixes.storage)]",
+                      "AzureWebJobsStorage": "[reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.connectionString.value]",
                       "FUNCTIONS_EXTENSION_VERSION": "~4",
                       "FUNCTIONS_WORKER_RUNTIME": "python",
                       "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
-                      "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix={2}', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.name.value, listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2023-05-01').keys[0].value, environment().suffixes.storage)]",
+                      "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING": "[reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.connectionString.value]",
                       "WEBSITE_CONTENTSHARE": "[toLower(take(format('{0}content', variables('taskAppName')), 63))]"
                     }
                   },
@@ -2068,7 +2159,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.25.53.49325",
-                      "templateHash": "152351611456708088"
+                      "templateHash": "10371371812490226963"
                     }
                   },
                   "parameters": {
@@ -2135,7 +2226,8 @@
                         "input": "[format('{0}-{1}', parameters('vmNamePrefix'), padLeft(range(1, parameters('numberOfVMs'))[copyIndex('vmNames')], 2, '0'))]"
                       }
                     ],
-                    "adminPass": "[if(equals(parameters('authType'), 'Password'), parameters('adminPassword'), parameters('sshPublicKey'))]",
+                    "adminCredentials": "[if(equals(parameters('authType'), 'Password'), createObject('adminPassword', parameters('adminPassword')), createObject())]",
+                    "linuxConfiguration": "[if(equals(parameters('authType'), 'SSH'), createObject('disablePasswordAuthentication', true(), 'ssh', createObject('publicKeys', createArray(createObject('path', format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername')), 'keyData', parameters('sshPublicKey'))))), createObject('disablePasswordAuthentication', false()))]",
                     "imageConfigs": {
                       "7-LVM": {
                         "image": {
@@ -2230,12 +2322,7 @@
                         "hardwareProfile": {
                           "vmSize": "[parameters('vmSize')]"
                         },
-                        "osProfile": {
-                          "computerName": "[variables('vmNames')[copyIndex()]]",
-                          "adminUsername": "[parameters('adminUsername')]",
-                          "adminPassword": "[variables('adminPass')]",
-                          "linuxConfiguration": "[if(equals(parameters('authType'), 'SSH'), createObject('disablePasswordAuthentication', true(), 'ssh', createObject('publicKeys', createArray(createObject('path', format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername')), 'keyData', parameters('sshPublicKey'))))), createObject('disablePasswordAuthentication', false()))]"
-                        },
+                        "osProfile": "[union(createObject('computerName', variables('vmNames')[copyIndex()], 'adminUsername', parameters('adminUsername'), 'linuxConfiguration', variables('linuxConfiguration')), variables('adminCredentials'))]",
                         "networkProfile": {
                           "networkInterfaces": [
                             {

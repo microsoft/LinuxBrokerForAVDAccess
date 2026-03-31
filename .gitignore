@@ -18,6 +18,9 @@ __pycache__
 .pem
 .azure
 
+# Generated Bicep parameters (contains secrets from preprovision)
+deploy/bicep/main.parameters.json
+
 # Configured custom script extensions, powershell scripts, and linux scripts
 priv-*
 

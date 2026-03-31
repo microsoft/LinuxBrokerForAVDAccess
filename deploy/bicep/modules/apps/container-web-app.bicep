@@ -6,6 +6,7 @@ param containerImageName string
 param containerRegistryLoginServer string
 param applicationInsightsConnectionString string
 param appSettings object = {}
+param authSettings object = {}
 param alwaysOn bool = true
 param useManagedIdentityForRegistry bool = true
 
@@ -37,6 +38,15 @@ resource webAppSettings 'Microsoft.Web/sites/config@2023-12-01' = {
     DOCKER_REGISTRY_SERVER_URL: 'https://${containerRegistryLoginServer}'
     WEBSITES_ENABLE_APP_SERVICE_STORAGE: 'false'
   }, appSettings)
+}
+
+resource webAppAuth 'Microsoft.Web/sites/config@2023-12-01' = if (!empty(authSettings)) {
+  parent: webApp
+  name: 'authsettingsV2'
+  dependsOn: [
+    webAppSettings
+  ]
+  properties: authSettings
 }
 
 resource webAppLogs 'Microsoft.Web/sites/config@2023-12-01' = {

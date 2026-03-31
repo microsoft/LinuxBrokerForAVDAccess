@@ -12,6 +12,8 @@ param frontendClientSecret string
 param apiClientId string
 @secure()
 param apiClientSecret string
+@secure()
+param linuxHostSshPrivateKey string
 param avdHostGroupId string = ''
 param linuxHostGroupId string = ''
 param sqlAdminLogin string = 'brokeradmin'
@@ -37,7 +39,7 @@ param linuxHostCount int = 0
   'Password'
   'SSH'
 ])
-param linuxHostAuthType string = 'Password'
+param linuxHostAuthType string = 'SSH'
 param linuxHostSshPublicKey string = ''
 @allowed([
   '7-LVM'
@@ -87,8 +89,8 @@ var privateEndpointSubnetName = 'snet-private-endpoints'
 var effectiveVmResourceGroup = empty(vmHostResourceGroup) ? resourceGroup().name : vmHostResourceGroup
 var keyVaultSecretsUserRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
 var acrPullRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
-var databasePasswordSecretName = 'db-admin-password'
-var apiSecretName = 'api-client-secret'
+var databasePasswordSecretName = 'db-password'
+var linuxHostPrivateKeySecretName = 'linux-host'
 
 module networking 'modules/core/networking.bicep' = {
   name: 'networking'
@@ -138,9 +140,7 @@ module keyVault 'modules/core/key-vault.bicep' = {
     tags: tags
     keyVaultName: keyVaultName
     sqlAdminPassword: sqlAdminPassword
-    frontendClientSecret: frontendClientSecret
-    apiClientSecret: apiClientSecret
-    hostAdminPassword: hostAdminPassword
+    linuxHostSshPrivateKey: linuxHostSshPrivateKey
   }
 }
 
@@ -179,13 +179,86 @@ var frontendImageName = '${containerRegistry.outputs.loginServer}/frontend:lates
 var apiImageName = '${containerRegistry.outputs.loginServer}/api:latest'
 var taskImageName = '${containerRegistry.outputs.loginServer}/task:latest'
 var frontendApiBaseUrl = 'https://${apiAppName}.azurewebsites.net/api'
-var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.outputs.name};AccountKey=${listKeys(resourceId('Microsoft.Storage/storageAccounts', storageAccountName), '2023-05-01').keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
+var storageConnectionString = storageAccount.outputs.connectionString
+var tenantIssuerUrl = '${environment().authentication.loginEndpoint}${tenantId}/v2.0'
+var frontendAllowedAudiences = [
+  frontendClientId
+  'api://${frontendClientId}'
+]
+var apiAllowedAudiences = [
+  apiClientId
+  'api://${apiClientId}'
+]
+var frontendAuthSettings = {
+  platform: {
+    enabled: true
+    runtimeVersion: '~1'
+  }
+  globalValidation: {
+    requireAuthentication: false
+    unauthenticatedClientAction: 'AllowAnonymous'
+  }
+  httpSettings: {
+    requireHttps: true
+    routes: {
+      apiPrefix: '/.auth'
+    }
+  }
+  identityProviders: {
+    azureActiveDirectory: {
+      enabled: true
+      registration: {
+        clientId: frontendClientId
+        clientSecretSettingName: 'MICROSOFT_PROVIDER_AUTHENTICATION_SECRET'
+        openIdIssuer: tenantIssuerUrl
+      }
+      validation: {
+        allowedAudiences: frontendAllowedAudiences
+      }
+    }
+  }
+  login: {
+    preserveUrlFragmentsForLogins: true
+    tokenStore: {
+      enabled: true
+    }
+  }
+}
+var apiAuthSettings = {
+  platform: {
+    enabled: true
+    runtimeVersion: '~1'
+  }
+  globalValidation: {
+    requireAuthentication: false
+    unauthenticatedClientAction: 'AllowAnonymous'
+  }
+  httpSettings: {
+    requireHttps: true
+    routes: {
+      apiPrefix: '/.auth'
+    }
+  }
+  identityProviders: {
+    azureActiveDirectory: {
+      enabled: true
+      registration: {
+        clientId: apiClientId
+        clientSecretSettingName: 'MICROSOFT_PROVIDER_AUTHENTICATION_SECRET'
+        openIdIssuer: tenantIssuerUrl
+      }
+      validation: {
+        allowedAudiences: apiAllowedAudiences
+      }
+    }
+  }
+}
 var frontendSettings = {
   API_CLIENT_ID: apiClientId
   API_URL: frontendApiBaseUrl
   CLIENT_ID: frontendClientId
   FLASK_KEY: flaskKey
-  MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.outputs.frontendAuthKeyUri})'
+  MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: frontendClientSecret
   SCM_DO_BUILD_DURING_DEPLOYMENT: 'false'
   TENANT_ID: tenantId
   WEBSITE_AUTH_AAD_ALLOWED_TENANTS: tenantId
@@ -199,10 +272,10 @@ var apiSettings = {
   DB_USERNAME: sqlAdminLogin
   DOMAIN_NAME: domainName
   GRAPH_API_ENDPOINT: 'https://graph.microsoft.com/.default'
-  KEY_NAME: apiSecretName
+  KEY_NAME: linuxHostPrivateKeySecretName
   LINUX_HOST_ADMIN_LOGIN_NAME: linuxHostAdminLoginName
   LINUX_HOST_GROUP_ID: linuxHostGroupId
-  MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: '@Microsoft.KeyVault(SecretUri=${keyVault.outputs.apiAuthKeyUri})'
+  MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: apiClientSecret
   NFS_SHARE: nfsShare
   SCM_DO_BUILD_DURING_DEPLOYMENT: 'false'
   TENANT_ID: tenantId
@@ -234,6 +307,7 @@ module frontendApp 'modules/apps/container-web-app.bicep' = {
     containerRegistryLoginServer: containerRegistry.outputs.loginServer
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
     appSettings: frontendSettings
+    authSettings: frontendAuthSettings
     alwaysOn: true
     useManagedIdentityForRegistry: true
   }
@@ -252,6 +326,7 @@ module apiApp 'modules/apps/container-web-app.bicep' = {
     containerRegistryLoginServer: containerRegistry.outputs.loginServer
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
     appSettings: apiSettings
+    authSettings: apiAuthSettings
     alwaysOn: true
     useManagedIdentityForRegistry: true
   }

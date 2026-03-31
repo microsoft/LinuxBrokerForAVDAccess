@@ -191,22 +191,30 @@ Given that AVD acts as a pass-through in this solution, starting with **light to
 
 ## Getting Started
 
-The consolidated deployment entrypoint for this repository is in `deploy/`.
+The supported deployment entrypoint for this repository is in `deploy/`.
 
-- AZD manifest: `deploy/azure.yaml`
-- Bicep entrypoint: `deploy/bicep/main.bicep`
-- Parameter template: `deploy/bicep/main.parameters.json`
-- Deployment scripts: `deploy/*.ps1`
+For the full deployment walkthrough, see [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md).
 
-From the repository root, use the following flow:
+That guide covers:
+
+- prerequisites and required permissions
+- azd environment values and defaults
+- how `azd up` prompts for subscription and deployment region when not pre-set
+- Entra app and group bootstrap behavior
+- SSH key reuse, prompt, and auto-generation behavior
+- what `preprovision`, Bicep provisioning, and `postprovision` each do
+- SQL bootstrap, Linux host SQL registration, and validation steps
+- troubleshooting and rerun paths
+
+Quick start from the repository root:
 
 ```powershell
-Set-Location .\deploy
+cd .\deploy
 azd env new <environment-name>
 azd up
 ```
 
-Before running `azd up`, populate the required Entra application and secret values in your azd environment or parameter file. The deployment scripts under `deploy/` handle the environment bootstrap, post-provision role assignment, container image builds, and database initialization paths used by this solution.
+Before running `azd up`, review the detailed guide and set any environment-specific values you need, especially networking, host counts, VM sizes, and SQL firewall access. The deployment scripts under `deploy/` now handle the Entra bootstrap, SSH key flow, post-provision role assignment, container image builds, SQL initialization, and Linux host SQL registration used by this solution.
 
 ## Contributing
 

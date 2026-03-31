@@ -47,7 +47,15 @@ $payload = @{
     principalId = $PrincipalId
     resourceId = $apiServicePrincipal.id
     appRoleId = $role.id
-} | ConvertTo-Json -Compress
+}
 
-az rest --method POST --url "$graphUrl/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments" --headers 'Content-Type=application/json' --body $payload | Out-Null
+$bodyFile = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), '.json')
+try {
+    $payload | ConvertTo-Json -Compress | Set-Content -Path $bodyFile -Encoding utf8
+    az rest --method POST --url "$graphUrl/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments" --headers 'Content-Type=application/json' --body "@$bodyFile" | Out-Null
+}
+finally {
+    Remove-Item -Path $bodyFile -ErrorAction SilentlyContinue
+}
+
 Write-Host "Assigned '$RoleValue' application permission to principal '$PrincipalId'."

@@ -28,7 +28,13 @@ param(
     [string]$SubscriptionId,
 
     [Parameter(Mandatory = $false)]
-    [string]$EnvironmentName
+    [string]$EnvironmentName,
+
+    [Parameter(Mandatory = $false)]
+    [string]$AvdHostGroupId,
+
+    [Parameter(Mandatory = $false)]
+    [string]$LinuxHostGroupId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,6 +82,14 @@ if ([string]::IsNullOrWhiteSpace($ApiClientId)) {
     $ApiClientId = Get-AzdEnvValue -Key 'apiClientId'
 }
 
+if ([string]::IsNullOrWhiteSpace($AvdHostGroupId)) {
+    $AvdHostGroupId = Get-AzdEnvValue -Key 'avdHostGroupId'
+}
+
+if ([string]::IsNullOrWhiteSpace($LinuxHostGroupId)) {
+    $LinuxHostGroupId = Get-AzdEnvValue -Key 'linuxHostGroupId'
+}
+
 if ([string]::IsNullOrWhiteSpace($DatabaseName)) {
     $DatabaseName = (Get-AzdEnvValue -Key 'sqlDatabaseName')
     if ([string]::IsNullOrWhiteSpace($DatabaseName)) {
@@ -110,7 +124,8 @@ if ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhite
     throw 'Post-provision inputs could not be fully resolved from parameters or azd environment values.'
 }
 
-& "$PSScriptRoot/Build-ContainerImages.ps1"
+& "$PSScriptRoot/Build-ContainerImages.ps1" `
+    -EnvironmentName $EnvironmentName
 
 & "$PSScriptRoot/Initialize-Database.ps1" `
     -SqlServerFqdn $SqlServerFqdn `
@@ -126,4 +141,13 @@ if ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhite
 
 & "$PSScriptRoot/Assign-VmApiRoles.ps1" `
     -ResourceGroupName $ResourceGroupName `
-    -ApiClientId $ApiClientId
+    -AvdHostGroupId $AvdHostGroupId `
+    -LinuxHostGroupId $LinuxHostGroupId `
+    -EnvironmentName $EnvironmentName
+
+& "$PSScriptRoot/Register-LinuxHostSqlRecords.ps1" `
+    -ResourceGroupName $ResourceGroupName `
+    -SqlServerFqdn $SqlServerFqdn `
+    -DatabaseName $DatabaseName `
+    -SqlAdminLogin $SqlAdminLogin `
+    -SqlAdminPassword $SqlAdminPassword

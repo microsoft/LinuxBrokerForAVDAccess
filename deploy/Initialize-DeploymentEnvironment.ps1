@@ -21,7 +21,27 @@ if ([string]::IsNullOrWhiteSpace($AppName)) {
         $env:APP_NAME
     }
     else {
-        'linuxbroker'
+        $existingAppName = ''
+        if (-not [string]::IsNullOrWhiteSpace($EnvironmentName)) {
+            $existingAppName = (azd env get-value appName --environment $EnvironmentName 2>$null | Out-String).Trim()
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($existingAppName)) {
+            $existingAppName
+        }
+        else {
+            $defaultAppName = 'linuxbroker'
+            $canPromptForAppName = [Environment]::UserInteractive -and
+                (-not $env:CI) -and (-not $env:TF_BUILD) -and (-not $env:GITHUB_ACTIONS) -and (-not $env:BUILD_BUILDID)
+            try { $canPromptForAppName = $canPromptForAppName -and (-not [Console]::IsInputRedirected) } catch { $canPromptForAppName = $false }
+            if ($canPromptForAppName) {
+                $inputAppName = Read-Host "Application name for resource naming [$defaultAppName]"
+                if ([string]::IsNullOrWhiteSpace($inputAppName)) { $defaultAppName } else { $inputAppName.Trim() }
+            }
+            else {
+                $defaultAppName
+            }
+        }
     }
 }
 
@@ -38,16 +58,17 @@ if ([string]::IsNullOrWhiteSpace($EnvironmentName)) {
 }
 
 $graphAppId = '00000003-0000-0000-c000-000000000000'
+$defaultAccessAppRoleId = '00000000-0000-0000-0000-000000000000'
 $frontendGraphDelegatedPermissions = @(
     @{ name = 'User.Read'; id = 'e1fe6dd8-ba31-4d61-89e7-88639da4683d' }
     @{ name = 'profile'; id = '14dad69e-099b-42c9-810b-d002981feec1' }
     @{ name = 'email'; id = '64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0' }
-    @{ name = 'Group.Read.All'; id = '5f8c59db-677d-491f-a6b8-5f174b11ec1d' }
     @{ name = 'offline_access'; id = '7427e0e9-2fba-42fe-b0c0-848c9e6a8182' }
     @{ name = 'openid'; id = '37f7f235-527c-4136-accd-4a02d197296e' }
 )
 
 $apiScopeId = '58db6e6d-38d5-4ce2-bf0a-7fd9cfd5f00a'
+$frontendScopeId = '9afc8711-1fe8-4b8d-9178-44235aa93b4a'
 $apiRoleIds = @{
     FullAccess = '4b2d5f7f-7cc1-4303-8d4b-bd7d2cfe2ca6'
     ScheduledTask = 'd11a6ed0-ee5e-4305-a2a2-252a8107d84f'
@@ -87,19 +108,70 @@ function Get-AzdEnvValue {
     return ($value | Out-String).Trim()
 }
 
+function Get-AzdEnvFilePath {
+    $envDirectory = Join-Path (Join-Path $PSScriptRoot '.azure') $EnvironmentName
+    if (-not (Test-Path -Path $envDirectory)) {
+        New-Item -ItemType Directory -Path $envDirectory -Force | Out-Null
+    }
+
+    return Join-Path $envDirectory '.env'
+}
+
+function Set-AzdEnvFileValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
+    )
+
+    $envFilePath = Get-AzdEnvFilePath
+    $escapedValue = $Value.Replace('"', '\"')
+    $serializedLine = $Key + '="' + $escapedValue + '"'
+    $updatedLines = New-Object System.Collections.Generic.List[string]
+    $matched = $false
+
+    if (Test-Path -Path $envFilePath) {
+        foreach ($line in Get-Content -Path $envFilePath -Encoding utf8) {
+            if ($line.StartsWith($Key + '=')) {
+                $updatedLines.Add($serializedLine)
+                $matched = $true
+            }
+            else {
+                $updatedLines.Add($line)
+            }
+        }
+    }
+
+    if (-not $matched) {
+        $updatedLines.Add($serializedLine)
+    }
+
+    $updatedContent = ($updatedLines -join "`r`n") + "`r`n"
+    Set-Content -Path $envFilePath -Value $updatedContent -Encoding utf8
+}
+
 function Set-AzdEnvValue {
     param(
         [Parameter(Mandatory = $true)][string]$Key,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
     )
 
-    azd env set $Key $Value --environment $EnvironmentName | Out-Null
+    if ($Value.StartsWith('-')) {
+        Set-AzdEnvFileValue -Key $Key -Value $Value
+        return
+    }
+
+    azd env set $Key $Value --environment $EnvironmentName 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to set azd environment value '$Key'."
+    }
 }
 
 function New-RandomSecret {
     param([int]$Length = 40)
 
-    $alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@$%^*-_=+'
+    # Use only characters that survive azd env round-trips and are accepted
+    # by Azure SQL password validation without escaping issues.
+    $alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789-_.'
     $bytes = New-Object byte[] ($Length)
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
 
@@ -109,6 +181,167 @@ function New-RandomSecret {
     }
 
     return $builder.ToString()
+}
+
+function Get-FirstNonEmptyValue {
+    param(
+        [AllowEmptyCollection()]
+        [AllowEmptyString()]
+        [string[]]$Values = @()
+    )
+
+    foreach ($value in $Values) {
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value.Trim()
+        }
+    }
+
+    return ''
+}
+
+function ConvertTo-EscapedMultilineValue {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $normalized = $Value.Replace("`r`n", "`n")
+    return $normalized.Replace("`n", '\n')
+}
+
+function Test-IsInteractiveLocalRun {
+    $nonInteractiveSignals = @(
+        'CI'
+        'TF_BUILD'
+        'GITHUB_ACTIONS'
+        'BUILD_BUILDID'
+    )
+
+    foreach ($signal in $nonInteractiveSignals) {
+        if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($signal))) {
+            return $false
+        }
+    }
+
+    if (-not [Environment]::UserInteractive) {
+        return $false
+    }
+
+    try {
+        # Only check stdin redirection. azd hooks redirect stdout/stderr to
+        # capture output, but stdin stays connected to the terminal so
+        # Read-Host and PromptForChoice still work.
+        return -not [Console]::IsInputRedirected
+    }
+    catch {
+        return $false
+    }
+}
+
+function Show-LinuxHostSshKeyChoicePrompt {
+    param([Parameter(Mandatory = $true)][string]$Message)
+
+    $choices = [System.Management.Automation.Host.ChoiceDescription[]]@(
+        (New-Object System.Management.Automation.Host.ChoiceDescription '&Generate', 'Generate a new Linux host SSH key pair and store it in the azd environment.')
+        (New-Object System.Management.Automation.Host.ChoiceDescription '&UseMine', 'Stop now so you can set your own Linux host SSH public and private keys and rerun azd.')
+    )
+
+    $caption = 'Linux host SSH key pair'
+
+    try {
+        return $Host.UI.PromptForChoice($caption, $Message, $choices, 0)
+    }
+    catch {
+        return 0
+    }
+}
+
+function New-LinuxHostSshKeyPair {
+    $sshKeyGen = Get-Command ssh-keygen -ErrorAction SilentlyContinue
+    if (-not $sshKeyGen) {
+        throw 'OpenSSH ssh-keygen was not found. Install OpenSSH Client or set linuxHostSshPublicKey and linuxHostSshPrivateKey manually.'
+    }
+
+    $tempDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("linuxbroker-ssh-" + [guid]::NewGuid().ToString('N'))
+    $privateKeyPath = Join-Path $tempDirectory 'id_ed25519'
+    $keyComment = "$AppName-$EnvironmentName-linux-host"
+
+    New-Item -ItemType Directory -Path $tempDirectory -Force | Out-Null
+
+    try {
+        & $sshKeyGen.Source -q -t ed25519 -N '' -C $keyComment -f $privateKeyPath | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'ssh-keygen failed while creating the Linux host SSH key pair.'
+        }
+
+        $privateKey = Get-Content -Path $privateKeyPath -Raw -Encoding utf8
+        $publicKey = (Get-Content -Path "$privateKeyPath.pub" -Raw -Encoding utf8).Trim()
+
+        return @{
+            PrivateKey = ConvertTo-EscapedMultilineValue -Value $privateKey
+            PublicKey = $publicKey
+        }
+    }
+    finally {
+        Remove-Item -Path $tempDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Ensure-LinuxHostSshKeys {
+    $resolvedPublicKey = Get-FirstNonEmptyValue -Values @(
+        (Get-AzdEnvValue -Key 'linuxHostSshPublicKey'),
+        (Get-AzdEnvValue -Key 'LINUX_HOST_SSH_PUBLIC_KEY')
+    )
+    $resolvedPrivateKey = Get-FirstNonEmptyValue -Values @(
+        (Get-AzdEnvValue -Key 'linuxHostSshPrivateKey'),
+        (Get-AzdEnvValue -Key 'LINUX_HOST_SSH_PRIVATE_KEY')
+    )
+
+    $hasPublicKey = -not [string]::IsNullOrWhiteSpace($resolvedPublicKey)
+    $hasPrivateKey = -not [string]::IsNullOrWhiteSpace($resolvedPrivateKey)
+
+    if ($hasPublicKey -xor $hasPrivateKey) {
+        if (Test-IsInteractiveLocalRun) {
+            $choice = Show-LinuxHostSshKeyChoicePrompt -Message "A partial Linux host SSH key pair is configured for azd environment '$EnvironmentName'. Generate a fresh complete pair now, or stop and provide your own key pair."
+            if ($choice -eq 1) {
+                throw 'Set both linuxHostSshPublicKey and linuxHostSshPrivateKey (or LINUX_HOST_SSH_PUBLIC_KEY and LINUX_HOST_SSH_PRIVATE_KEY) and rerun azd.'
+            }
+        }
+
+        Write-Warning 'Detected a partial Linux host SSH key pair in the azd environment. Generating a fresh complete pair.'
+        $resolvedPublicKey = ''
+        $resolvedPrivateKey = ''
+        $hasPublicKey = $false
+        $hasPrivateKey = $false
+    }
+
+    if (-not $hasPublicKey -and -not $hasPrivateKey) {
+        if (Test-IsInteractiveLocalRun) {
+            $choice = Show-LinuxHostSshKeyChoicePrompt -Message "No Linux host SSH key pair is configured for azd environment '$EnvironmentName'."
+            if ($choice -eq 1) {
+                throw 'Set linuxHostSshPublicKey and linuxHostSshPrivateKey (or LINUX_HOST_SSH_PUBLIC_KEY and LINUX_HOST_SSH_PRIVATE_KEY) and rerun azd.'
+            }
+        }
+
+        $generatedKeys = New-LinuxHostSshKeyPair
+        $resolvedPublicKey = $generatedKeys.PublicKey
+        $resolvedPrivateKey = $generatedKeys.PrivateKey
+        Write-Host 'Generated a new Linux host SSH key pair for this azd environment.'
+    }
+    else {
+        if ($resolvedPrivateKey.Contains("`n") -or $resolvedPrivateKey.Contains("`r")) {
+            $resolvedPrivateKey = ConvertTo-EscapedMultilineValue -Value $resolvedPrivateKey
+        }
+
+        Write-Host 'Using the Linux host SSH key pair already configured in the azd environment.'
+    }
+
+    Set-AzdEnvValue -Key 'LINUX_HOST_SSH_PUBLIC_KEY' -Value $resolvedPublicKey
+    Set-AzdEnvValue -Key 'LINUX_HOST_SSH_PRIVATE_KEY' -Value $resolvedPrivateKey
+    Set-AzdEnvValue -Key 'linuxHostSshPublicKey' -Value $resolvedPublicKey
+    Set-AzdEnvValue -Key 'linuxHostSshPrivateKey' -Value $resolvedPrivateKey
+
+    return @{
+        PublicKey = $resolvedPublicKey
+        PrivateKey = $resolvedPrivateKey
+    }
 }
 
 function Ensure-DefaultEnvValue {
@@ -140,6 +373,22 @@ function Write-JsonFile {
     return $path
 }
 
+function Invoke-GraphRestJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)]$Body
+    )
+
+    $bodyFile = Write-JsonFile -InputObject $Body
+    try {
+        az rest --method $Method --url $Url --headers 'Content-Type=application/json' --body "@$bodyFile" | Out-Null
+    }
+    finally {
+        Remove-Item -Path $bodyFile -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-MatchingApp {
     param([Parameter(Mandatory = $true)][string]$DisplayName)
 
@@ -167,6 +416,92 @@ function Ensure-ServicePrincipal {
     return az ad sp create --id $AppId --output json | ConvertFrom-Json
 }
 
+function Ensure-GroupAppRoleAssignment {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$CloudContext,
+        [Parameter(Mandatory = $true)][string]$GroupId,
+        [Parameter(Mandatory = $true)][string]$ResourceServicePrincipalId,
+        [Parameter(Mandatory = $true)][string]$AppRoleId
+    )
+
+    $assignmentsResponse = az rest --method GET --url "$($CloudContext.GraphUrl)/v1.0/groups/$GroupId/appRoleAssignments" --output json | ConvertFrom-Json
+    $existingAssignment = $assignmentsResponse.value | Where-Object {
+        $_.resourceId -eq $ResourceServicePrincipalId -and $_.appRoleId -eq $AppRoleId
+    } | Select-Object -First 1
+
+    if ($existingAssignment) {
+        return
+    }
+
+    $payload = @{
+        principalId = $GroupId
+        resourceId = $ResourceServicePrincipalId
+        appRoleId = $AppRoleId
+    }
+
+    Invoke-GraphRestJson -Method 'POST' -Url "$($CloudContext.GraphUrl)/v1.0/groups/$GroupId/appRoleAssignments" -Body $payload
+}
+
+function Get-SignedInUser {
+    try {
+        $userType = az account show --query user.type --output tsv 2>$null
+        if ($LASTEXITCODE -ne 0 -or $userType -ne 'user') {
+            return $null
+        }
+
+        return az ad signed-in-user show --output json | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Ensure-UserAppRoleAssignment {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$CloudContext,
+        [Parameter(Mandatory = $true)][string]$UserId,
+        [Parameter(Mandatory = $true)][string]$ResourceServicePrincipalId,
+        [Parameter(Mandatory = $true)][string]$AppRoleId
+    )
+
+    $assignmentsResponse = az rest --method GET --url "$($CloudContext.GraphUrl)/v1.0/users/$UserId/appRoleAssignments" --output json | ConvertFrom-Json
+    $existingAssignment = $assignmentsResponse.value | Where-Object {
+        $_.resourceId -eq $ResourceServicePrincipalId -and $_.appRoleId -eq $AppRoleId
+    } | Select-Object -First 1
+
+    if ($existingAssignment) {
+        return
+    }
+
+    $payload = @{
+        principalId = $UserId
+        resourceId = $ResourceServicePrincipalId
+        appRoleId = $AppRoleId
+    }
+
+    Invoke-GraphRestJson -Method 'POST' -Url "$($CloudContext.GraphUrl)/v1.0/users/$UserId/appRoleAssignments" -Body $payload
+}
+
+function Remove-UserAppRoleAssignment {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$CloudContext,
+        [Parameter(Mandatory = $true)][string]$UserId,
+        [Parameter(Mandatory = $true)][string]$ResourceServicePrincipalId,
+        [Parameter(Mandatory = $true)][string]$AppRoleId
+    )
+
+    $assignmentsResponse = az rest --method GET --url "$($CloudContext.GraphUrl)/v1.0/users/$UserId/appRoleAssignments" --output json | ConvertFrom-Json
+    $existingAssignment = $assignmentsResponse.value | Where-Object {
+        $_.resourceId -eq $ResourceServicePrincipalId -and $_.appRoleId -eq $AppRoleId
+    } | Select-Object -First 1
+
+    if (-not $existingAssignment) {
+        return
+    }
+
+    az rest --method DELETE --url "$($CloudContext.GraphUrl)/v1.0/users/$UserId/appRoleAssignments/$($existingAssignment.id)" | Out-Null
+}
+
 function Ensure-ClientSecret {
     param(
         [Parameter(Mandatory = $true)]$Application,
@@ -186,6 +521,18 @@ function Ensure-ClientSecret {
     $secret = az ad app credential reset --id $Application.appId --append --output json | ConvertFrom-Json
     Set-AzdEnvValue -Key $EnvSecretKey -Value $secret.password
     return $secret.password
+}
+
+function Ensure-AppAdminConsent {
+    param(
+        [Parameter(Mandatory = $true)][string]$AppId,
+        [Parameter(Mandatory = $true)][string]$DisplayName
+    )
+
+    az ad app permission admin-consent --id $AppId 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Unable to grant admin consent automatically for application '$DisplayName'. Grant tenant-wide consent manually if required."
+    }
 }
 
 function Ensure-Group {
@@ -250,14 +597,34 @@ function Ensure-FrontendApplication {
         Remove-Item -Path $requiredResourcesFile -ErrorAction SilentlyContinue
     }
 
+    $frontendManifest = @{
+        identifierUris = @("api://$($app.appId)")
+        api = @{
+            requestedAccessTokenVersion = 2
+            oauth2PermissionScopes = @(
+                @{
+                    adminConsentDescription = "Allow the application to access $DisplayName on behalf of the signed-in user."
+                    adminConsentDisplayName = "Access $DisplayName"
+                    id = $frontendScopeId
+                    isEnabled = $true
+                    type = 'User'
+                    userConsentDescription = "Allow the application to access $DisplayName on your behalf."
+                    userConsentDisplayName = "Access $DisplayName"
+                    value = 'user_impersonation'
+                }
+            )
+        }
+    }
+
+    Invoke-GraphRestJson -Method 'PATCH' -Url "$($CloudContext.GraphUrl)/v1.0/applications/$($app.id)" -Body $frontendManifest
+
     $logoutBody = @{
         web = @{
             logoutUrl = "$redirectBase/logout"
         }
     }
 
-    $logoutPayload = $logoutBody | ConvertTo-Json -Depth 10 -Compress
-    az rest --method PATCH --url "$($CloudContext.GraphUrl)/v1.0/applications/$($app.id)" --headers 'Content-Type=application/json' --body $logoutPayload | Out-Null
+    Invoke-GraphRestJson -Method 'PATCH' -Url "$($CloudContext.GraphUrl)/v1.0/applications/$($app.id)" -Body $logoutBody
 
     return $app
 }
@@ -265,7 +632,8 @@ function Ensure-FrontendApplication {
 function Ensure-ApiApplication {
     param(
         [Parameter(Mandatory = $true)][hashtable]$CloudContext,
-        [Parameter(Mandatory = $true)][string]$DisplayName
+        [Parameter(Mandatory = $true)][string]$DisplayName,
+        [Parameter(Mandatory = $false)][string]$FrontendAppId = ''
     )
 
     $app = Get-MatchingApp -DisplayName $DisplayName
@@ -275,9 +643,53 @@ function Ensure-ApiApplication {
 
     az ad app update --id $app.id --identifier-uris "api://$($app.appId)" --requested-access-token-version 2 | Out-Null
 
+    $graphSp = az ad sp show --id $graphAppId --output json | ConvertFrom-Json
+    $graphApplicationPermissions = @(
+        'Directory.Read.All'
+        'Group.Read.All'
+        'GroupMember.Read.All'
+    )
+    $graphResourceAccess = @()
+
+    foreach ($permissionValue in $graphApplicationPermissions) {
+        $roleId = $graphSp.appRoles | Where-Object {
+            $_.value -eq $permissionValue -and $_.allowedMemberTypes -contains 'Application'
+        } | Select-Object -ExpandProperty id -First 1
+
+        if ($roleId) {
+            $graphResourceAccess += @{
+                id = $roleId
+                type = 'Role'
+            }
+        }
+    }
+
+    $requiredResourceAccess = @()
+    if ($graphResourceAccess.Count -gt 0) {
+        $requiredResourceAccess += @{
+            resourceAppId = $graphAppId
+            resourceAccess = $graphResourceAccess
+        }
+    }
+
+    $knownClientApplications = @()
+    $preAuthorizedApplications = @()
+    if (-not [string]::IsNullOrWhiteSpace($FrontendAppId)) {
+        $knownClientApplications = @($FrontendAppId)
+        $preAuthorizedApplications = @(
+            @{
+                appId = $FrontendAppId
+                delegatedPermissionIds = @($apiScopeId)
+            }
+        )
+    }
+
     $apiManifest = @{
         identifierUris = @("api://$($app.appId)")
+        requiredResourceAccess = $requiredResourceAccess
         api = @{
+            knownClientApplications = $knownClientApplications
+            preAuthorizedApplications = $preAuthorizedApplications
             requestedAccessTokenVersion = 2
             oauth2PermissionScopes = @(
                 @{
@@ -294,14 +706,13 @@ function Ensure-ApiApplication {
         }
     }
 
-    $manifestPayload = $apiManifest | ConvertTo-Json -Depth 20 -Compress
-    az rest --method PATCH --url "$($CloudContext.GraphUrl)/v1.0/applications/$($app.id)" --headers 'Content-Type=application/json' --body $manifestPayload | Out-Null
+    Invoke-GraphRestJson -Method 'PATCH' -Url "$($CloudContext.GraphUrl)/v1.0/applications/$($app.id)" -Body $apiManifest
 
     $appRoles = @(
         @{
-            allowedMemberTypes = @('Application', 'User')
+            allowedMemberTypes = @('User')
             description = 'Full access to Linux Broker management APIs.'
-            displayName = 'Full Access'
+            displayName = 'FullAccess'
             id = $apiRoleIds.FullAccess
             isEnabled = $true
             value = 'FullAccess'
@@ -309,23 +720,23 @@ function Ensure-ApiApplication {
         @{
             allowedMemberTypes = @('Application')
             description = 'Allows the scheduled task function app to call maintenance endpoints.'
-            displayName = 'Scheduled Task'
+            displayName = 'ScheduledTask'
             id = $apiRoleIds.ScheduledTask
             isEnabled = $true
             value = 'ScheduledTask'
         }
         @{
-            allowedMemberTypes = @('Application')
+            allowedMemberTypes = @('Application', 'User')
             description = 'Allows AVD host automation to call AVD-specific endpoints.'
-            displayName = 'AVD Host'
+            displayName = 'AvdHost'
             id = $apiRoleIds.AvdHost
             isEnabled = $true
             value = 'AvdHost'
         }
         @{
-            allowedMemberTypes = @('Application')
+            allowedMemberTypes = @('Application', 'User')
             description = 'Allows Linux host automation to call Linux host endpoints.'
-            displayName = 'Linux Host'
+            displayName = 'LinuxHost'
             id = $apiRoleIds.LinuxHost
             isEnabled = $true
             value = 'LinuxHost'
@@ -338,33 +749,6 @@ function Ensure-ApiApplication {
     }
     finally {
         Remove-Item -Path $appRolesFile -ErrorAction SilentlyContinue
-    }
-
-    $graphSp = az ad sp show --id $graphAppId --output json | ConvertFrom-Json
-    $groupMemberReadAllRoleId = $graphSp.appRoles | Where-Object {
-        $_.value -eq 'GroupMember.Read.All' -and $_.allowedMemberTypes -contains 'Application'
-    } | Select-Object -ExpandProperty id -First 1
-
-    if ($groupMemberReadAllRoleId) {
-        $requiredResources = @(
-            @{
-                resourceAppId = $graphAppId
-                resourceAccess = @(
-                    @{
-                        id = $groupMemberReadAllRoleId
-                        type = 'Role'
-                    }
-                )
-            }
-        )
-
-        $requiredResourcesFile = Write-JsonFile -InputObject $requiredResources
-        try {
-            az ad app update --id $app.id --required-resource-accesses "@$requiredResourcesFile" | Out-Null
-        }
-        finally {
-            Remove-Item -Path $requiredResourcesFile -ErrorAction SilentlyContinue
-        }
     }
 
     return $app
@@ -383,15 +767,6 @@ $defaultTenantId = $subscription.tenantId
 
 Ensure-DefaultEnvValue -Key 'appName' -ValueFactory { $AppName } | Out-Null
 Ensure-DefaultEnvValue -Key 'environmentName' -ValueFactory { $EnvironmentName } | Out-Null
-Ensure-DefaultEnvValue -Key 'AZURE_LOCATION' -ValueFactory {
-    if (-not [string]::IsNullOrWhiteSpace($env:AZURE_LOCATION)) {
-        $env:AZURE_LOCATION
-    }
-    else {
-        'eastus2'
-    }
-} | Out-Null
-Ensure-DefaultEnvValue -Key 'location' -ValueFactory { Get-AzdEnvValue -Key 'AZURE_LOCATION' } | Out-Null
 Ensure-DefaultEnvValue -Key 'tenantId' -ValueFactory { $defaultTenantId } | Out-Null
 
 Ensure-DefaultEnvValue -Key 'SQL_ADMIN_LOGIN' -ValueFactory { 'brokeradmin' } | Out-Null
@@ -401,7 +776,6 @@ Ensure-DefaultEnvValue -Key 'LINUX_HOST_ADMIN_LOGIN_NAME' -ValueFactory { 'avdad
 Ensure-DefaultEnvValue -Key 'DOMAIN_NAME' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'NFS_SHARE' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'VM_HOST_RESOURCE_GROUP' -ValueFactory { '' } | Out-Null
-Ensure-DefaultEnvValue -Key 'ALLOWED_CLIENT_IP' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'FLASK_SESSION_SECRET' -ValueFactory { New-RandomSecret -Length 48 } | Out-Null
 Ensure-DefaultEnvValue -Key 'SQL_ADMIN_PASSWORD' -ValueFactory { New-RandomSecret -Length 32 } | Out-Null
 Ensure-DefaultEnvValue -Key 'HOST_ADMIN_PASSWORD' -ValueFactory { New-RandomSecret -Length 32 } | Out-Null
@@ -412,7 +786,11 @@ Ensure-DefaultEnvValue -Key 'avdSessionHostCount' -ValueFactory { '1' } | Out-Nu
 Ensure-DefaultEnvValue -Key 'avdHostPoolName' -ValueFactory { "$AppName-$EnvironmentName-hp" } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdVmNamePrefix' -ValueFactory { 'avdhost' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostVmNamePrefix' -ValueFactory { 'lnxhost' } | Out-Null
-Ensure-DefaultEnvValue -Key 'linuxHostAuthType' -ValueFactory { 'Password' } | Out-Null
+Ensure-DefaultEnvValue -Key 'linuxHostAuthType' -ValueFactory { 'SSH' } | Out-Null
+Ensure-DefaultEnvValue -Key 'LINUX_HOST_SSH_PUBLIC_KEY' -ValueFactory { '' } | Out-Null
+Ensure-DefaultEnvValue -Key 'LINUX_HOST_SSH_PRIVATE_KEY' -ValueFactory { '' } | Out-Null
+Ensure-DefaultEnvValue -Key 'linuxHostSshPublicKey' -ValueFactory { Get-AzdEnvValue -Key 'LINUX_HOST_SSH_PUBLIC_KEY' } | Out-Null
+Ensure-DefaultEnvValue -Key 'linuxHostSshPrivateKey' -ValueFactory { Get-AzdEnvValue -Key 'LINUX_HOST_SSH_PRIVATE_KEY' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostOsVersion' -ValueFactory { '24_04-lts' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostVmSize' -ValueFactory { 'Standard_D2s_v5' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdVmSize' -ValueFactory { 'Standard_D8s_v5' } | Out-Null
@@ -425,21 +803,48 @@ Ensure-DefaultEnvValue -Key 'linuxHostAdminLoginName' -ValueFactory { 'avdadmin'
 Ensure-DefaultEnvValue -Key 'domainName' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'nfsShare' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'vmHostResourceGroup' -ValueFactory { '' } | Out-Null
-Ensure-DefaultEnvValue -Key 'allowedClientIp' -ValueFactory { '' } | Out-Null
+# Always refresh the client IP since it can change between runs
+$detectedIp = try { (Invoke-RestMethod -Uri 'https://ifconfig.me/ip' -TimeoutSec 10).Trim() } catch { '' }
+Set-AzdEnvValue -Key 'allowedClientIp' -Value $detectedIp
+if ($detectedIp) { Write-Host "Detected client IP for SQL firewall: $detectedIp" }
 Ensure-DefaultEnvValue -Key 'flaskKey' -ValueFactory { Get-AzdEnvValue -Key 'FLASK_SESSION_SECRET' } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlAdminPassword' -ValueFactory { Get-AzdEnvValue -Key 'SQL_ADMIN_PASSWORD' } | Out-Null
 Ensure-DefaultEnvValue -Key 'hostAdminPassword' -ValueFactory { Get-AzdEnvValue -Key 'HOST_ADMIN_PASSWORD' } | Out-Null
 
+$deployLinuxHostsValue = Get-AzdEnvValue -Key 'deployLinuxHosts'
+$linuxHostAuthTypeValue = Get-AzdEnvValue -Key 'linuxHostAuthType'
+
+if ($deployLinuxHostsValue -eq 'true' -and $linuxHostAuthTypeValue -ne 'SSH') {
+    throw 'linuxHostAuthType must be SSH for broker-managed Linux hosts because the broker connects to them with an SSH key.'
+}
+
+if ($deployLinuxHostsValue -eq 'true') {
+    [void](Ensure-LinuxHostSshKeys)
+}
+
 $apiApp = Ensure-ApiApplication -CloudContext $cloudContext -DisplayName $apiAppDisplayName
-Ensure-ServicePrincipal -AppId $apiApp.appId | Out-Null
+$apiServicePrincipal = Ensure-ServicePrincipal -AppId $apiApp.appId
 Ensure-ClientSecret -Application $apiApp -EnvClientIdKey 'API_CLIENT_ID' -EnvSecretKey 'API_CLIENT_SECRET' | Out-Null
+Ensure-AppAdminConsent -AppId $apiApp.appId -DisplayName $apiApp.displayName
 
 $frontendApp = Ensure-FrontendApplication -CloudContext $cloudContext -DisplayName $frontendAppDisplayName -AppServiceName $frontendAppServiceName -ApiAppId $apiApp.appId
-Ensure-ServicePrincipal -AppId $frontendApp.appId | Out-Null
+$frontendServicePrincipal = Ensure-ServicePrincipal -AppId $frontendApp.appId
 Ensure-ClientSecret -Application $frontendApp -EnvClientIdKey 'FRONTEND_CLIENT_ID' -EnvSecretKey 'FRONTEND_CLIENT_SECRET' | Out-Null
+$apiApp = Ensure-ApiApplication -CloudContext $cloudContext -DisplayName $apiAppDisplayName -FrontendAppId $frontendApp.appId
+Ensure-AppAdminConsent -AppId $apiApp.appId -DisplayName $apiApp.displayName
 
 $avdGroup = Ensure-Group -DisplayName $avdGroupName
 $linuxGroup = Ensure-Group -DisplayName $linuxGroupName
+
+$deploymentUser = Get-SignedInUser
+if ($deploymentUser) {
+    Ensure-UserAppRoleAssignment -CloudContext $cloudContext -UserId $deploymentUser.id -ResourceServicePrincipalId $frontendServicePrincipal.id -AppRoleId $defaultAccessAppRoleId
+    Remove-UserAppRoleAssignment -CloudContext $cloudContext -UserId $deploymentUser.id -ResourceServicePrincipalId $apiServicePrincipal.id -AppRoleId $defaultAccessAppRoleId
+    Ensure-UserAppRoleAssignment -CloudContext $cloudContext -UserId $deploymentUser.id -ResourceServicePrincipalId $apiServicePrincipal.id -AppRoleId $apiRoleIds.FullAccess
+}
+
+Ensure-GroupAppRoleAssignment -CloudContext $cloudContext -GroupId $avdGroup.id -ResourceServicePrincipalId $apiServicePrincipal.id -AppRoleId $apiRoleIds.AvdHost
+Ensure-GroupAppRoleAssignment -CloudContext $cloudContext -GroupId $linuxGroup.id -ResourceServicePrincipalId $apiServicePrincipal.id -AppRoleId $apiRoleIds.LinuxHost
 
 Set-AzdEnvValue -Key 'API_CLIENT_ID' -Value $apiApp.appId
 Set-AzdEnvValue -Key 'FRONTEND_CLIENT_ID' -Value $frontendApp.appId
@@ -457,4 +862,32 @@ Write-Host "API application: $($apiApp.displayName) ($($apiApp.appId))"
 Write-Host "Frontend application: $($frontendApp.displayName) ($($frontendApp.appId))"
 Write-Host "AVD host group: $($avdGroup.displayName) ($($avdGroup.id))"
 Write-Host "Linux host group: $($linuxGroup.displayName) ($($linuxGroup.id))"
-Write-Host 'Admin consent is still required for the configured Microsoft Graph and API permissions.'
+Write-Host 'Automatic admin consent was attempted for the configured application permissions. If consent was not granted, complete it manually in Microsoft Entra ID.'
+
+# Generate the Bicep parameters file with the real values so azd passes them
+# to the ARM deployment. azd collects parameters BEFORE running preprovision,
+# so env values set above would not be picked up through ${...} references or
+# auto-mapping. Writing the file here guarantees the deployment gets real values.
+$bicepParametersPath = Join-Path $PSScriptRoot 'bicep' 'main.parameters.json'
+$bicepParameters = [ordered]@{
+    '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+    contentVersion = '1.0.0.0'
+    parameters = [ordered]@{
+        environmentName     = @{ value = '${AZURE_ENV_NAME}' }
+        location            = @{ value = '${AZURE_LOCATION}' }
+        appName             = @{ value = (Get-AzdEnvValue -Key 'appName') }
+        tenantId            = @{ value = (Get-AzdEnvValue -Key 'tenantId') }
+        frontendClientId    = @{ value = (Get-AzdEnvValue -Key 'frontendClientId') }
+        frontendClientSecret = @{ value = (Get-AzdEnvValue -Key 'frontendClientSecret') }
+        apiClientId         = @{ value = (Get-AzdEnvValue -Key 'apiClientId') }
+        apiClientSecret     = @{ value = (Get-AzdEnvValue -Key 'apiClientSecret') }
+        linuxHostSshPrivateKey = @{ value = (Get-AzdEnvValue -Key 'linuxHostSshPrivateKey') }
+        sqlAdminPassword    = @{ value = (Get-AzdEnvValue -Key 'sqlAdminPassword') }
+        flaskKey            = @{ value = (Get-AzdEnvValue -Key 'flaskKey') }
+        hostAdminPassword   = @{ value = (Get-AzdEnvValue -Key 'hostAdminPassword') }
+        allowedClientIp     = @{ value = (Get-AzdEnvValue -Key 'allowedClientIp') }
+    }
+}
+
+$bicepParameters | ConvertTo-Json -Depth 10 | Set-Content -Path $bicepParametersPath -Encoding utf8
+Write-Host "Generated Bicep parameters file at '$bicepParametersPath'."

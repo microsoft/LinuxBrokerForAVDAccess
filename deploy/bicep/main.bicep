@@ -7,7 +7,7 @@ param appName string
 param environmentName string
 
 @description('Azure region for all resources.')
-param location string = deployment().location
+param location string
 
 @description('Tags applied to provisioned resources.')
 param tags object = {}
@@ -16,21 +16,25 @@ param tags object = {}
 param resourceGroupName string = ''
 
 @description('Tenant ID used by the frontend and API applications.')
-param tenantId string
+param tenantId string = ''
 
 @description('Frontend Entra app client ID.')
-param frontendClientId string
+param frontendClientId string = ''
 
 @secure()
 @description('Frontend Entra app client secret.')
-param frontendClientSecret string
+param frontendClientSecret string = ''
 
 @description('API Entra app client ID.')
-param apiClientId string
+param apiClientId string = ''
 
 @secure()
 @description('API Entra app client secret.')
-param apiClientSecret string
+param apiClientSecret string = ''
+
+@secure()
+@description('Linux host SSH private key stored in Key Vault for broker-managed SSH access.')
+param linuxHostSshPrivateKey string = ''
 
 @description('Azure AD group ID used for AVD host access.')
 param avdHostGroupId string = ''
@@ -43,11 +47,11 @@ param sqlAdminLogin string = 'brokeradmin'
 
 @secure()
 @description('SQL administrator password.')
-param sqlAdminPassword string
+param sqlAdminPassword string = ''
 
 @secure()
 @description('Flask session key for the frontend app.')
-param flaskKey string
+param flaskKey string = ''
 
 @description('Optional custom domain used by Linux hosts.')
 param domainName string = ''
@@ -60,7 +64,7 @@ param linuxHostAdminLoginName string = 'avdadmin'
 
 @secure()
 @description('Admin password used for Linux and AVD host provisioning.')
-param hostAdminPassword string
+param hostAdminPassword string = ''
 
 @description('Optional resource group that contains managed VMs. Defaults to the deployment resource group.')
 param vmHostResourceGroup string = ''
@@ -94,7 +98,7 @@ param linuxHostCount int = 0
   'SSH'
 ])
 @description('Authentication mode for Linux host VMs.')
-param linuxHostAuthType string = 'Password'
+param linuxHostAuthType string = 'SSH'
 
 @description('SSH public key used when Linux host auth type is SSH.')
 param linuxHostSshPublicKey string = ''
@@ -156,6 +160,7 @@ module resources 'main.resources.bicep' = {
     frontendClientSecret: frontendClientSecret
     apiClientId: apiClientId
     apiClientSecret: apiClientSecret
+    linuxHostSshPrivateKey: linuxHostSshPrivateKey
     avdHostGroupId: avdHostGroupId
     linuxHostGroupId: linuxHostGroupId
     sqlAdminLogin: sqlAdminLogin
