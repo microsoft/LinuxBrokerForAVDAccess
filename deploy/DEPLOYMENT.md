@@ -24,6 +24,11 @@ Two details matter here:
 - The supported path is `azd up` from the `deploy/` directory, not a separate manual mix of Bicep plus ad hoc scripts.
 - Container images are built remotely with `az acr build`, so local Docker is not required.
 
+For upgrade scenarios, keep one more distinction clear:
+
+- `azd up` remains the greenfield path that deploys the current ideal version for new environments.
+- Existing customer environments should use a separate migration process instead of pushing upgrade logic into `azd up`.
+
 ## Prerequisites
 
 ### Local tooling
@@ -218,6 +223,60 @@ That means `postprovision` does all of the following:
 - Assigns the `ScheduledTask` app role to the function app managed identity.
 - Adds AVD and Linux VM managed identities to the corresponding Entra groups.
 - Registers Linux hosts into `dbo.VirtualMachines` through `dbo.RegisterLinuxHostVm`.
+
+## Migration For Existing Deployments
+
+Use the migration flow when you already have a deployed customer environment and want to roll forward the current application, SQL, and Linux-host release-agent changes without treating that as part of the normal `azd up` lifecycle.
+
+The migration entrypoint is [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1).
+
+That script intentionally stays separate from `azd up`:
+
+- `azd up` continues to express the desired greenfield deployment for new environments.
+- [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1) is the supported in-place process for existing environments.
+
+By default, the migration script does two things:
+
+1. Runs [Post-Provision.ps1](Post-Provision.ps1) so the existing environment gets the latest container images, SQL scripts, role assignments, VM group sync, and Linux host SQL registration.
+2. Runs [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) so existing Linux hosts get the current release-agent files, one-minute reconciliation timer, and `systemd-logind` watcher.
+
+Example full migration:
+
+```powershell
+Set-Location .\deploy
+.\Migrate-ExistingEnvironment.ps1 -EnvironmentName <environment-name>
+```
+
+Example canary rollout to only selected Linux hosts:
+
+```powershell
+Set-Location .\deploy
+.\Migrate-ExistingEnvironment.ps1 `
+	-EnvironmentName <environment-name> `
+	-LinuxHostNames lnxhost-01,lnxhost-02
+```
+
+Example host-only migration when you do not want to rerun the post-provision steps:
+
+```powershell
+Set-Location .\deploy
+.\Migrate-ExistingEnvironment.ps1 `
+	-EnvironmentName <environment-name> `
+	-SkipPostProvision
+```
+
+Example migration against a release tag source instead of `main`:
+
+```powershell
+Set-Location .\deploy
+.\Migrate-ExistingEnvironment.ps1 `
+	-EnvironmentName <environment-name> `
+	-ScriptSourceRoot https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/tags/<tag>
+```
+
+The host migration step updates only the release-agent-related files and services on existing Linux VMs. It does not reprovision infrastructure, replace the VM image, rerun the full Linux custom script extension, or attempt to reconcile every manual drift in an older environment.
+
+The migration also rewrites `/etc/sudoers.d/avdadmin`. Older hosts were provisioned with a broad allowlist that included `cat`, `rm`, `chmod`, `chown`, `cp`, `mount`, and `umount`. The current policy grants only `userdel`, `groupadd`, `usermod`, `chpasswd`, `/usr/local/bin/create-user.sh`, and `/usr/local/bin/manage-lease.sh`; all privileged file work now happens inside those two root-owned scripts. The generated policy is validated with `visudo -c` and moved into place only if it passes.
 
 ## Manual Steps After `azd up`
 
