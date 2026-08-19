@@ -3,13 +3,23 @@
 # Print info about xrdp Xorg sessions
 #
 
-RED=$(tput setaf 1; tput bold) #"\033[1;31m"
-GREEN=$(tput setaf 2; tput bold) #"\033[1;32m"
-YELLOW=$(tput setaf 3; tput bold)
-ENDCOLOR=$(tput sgr0) #"\033[0m"
-BLINK=$(tput blink)
-REVERSE=$(tput smso)
-UNDERLINE=$(tput smul)
+if [ -t 1 ] && [ -n "$TERM" ]; then
+    RED=$(tput setaf 1; tput bold) #"\033[1;31m"
+    GREEN=$(tput setaf 2; tput bold) #"\033[1;32m"
+    YELLOW=$(tput setaf 3; tput bold)
+    ENDCOLOR=$(tput sgr0) #"\033[0m"
+    BLINK=$(tput blink)
+    REVERSE=$(tput smso)
+    UNDERLINE=$(tput smul)
+else
+    RED=""
+    GREEN=""
+    YELLOW=""
+    ENDCOLOR=""
+    BLINK=""
+    REVERSE=""
+    UNDERLINE=""
+fi
 
 # Format string for printf
 _printf="%7s %-20s %-19s %-12s\n"

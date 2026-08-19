@@ -9,13 +9,23 @@
 #
 
 # Setting up color variables for output formatting using tput for portability and readability
-RED=$(tput setaf 1; tput bold) # Set text color to bold red
-GREEN=$(tput setaf 2; tput bold) # Set text color to bold green
-YELLOW=$(tput setaf 3; tput bold) # Set text color to bold yellow
-ENDCOLOR=$(tput sgr0) # Reset text formatting to default
-BLINK=$(tput blink) # Unused in this script, would make text blink
-REVERSE=$(tput smso) # Unused in this script, would reverse the background and foreground colors
-UNDERLINE=$(tput smul) # Unused in this script, would underline text
+if [ -t 1 ] && [ -n "$TERM" ]; then
+    RED=$(tput setaf 1; tput bold) # Set text color to bold red
+    GREEN=$(tput setaf 2; tput bold) # Set text color to bold green
+    YELLOW=$(tput setaf 3; tput bold) # Set text color to bold yellow
+    ENDCOLOR=$(tput sgr0) # Reset text formatting to default
+    BLINK=$(tput blink) # Unused in this script, would make text blink
+    REVERSE=$(tput smso) # Unused in this script, would reverse the background and foreground colors
+    UNDERLINE=$(tput smul) # Unused in this script, would underline text
+else
+    RED=""
+    GREEN=""
+    YELLOW=""
+    ENDCOLOR=""
+    BLINK=""
+    REVERSE=""
+    UNDERLINE=""
+fi
 
 # Format string for printf to maintain consistent column widths and alignments in the output
 _printf="%7s %-20s %-19s %-10s %4s %-12s\n"
