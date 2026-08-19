@@ -1,5 +1,3 @@
-USE linuxbroker;
-
 IF OBJECT_ID('dbo.VmScalingRules', 'U') IS NULL
 BEGIN
     CREATE TABLE VmScalingRules (

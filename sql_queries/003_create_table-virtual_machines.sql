@@ -1,5 +1,3 @@
-USE linuxbroker;
-
 IF OBJECT_ID('dbo.VirtualMachines', 'U') IS NULL
 BEGIN
     CREATE TABLE VirtualMachines (

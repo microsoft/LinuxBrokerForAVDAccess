@@ -198,6 +198,10 @@ resource keyVaultResource 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
   name: keyVaultName
 }
 
+resource storageAccountResource 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+  name: storageAccountName
+}
+
 var frontendImageName = '${containerRegistry.outputs.loginServer}/frontend:latest'
 var apiImageName = '${containerRegistry.outputs.loginServer}/api:latest'
 var taskImageName = '${containerRegistry.outputs.loginServer}/task:latest'
@@ -227,7 +231,9 @@ var resolvedGraphEndpoint = empty(graphEndpoint) ? cloudProfile.graphEndpoint : 
 var resolvedStsIssuerHost = empty(stsIssuerHost) ? cloudProfile.stsIssuerHost : stsIssuerHost
 var resolvedAppServiceDomain = empty(appServiceDomain) ? cloudProfile.appServiceDomain : appServiceDomain
 var frontendApiBaseUrl = 'https://${apiAppName}.${resolvedAppServiceDomain}/api'
-var storageConnectionString = storageAccount.outputs.connectionString
+// Built here rather than returned from the storage module, because module outputs are
+// persisted in deployment history and readable by anyone with deployment-read access.
+var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccountResource.name};AccountKey=${storageAccountResource.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
 var tenantIssuerUrl = '${environment().authentication.loginEndpoint}${tenantId}/v2.0'
 var frontendAllowedAudiences = [
   frontendClientId
@@ -344,11 +350,9 @@ var functionSettings = {
   API_URL: frontendApiBaseUrl
   AZURE_AUTHORITY_HOST: resolvedAuthorityHost
   AZURE_CLOUD_NAME: azureCloudName
-  AzureWebJobsStorage: storageConnectionString
   FUNCTIONS_EXTENSION_VERSION: '~4'
   FUNCTIONS_WORKER_RUNTIME: 'python'
   SCM_DO_BUILD_DURING_DEPLOYMENT: 'false'
-  WEBSITE_CONTENTAZUREFILECONNECTIONSTRING: storageConnectionString
   WEBSITE_CONTENTSHARE: toLower(take('${taskAppName}content', 63))
 }
 
@@ -404,10 +408,13 @@ module taskApp 'modules/apps/container-function-app.bicep' = {
     containerImageName: taskImageName
     containerRegistryLoginServer: containerRegistry.outputs.loginServer
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
-    storageConnectionString: functionSettings.AzureWebJobsStorage
+    storageConnectionString: storageConnectionString
     appSettings: functionSettings
     useManagedIdentityForRegistry: true
   }
+  dependsOn: [
+    storageAccount
+  ]
 }
 
 resource frontendAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {

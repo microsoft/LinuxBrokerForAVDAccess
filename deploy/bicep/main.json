@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "17172461120686127001"
+      "templateHash": "10340234432767658268"
     }
   },
   "parameters": {
@@ -490,7 +490,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "6081907387066907354"
+              "templateHash": "8084574638949372807"
             }
           },
           "parameters": {
@@ -834,6 +834,16 @@
               "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
               "TENANT_ID": "[parameters('tenantId')]",
               "WEBSITE_AUTH_AAD_ALLOWED_TENANTS": "[parameters('tenantId')]"
+            },
+            "functionSettings": {
+              "API_CLIENT_ID": "[parameters('apiClientId')]",
+              "API_URL": "[variables('frontendApiBaseUrl')]",
+              "AZURE_AUTHORITY_HOST": "[variables('resolvedAuthorityHost')]",
+              "AZURE_CLOUD_NAME": "[parameters('azureCloudName')]",
+              "FUNCTIONS_EXTENSION_VERSION": "~4",
+              "FUNCTIONS_WORKER_RUNTIME": "python",
+              "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
+              "WEBSITE_CONTENTSHARE": "[toLower(take(format('{0}content', variables('taskAppName')), 63))]"
             }
           },
           "resources": [
@@ -1284,7 +1294,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "13920674143716137459"
+                      "templateHash": "17026859500181617290"
                     }
                   },
                   "parameters": {
@@ -1328,10 +1338,6 @@
                     "name": {
                       "type": "string",
                       "value": "[parameters('storageAccountName')]"
-                    },
-                    "connectionString": {
-                      "type": "string",
-                      "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix={2}', parameters('storageAccountName'), listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-05-01').keys[0].value, environment().suffixes.storage)]"
                     }
                   }
                 }
@@ -2128,21 +2134,10 @@
                     "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2025-04-01').outputs.applicationInsightsConnectionString.value]"
                   },
                   "storageConnectionString": {
-                    "value": "[createObject('API_CLIENT_ID', parameters('apiClientId'), 'API_URL', variables('frontendApiBaseUrl'), 'AZURE_AUTHORITY_HOST', variables('resolvedAuthorityHost'), 'AZURE_CLOUD_NAME', parameters('azureCloudName'), 'AzureWebJobsStorage', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2025-04-01').outputs.connectionString.value, 'FUNCTIONS_EXTENSION_VERSION', '~4', 'FUNCTIONS_WORKER_RUNTIME', 'python', 'SCM_DO_BUILD_DURING_DEPLOYMENT', 'false', 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2025-04-01').outputs.connectionString.value, 'WEBSITE_CONTENTSHARE', toLower(take(format('{0}content', variables('taskAppName')), 63))).AzureWebJobsStorage]"
+                    "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix={2}', variables('storageAccountName'), listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2023-05-01').keys[0].value, environment().suffixes.storage)]"
                   },
                   "appSettings": {
-                    "value": {
-                      "API_CLIENT_ID": "[parameters('apiClientId')]",
-                      "API_URL": "[variables('frontendApiBaseUrl')]",
-                      "AZURE_AUTHORITY_HOST": "[variables('resolvedAuthorityHost')]",
-                      "AZURE_CLOUD_NAME": "[parameters('azureCloudName')]",
-                      "AzureWebJobsStorage": "[reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2025-04-01').outputs.connectionString.value]",
-                      "FUNCTIONS_EXTENSION_VERSION": "~4",
-                      "FUNCTIONS_WORKER_RUNTIME": "python",
-                      "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
-                      "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING": "[reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2025-04-01').outputs.connectionString.value]",
-                      "WEBSITE_CONTENTSHARE": "[toLower(take(format('{0}content', variables('taskAppName')), 63))]"
-                    }
+                    "value": "[variables('functionSettings')]"
                   },
                   "useManagedIdentityForRegistry": {
                     "value": true

@@ -1,5 +1,3 @@
-USE linuxbroker;
-
 IF OBJECT_ID('dbo.VmUsers', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.VmUsers (

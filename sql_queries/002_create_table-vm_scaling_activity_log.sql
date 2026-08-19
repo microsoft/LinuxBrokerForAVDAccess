@@ -1,5 +1,3 @@
-use linuxbroker;
-
 IF OBJECT_ID('dbo.VmScalingActivityLog', 'U') IS NULL
 BEGIN
     CREATE TABLE VmScalingActivityLog (
@@ -12,6 +10,6 @@ BEGIN
         VMsPoweredOff INT NULL,
         NewTotalVMs INT NOT NULL,
         Outcome NVARCHAR(255) NULL,
-        Notes TEXT NULL
+        Notes NVARCHAR(MAX) NULL
     );
 END;

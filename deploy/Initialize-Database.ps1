@@ -95,6 +95,15 @@ if (-not $sqlFiles) {
 
 $connection = Get-SqlConnection -Server $SqlServerFqdn -Database $DatabaseName -Username $SqlAdminLogin -Password $SqlAdminPassword
 
+# Without this, PRINT output from the scripts is discarded and diagnostics go unnoticed.
+$connection.add_InfoMessage({
+    param($eventSender, $eventArgs)
+
+    foreach ($sqlMessage in $eventArgs.Errors) {
+        Write-Host "  [SQL] $($sqlMessage.Message)"
+    }
+})
+
 try {
     $connection.Open()
 

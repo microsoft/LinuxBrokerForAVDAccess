@@ -18,8 +18,6 @@ def register_route_vm_management(app):
                 return redirect(url_for('login'))
             headers = {'Authorization': f'Bearer {access_token}'}
             response = requests.get(f"{API_URL}/vms", headers=headers)
-            if response.status_code == 404:
-                return render_template('vm/view_all_vms.html', vms=[])
             response.raise_for_status()
             vms = response.json()
             return render_template('vm/view_all_vms.html', vms=vms)

@@ -50,8 +50,13 @@ Use that path when you need to:
 - `003_create_table-virtual_machines.sql`: creates `dbo.VirtualMachines`
 - `024_create_table-vmusers.sql`: creates `dbo.VmUsers`
 - `026_add_lease_id_to_virtual_machines.sql`: adds `LeaseId` to `dbo.VirtualMachines` for lease-aware checkout and cleanup
+- `027_add_unique_index-virtual_machines_hostname.sql`: enforces `Hostname` uniqueness on `dbo.VirtualMachines`
 
 The table scripts above are written to be rerunnable.
+
+The scripts do not contain `USE <database>` statements. The target database comes from the connection, which [../deploy/Initialize-Database.ps1](../deploy/Initialize-Database.ps1) builds from its `-DatabaseName` argument, so a non-default `sqlDatabaseName` works without editing any script.
+
+`Hostname` is the natural key the broker resolves against: `RegisterLinuxHostVm`, `ReleaseVm`, and the Linux host agents all locate a VM by hostname alone. If an existing database already contains duplicate hostnames, `027` reports them and skips creating the index rather than failing the bootstrap. Remove the duplicates and rerun to gain the constraint.
 
 ### Stored procedures
 

@@ -8,6 +8,9 @@ BEGIN
 
     DECLARE @ExistingVmId INT;
 
+    -- Hostname is unique once 027 has applied. TOP 1 keeps this deterministic on older
+    -- databases that still carry duplicates, and the UPDATE below refreshes every match
+    -- so no duplicate row is left holding a stale address.
     SELECT TOP 1 @ExistingVmId = VMID
     FROM dbo.VirtualMachines
     WHERE Hostname = @Hostname
@@ -48,7 +51,7 @@ BEGIN
     SET IPAddress = @IPAddress,
         Description = COALESCE(@Description, Description),
         LastUpdateDate = GETDATE()
-    WHERE VMID = @ExistingVmId;
+    WHERE Hostname = @Hostname;
 
     SELECT @ExistingVmId AS VMID, 'Updated' AS RegistrationAction;
 END
