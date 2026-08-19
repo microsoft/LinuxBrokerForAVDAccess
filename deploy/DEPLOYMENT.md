@@ -347,7 +347,11 @@ Set-Location .\deploy
 
 The host migration step updates only the release-agent-related files and services on existing Linux VMs. It does not reprovision infrastructure, replace the VM image, rerun the full Linux custom script extension, or attempt to reconcile every manual drift in an older environment.
 
-The migration also rewrites `/etc/sudoers.d/avdadmin`. Older hosts were provisioned with a broad allowlist that included `cat`, `rm`, `chmod`, `chown`, `cp`, `mount`, and `umount`. The current policy grants only `userdel`, `groupadd`, `usermod`, `chpasswd`, `/usr/local/bin/create-user.sh`, and `/usr/local/bin/manage-lease.sh`; all privileged file work now happens inside those two root-owned scripts. The generated policy is validated with `visudo -c` and moved into place only if it passes.
+The migration also rewrites `/etc/sudoers.d/avdadmin`. Older hosts were provisioned with a broad allowlist that included `cat`, `rm`, `chmod`, `chown`, `cp`, `mount`, and `umount`. The current policy grants only `userdel`, `groupadd`, `usermod`, `chpasswd`, `/usr/local/bin/create-user.sh`, `/usr/local/bin/manage-lease.sh`, and `/usr/local/bin/apply-host-settings.sh`; all privileged file work now happens inside those root-owned scripts. The generated policy is validated with `visudo -c` and moved into place only if it passes.
+
+`apply-host-settings.sh` is the only way the broker API can change host configuration. It accepts a JSON settings document on stdin and nothing on argv, rejects unknown keys, and clamps every value to a supported range before writing anything, so a bad value cannot strand the fleet.
+
+The migration additionally installs `dconf` and, where available, `xprintidle`. `xprintidle` backs the optional idle session timeout; if it cannot be installed the migration still succeeds and idle enforcement is simply skipped on that host. Existing hosts keep any settings profile they already have, and hosts with no profile are seeded with the shipped defaults, which match the values that were previously hardcoded.
 
 ## Manual Steps After `azd up`
 
@@ -408,7 +412,13 @@ This includes the newer objects used by the current deployment flow:
 - `dbo.VirtualMachines`
 - `dbo.VmScalingRules`
 - `dbo.VmScalingActivityLog`
+- `dbo.LinuxHostSettings`
 - `dbo.RegisterLinuxHostVm`
+- `dbo.GetLinuxHostSettings`
+- `dbo.UpdateLinuxHostSettings`
+- `dbo.RecordHostSettingsApplied`
+
+`dbo.LinuxHostSettings` holds a single fleet-wide profile and is seeded automatically with the values that were previously hardcoded in the release agent, so applying it changes no behavior. `dbo.VirtualMachines` also gains `SettingsVersion` and `SettingsAppliedDate`, which the portal uses to show which hosts have applied the current profile.
 
 For more database detail, see [../sql_queries/README.md](../sql_queries/README.md).
 

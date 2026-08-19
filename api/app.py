@@ -31,12 +31,13 @@ from config import *
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.157'
+app.config['VERSION'] = '0.158'
 
 cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 
 REMOTE_CREATE_USER_SCRIPT = '/usr/local/bin/create-user.sh'
 REMOTE_MANAGE_LEASE_SCRIPT = '/usr/local/bin/manage-lease.sh'
+REMOTE_APPLY_SETTINGS_SCRIPT = '/usr/local/bin/apply-host-settings.sh'
 
 # ===============================
 # Logging Configuration
@@ -201,14 +202,25 @@ def get_remote_host_fqdn(hostname: str) -> str:
     linux_host_admin_login_name = LINUX_HOST_ADMIN_LOGIN_NAME or 'avdadmin'
     return f"{linux_host_admin_login_name}@{hostname}.{DOMAIN_NAME}"
 
-def run_remote_command(hostname: str, command: str, stdin_input: str = None):
+def run_remote_command(hostname: str, command: str, stdin_input: str = None, timeout: int = 120):
     pem_file_path = retrieve_pem_key_from_key_vault(VAULT_URL, KEY_NAME)
     host_fqdn = get_remote_host_fqdn(hostname)
     result = subprocess.run(
-        ['ssh', '-i', pem_file_path, '-o', 'StrictHostKeyChecking=no', host_fqdn, command],
+        [
+            'ssh',
+            '-i', pem_file_path,
+            '-o', 'StrictHostKeyChecking=no',
+            # Without these, a powered-off or wedged host blocks the worker indefinitely.
+            # That matters most for fleet-wide settings pushes, which iterate every host.
+            '-o', 'BatchMode=yes',
+            '-o', 'ConnectTimeout=10',
+            host_fqdn,
+            command
+        ],
         capture_output=True,
         text=True,
-        input=stdin_input
+        input=stdin_input,
+        timeout=timeout
     )
     return result, host_fqdn
 
@@ -511,6 +523,159 @@ def add_user_to_remote_group(hostname: str, username: str, group_name: str) -> N
             logger.error("Failed to add user '%s' to group '%s' on VM '%s': %s", username, group_name, host_fqdn, result.stderr)
     except Exception as e:
         logger.error("Error adding user '%s' to group '%s' on VM '%s': %s", username, group_name, hostname, e)
+
+# ===============================
+# Linux Host Settings Functions
+
+def normalize_host_settings(row) -> dict:
+    """Turn a LinuxHostSettings row into the JSON document the hosts consume."""
+    settings = {}
+
+    for field in LINUX_HOST_SETTING_BOUNDS:
+        settings[field] = int(row.get(field))
+
+    for field in LINUX_HOST_SETTING_BOOLEANS:
+        settings[field] = bool(row.get(field))
+
+    settings['SettingsVersion'] = int(row.get('SettingsVersion'))
+
+    return settings
+
+def validate_host_settings(payload: dict):
+    """Validate a settings update, returning (settings, error_message).
+
+    Only known fields are accepted, and every value must already be inside the supported
+    range. Values are rejected rather than silently clamped so an admin never believes a
+    setting took effect at a value the fleet will not honor.
+    """
+    if not isinstance(payload, dict):
+        return None, 'Settings payload must be a JSON object.'
+
+    known_fields = set(LINUX_HOST_SETTING_BOUNDS) | set(LINUX_HOST_SETTING_BOOLEANS)
+    unknown_fields = sorted(set(payload) - known_fields)
+    if unknown_fields:
+        return None, f"Unknown settings field(s): {', '.join(unknown_fields)}."
+
+    settings = {}
+
+    for field, (minimum, maximum, _default) in LINUX_HOST_SETTING_BOUNDS.items():
+        if field not in payload or payload[field] is None:
+            continue
+
+        value = payload[field]
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            return None, f"{field} must be an integer."
+
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return None, f"{field} must be an integer."
+
+        if field == 'IdleTimeoutSeconds':
+            # 0 disables idle enforcement; any other value must clear the safety floor.
+            if value != 0 and not (IDLE_TIMEOUT_MINIMUM_SECONDS <= value <= maximum):
+                return None, (
+                    f"IdleTimeoutSeconds must be 0 to disable idle enforcement, or between "
+                    f"{IDLE_TIMEOUT_MINIMUM_SECONDS} and {maximum} seconds."
+                )
+        elif not (minimum <= value <= maximum):
+            return None, f"{field} must be between {minimum} and {maximum}."
+
+        settings[field] = value
+
+    for field in LINUX_HOST_SETTING_BOOLEANS:
+        if field not in payload or payload[field] is None:
+            continue
+
+        value = payload[field]
+        if isinstance(value, bool):
+            settings[field] = value
+        elif isinstance(value, int) and value in (0, 1):
+            settings[field] = bool(value)
+        elif isinstance(value, str) and value.strip().lower() in ('true', 'false', '1', '0'):
+            settings[field] = value.strip().lower() in ('true', '1')
+        else:
+            return None, f"{field} must be a boolean."
+
+    if not settings:
+        return None, 'No recognized settings were supplied.'
+
+    return settings, None
+
+def fetch_host_settings():
+    """Read the single global settings profile."""
+    conn = get_db_connection()
+    if not conn:
+        logger.error("Database connection failed while reading Linux host settings.")
+        return None
+
+    try:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetLinuxHostSettings")
+            row = cursor.fetchone()
+
+        if not row:
+            logger.error("No Linux host settings profile exists.")
+            return None
+
+        return normalize_host_settings(row)
+    except Exception as e:
+        logger.error("Error reading Linux host settings: %s", e)
+        return None
+    finally:
+        conn.close()
+
+def record_settings_applied(hostname: str, settings_version: int) -> bool:
+    conn = get_db_connection()
+    if not conn:
+        logger.error("Database connection failed while recording applied settings for %s.", hostname)
+        return False
+
+    try:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute(
+                "EXEC RecordHostSettingsApplied @Hostname = %s, @SettingsVersion = %s",
+                (hostname, settings_version)
+            )
+            row = cursor.fetchone()
+
+        conn.commit()
+
+        if not row:
+            logger.warning("No VM record matched hostname %s while recording applied settings.", hostname)
+            return False
+
+        return True
+    except Exception as e:
+        logger.error("Error recording applied settings for %s: %s", hostname, e)
+        return False
+    finally:
+        conn.close()
+
+def apply_host_settings_to_host(hostname: str, settings: dict):
+    """Push settings to one host over SSH.
+
+    The document is written to the remote script's stdin rather than passed on the command
+    line, mirroring how the password is delivered to chpasswd. That keeps the values out of
+    the remote process list and leaves no shell-injection surface.
+    """
+    try:
+        result, host_fqdn = run_remote_command(
+            hostname,
+            f"sudo {REMOTE_APPLY_SETTINGS_SCRIPT}",
+            stdin_input=json.dumps(settings)
+        )
+
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or '').strip()
+            logger.error("Failed to apply host settings on '%s': %s", host_fqdn, message)
+            return False, message or 'The remote apply script reported a failure.'
+
+        record_settings_applied(hostname, settings['SettingsVersion'])
+        return True, (result.stdout or '').strip()
+    except Exception as e:
+        logger.error("Error applying host settings on '%s': %s", hostname, e)
+        return False, str(e)
 
 # ===============================
 # App Management APIs
@@ -1182,6 +1347,192 @@ def get_scaling_rules_history():
 
     except json.JSONDecodeError:
         return "Invalid JSON data", 400
+
+    except Exception as e:
+        return f"Error: {str(e)}", 500
+
+# ===============================
+# Linux Host Settings APIs
+
+@app.route('/api/hosts/settings', methods=['GET'])
+@token_required(['LinuxHost', 'access_as_user', 'FullAccess', 'ScheduledTask'], required_group_ids=[LINUX_HOST_GROUP_ID])
+def get_host_settings():
+    """Return the fleet-wide settings profile.
+
+    This is the pull side of settings delivery. The Linux host agents already hold the
+    LinuxHost role, so they can read this with no additional Entra configuration.
+    """
+    try:
+        settings = fetch_host_settings()
+        if settings is None:
+            return jsonify({'error': 'Unable to read Linux host settings.'}), 500
+
+        return jsonify(settings), 200
+
+    except Exception as e:
+        return f"Error: {str(e)}", 500
+
+@app.route('/api/hosts/settings/update', methods=['POST'])
+@token_required(['access_as_user', 'FullAccess'])
+def update_host_settings():
+    try:
+        payload = request.get_json(silent=True) or {}
+        updated_by = payload.pop('updatedBy', None)
+
+        settings, error = validate_host_settings(payload)
+        if error:
+            return jsonify({'error': error}), 400
+
+        # Cross-field rules need the resulting profile, not just the supplied fields, because
+        # updates are partial. Checking here turns a CHECK constraint violation into a clean
+        # 400 instead of a 500 from SQL.
+        current = fetch_host_settings()
+        if current is None:
+            return jsonify({'error': 'Unable to read Linux host settings.'}), 500
+
+        resulting = dict(current)
+        resulting.update(settings)
+
+        if resulting['IdleTimeoutSeconds'] != 0 and resulting['IdleWarningSeconds'] >= resulting['IdleTimeoutSeconds']:
+            return jsonify({
+                'error': (
+                    'IdleWarningSeconds must be less than IdleTimeoutSeconds so users are warned '
+                    'before they are disconnected.'
+                )
+            }), 400
+
+        conn = get_db_connection()
+        if not conn:
+            return "Database connection failed.", 500
+
+        try:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC UpdateLinuxHostSettings "
+                    "@GracePeriodSeconds = %s, @ReconcileIntervalSeconds = %s, "
+                    "@WatcherDebounceSeconds = %s, @WatcherSettleSeconds = %s, "
+                    "@IdleTimeoutSeconds = %s, @IdleWarningSeconds = %s, "
+                    "@ScreenLockEnabled = %s, @ScreenIdleDelaySeconds = %s, "
+                    "@ScreenLockDelaySeconds = %s, @ScreenLockSettingsLocked = %s, "
+                    "@UpdatedBy = %s",
+                    (
+                        settings.get('GracePeriodSeconds'),
+                        settings.get('ReconcileIntervalSeconds'),
+                        settings.get('WatcherDebounceSeconds'),
+                        settings.get('WatcherSettleSeconds'),
+                        settings.get('IdleTimeoutSeconds'),
+                        settings.get('IdleWarningSeconds'),
+                        settings.get('ScreenLockEnabled'),
+                        settings.get('ScreenIdleDelaySeconds'),
+                        settings.get('ScreenLockDelaySeconds'),
+                        settings.get('ScreenLockSettingsLocked'),
+                        updated_by
+                    )
+                )
+                row = cursor.fetchone()
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        if not row:
+            return jsonify({'error': 'Unable to update Linux host settings.'}), 500
+
+        return jsonify(normalize_host_settings(row)), 200
+
+    except Exception as e:
+        return f"Error: {str(e)}", 500
+
+@app.route('/api/hosts/settings/apply', methods=['POST'])
+@token_required(['access_as_user', 'FullAccess', 'ScheduledTask'])
+def apply_host_settings():
+    """Push the current settings profile to hosts over SSH.
+
+    This is only the fast path. The host agents converge on their own through the pull
+    endpoint, so a host that is unreachable here is not left permanently stale; it simply
+    picks the settings up on its next reconcile run.
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        requested_hostnames = payload.get('hostnames')
+
+        if requested_hostnames is not None and not isinstance(requested_hostnames, list):
+            return jsonify({'error': 'hostnames must be a list.'}), 400
+
+        settings = fetch_host_settings()
+        if settings is None:
+            return jsonify({'error': 'Unable to read Linux host settings.'}), 500
+
+        conn = get_db_connection()
+        if not conn:
+            return "Database connection failed.", 500
+
+        try:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetVms")
+                vms = cursor.fetchall()
+        finally:
+            conn.close()
+
+        if requested_hostnames:
+            wanted = {str(name).strip().lower() for name in requested_hostnames if str(name).strip()}
+            targets = [vm for vm in vms if (vm.get('Hostname') or '').lower() in wanted]
+        else:
+            # Skip hosts the broker already knows it cannot reach, so one powered-off VM
+            # does not slow the whole push down to its connect timeout.
+            targets = [
+                vm for vm in vms
+                if (vm.get('PowerState') or '') == 'On' and (vm.get('NetworkStatus') or '') == 'Reachable'
+            ]
+
+        results = []
+        succeeded = 0
+
+        for vm in targets:
+            hostname = vm.get('Hostname')
+            if not hostname:
+                continue
+
+            applied, message = apply_host_settings_to_host(hostname, settings)
+            if applied:
+                succeeded += 1
+
+            results.append({
+                'Hostname': hostname,
+                'Applied': applied,
+                'Message': message
+            })
+
+        return jsonify({
+            'SettingsVersion': settings['SettingsVersion'],
+            'TargetCount': len(results),
+            'SucceededCount': succeeded,
+            'Results': results
+        }), 200
+
+    except Exception as e:
+        return f"Error: {str(e)}", 500
+
+@app.route('/api/hosts/<hostname>/settings/ack', methods=['POST'])
+@token_required(['LinuxHost', 'access_as_user', 'FullAccess'], required_group_ids=[LINUX_HOST_GROUP_ID])
+def acknowledge_host_settings(hostname):
+    """Record the settings version a host has applied, so the portal can show drift."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        raw_version = payload.get('settingsVersion')
+
+        try:
+            settings_version = int(raw_version)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'settingsVersion must be an integer.'}), 400
+
+        if settings_version < 1:
+            return jsonify({'error': 'settingsVersion must be a positive integer.'}), 400
+
+        if not record_settings_applied(hostname, settings_version):
+            return jsonify({'error': f"No VM found with Hostname {hostname}."}), 404
+
+        return jsonify({'Hostname': hostname, 'SettingsVersion': settings_version}), 200
 
     except Exception as e:
         return f"Error: {str(e)}", 500

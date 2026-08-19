@@ -55,3 +55,33 @@ DB_PASSWORD_NAME = os.environ.get('DB_PASSWORD_NAME')
 NFS_SHARE = os.environ.get("NFS_SHARE")
 
 db_password = None
+
+# ===============================
+# Linux host settings
+#
+# Bounds for the fleet-wide host settings profile, as (minimum, maximum, default).
+# These deliberately duplicate the CHECK constraints in
+# sql_queries/028_create_table-linux_host_settings.sql and the clamps in
+# linux_host/apply-host-settings.sh. A value that reaches a host controls session
+# reclamation, so it is validated at every layer rather than trusted from the one above.
+# All three definitions must be kept in agreement.
+LINUX_HOST_SETTING_BOUNDS = {
+    'GracePeriodSeconds': (60, 86400, 1200),
+    'ReconcileIntervalSeconds': (30, 900, 60),
+    'WatcherDebounceSeconds': (1, 300, 10),
+    'WatcherSettleSeconds': (0, 60, 2),
+    'IdleTimeoutSeconds': (0, 86400, 0),
+    'IdleWarningSeconds': (0, 900, 120),
+    'ScreenIdleDelaySeconds': (0, 86400, 0),
+    'ScreenLockDelaySeconds': (0, 86400, 0),
+}
+
+LINUX_HOST_SETTING_BOOLEANS = {
+    'ScreenLockEnabled': True,
+    'ScreenLockSettingsLocked': True,
+}
+
+# IdleTimeoutSeconds is the one field where 0 is meaningful rather than out of range: it
+# disables idle enforcement entirely. Any non-zero value must clear this floor so a typo
+# cannot start disconnecting active users almost immediately.
+IDLE_TIMEOUT_MINIMUM_SECONDS = 300
