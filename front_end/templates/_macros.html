@@ -219,9 +219,10 @@
     <label class="visually-hidden" for="{{ target }}-search">{{ placeholder }}</label>
     <input type="search" id="{{ target }}-search" class="form-control form-control-sm"
            placeholder="{{ placeholder }}" autocomplete="off"
+           aria-describedby="{{ target }}-count"
            data-lb-filter-target="{{ target }}" data-lb-filter-noun="{{ noun }}">
   </div>
-  <span class="text-body-secondary small" id="{{ target }}-count"
+  <span class="text-body-secondary small" id="{{ target }}-count" aria-live="polite"
         data-lb-count-total="{{ total }}" data-lb-count-noun="{{ noun }}">
     {{ total }} {{ noun }}
   </span>
@@ -230,8 +231,8 @@
 
 {# Sortable column header. `type` is 'text' or 'number' for correct comparison. #}
 {% macro th_sort(label, type='text', cls='') -%}
-<th scope="col" class="lb-sortable {{ cls }}" data-lb-sort="{{ type }}" tabindex="0" role="button"
-    aria-sort="none" title="Sort by {{ label }}">
+<th scope="col" class="lb-sortable {{ cls }}" data-lb-sort="{{ type }}" tabindex="0"
+    aria-sort="none" aria-label="Sort by {{ label }}" title="Sort by {{ label }}">
   <span class="lb-th-inner">{{ label }}{{ icon('chevron-expand', 12, 'lb-sort-icon') }}</span>
 </th>
 {%- endmacro %}

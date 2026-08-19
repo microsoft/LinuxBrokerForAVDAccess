@@ -184,6 +184,8 @@
     var titleEl = modalEl.querySelector('[data-lb-confirm-title]');
     var bodyEl = modalEl.querySelector('[data-lb-confirm-body]');
     var okBtn = modalEl.querySelector('[data-lb-confirm-ok]');
+    var opener = null;
+    var shouldReturnFocus = false;
 
     Array.prototype.forEach.call(forms, function (form) {
       form.addEventListener('submit', function (e) {
@@ -191,6 +193,8 @@
         e.preventDefault();
 
         pending = form;
+        opener = e.submitter || form.querySelector('button[type="submit"], input[type="submit"]');
+        shouldReturnFocus = true;
         if (titleEl) titleEl.textContent = form.getAttribute('data-lb-confirm-title') || 'Confirm';
         if (bodyEl) bodyEl.textContent = form.getAttribute('data-lb-confirm-body') || 'Are you sure?';
 
@@ -205,6 +209,7 @@
     if (okBtn) {
       okBtn.addEventListener('click', function () {
         if (!pending) return;
+        shouldReturnFocus = false;
         pending.dataset.lbConfirmed = 'true';
         modal.hide();
         if (typeof pending.requestSubmit === 'function') {
@@ -216,7 +221,20 @@
       });
     }
 
-    modalEl.addEventListener('hidden.bs.modal', function () { pending = null; });
+    modalEl.addEventListener('shown.bs.modal', function () {
+      if (okBtn && typeof okBtn.focus === 'function') okBtn.focus();
+    });
+
+    modalEl.addEventListener('hidden.bs.modal', function () {
+      var returnTarget = opener;
+      pending = null;
+      opener = null;
+      if (shouldReturnFocus && returnTarget && document.contains(returnTarget) &&
+          typeof returnTarget.focus === 'function') {
+        returnTarget.focus();
+      }
+      shouldReturnFocus = false;
+    });
   }
 
   /* ------------------------------------------------- submit pending state */
@@ -304,16 +322,72 @@
   /* "Ignore dates" / "No limit" disable the inputs they override, so the form
      visibly reflects what will actually be sent. */
   function initFilterToggles() {
+    // Input types that still submit their value while readOnly.
+    var SUBMITTABLE_READONLY = /^(?:text|search|url|tel|email|password|number|date|month|week|time|datetime-local)$/i;
+
     Array.prototype.forEach.call(document.querySelectorAll('[data-lb-disables]'), function (cb) {
       var ids = (cb.getAttribute('data-lb-disables') || '').split(',');
+      var label = cb.id ? document.querySelector('label[for="' + cb.id + '"]') : null;
+      var controllerName = label ? label.textContent.replace(/\s+/g, ' ').trim() : 'this filter';
+
+      function appendToken(value, token) {
+        var parts = (value || '').split(/\s+/).filter(Boolean);
+        if (parts.indexOf(token) === -1) parts.push(token);
+        return parts.join(' ');
+      }
+
+      function removeToken(value, token) {
+        return (value || '').split(/\s+/).filter(function (part) {
+          return part && part !== token;
+        }).join(' ');
+      }
+
+      if (cb.id && !document.getElementById(cb.id + '-description')) {
+        var cbDesc = document.createElement('span');
+        cbDesc.id = cb.id + '-description';
+        cbDesc.className = 'visually-hidden';
+        cbDesc.textContent = 'When selected, ignores ' + ids.map(function (id) {
+          var el = document.getElementById(id.trim());
+          var elLabel = el && el.id ? document.querySelector('label[for="' + el.id + '"]') : null;
+          return elLabel ? elLabel.textContent.replace(/\s+/g, ' ').trim() : id.trim();
+        }).join(', ') + '.';
+        cb.parentNode.appendChild(cbDesc);
+        cb.setAttribute('aria-describedby', appendToken(cb.getAttribute('aria-describedby'), cbDesc.id));
+      }
 
       function sync() {
         ids.forEach(function (id) {
           var el = document.getElementById(id.trim());
           if (!el) return;
-          el.disabled = cb.checked;
+          var noteId = el.id + '-disabled-note';
+          var note = document.getElementById(noteId);
+          if (!note) {
+            note = document.createElement('div');
+            note.id = noteId;
+            note.className = 'form-text lb-disabled-note';
+            note.textContent = 'Ignored while ' + controllerName + ' is selected.';
+            var field = el.closest('.lb-field');
+            (field || el.parentNode).appendChild(note);
+          }
+          // Use readOnly rather than disabled where the control supports it:
+          // disabled controls are omitted from form submission, which silently
+          // discarded whatever the operator had typed, so the value could not be
+          // replayed into the filter bar after the POST/redirect/GET round trip.
+          if (SUBMITTABLE_READONLY.test(el.type || '')) {
+            el.readOnly = cb.checked;
+          } else {
+            el.disabled = cb.checked;
+          }
+          el.setAttribute('aria-disabled', cb.checked ? 'true' : 'false');
+          if (cb.checked) {
+            el.setAttribute('aria-describedby', appendToken(el.getAttribute('aria-describedby'), noteId));
+          } else {
+            var describedBy = removeToken(el.getAttribute('aria-describedby'), noteId);
+            if (describedBy) el.setAttribute('aria-describedby', describedBy);
+            else el.removeAttribute('aria-describedby');
+          }
           var group = el.closest('.lb-field');
-          if (group) group.classList.toggle('opacity-50', cb.checked);
+          if (group) group.classList.toggle('lb-field-disabled', cb.checked);
         });
       }
 

@@ -13,18 +13,18 @@
     <div class="row g-3 align-items-end">
         <div class="col-md-3 lb-field">
             <label for="startdate" class="form-label">Start Date</label>
-            <input type="date" class="form-control" id="startdate" name="startdate" value="{{ '' if filters.startdate == 'null' else filters.startdate }}">
-            <div class="form-text">Include activity on or after this date.</div>
+            <input type="date" class="form-control" id="startdate" name="startdate" value="{{ '' if filters.startdate == 'null' else filters.startdate }}" aria-describedby="startdate-help">
+            <div class="form-text" id="startdate-help">Include activity on or after this date.</div>
         </div>
         <div class="col-md-3 lb-field">
             <label for="enddate" class="form-label">End Date</label>
-            <input type="date" class="form-control" id="enddate" name="enddate" value="{{ '' if filters.enddate == 'null' else filters.enddate }}">
-            <div class="form-text">Include activity on or before this date.</div>
+            <input type="date" class="form-control" id="enddate" name="enddate" value="{{ '' if filters.enddate == 'null' else filters.enddate }}" aria-describedby="enddate-help">
+            <div class="form-text" id="enddate-help">Include activity on or before this date.</div>
         </div>
         <div class="col-md-2 lb-field">
             <label for="limit" class="form-label">Limit</label>
-            <input type="number" class="form-control" id="limit" name="limit" value="{{ '' if filters.limit == 'null' else filters.limit }}" min="1">
-            <div class="form-text">Maximum records to retrieve.</div>
+            <input type="number" class="form-control" id="limit" name="limit" value="{{ '' if filters.limit == 'null' else filters.limit }}" min="1" aria-describedby="limit-help">
+            <div class="form-text" id="limit-help">Maximum records to retrieve.</div>
         </div>
         <div class="col-md-4">
             <div class="d-flex flex-column gap-2">
@@ -45,6 +45,7 @@
 <div class="lb-card">
     {% if log %}
         {{ ui.table_toolbar('activity-log-table', 'Search activity log…', total=log|length, noun='records') }}
+        <div class="lb-scroll-hint">{{ ui.icon('chevron-right', 14) }} Scroll horizontally to view notes and remaining columns.</div>
         <div class="lb-table-wrap">
             <table class="table table-hover lb-table" id="activity-log-table">
                 <thead>
@@ -72,8 +73,8 @@
                         <td>{{ ui.value_or_dash(entry['VMsPoweredOn']) }}</td>
                         <td>{{ ui.value_or_dash(entry['VMsPoweredOff']) }}</td>
                         <td>{{ ui.value_or_dash(entry['NewTotalVMs']) }}</td>
-                        <td>{{ ui.value_or_dash(entry['Outcome']) }}</td>
-                        <td class="text-break" style="min-width: 18rem; max-width: 28rem;">{{ ui.value_or_dash(entry['Notes']) }}</td>
+                        <td class="lb-cell-clip lb-cell-clip-sm" title="{{ entry['Outcome'] or '' }}"><span>{{ ui.value_or_dash(entry['Outcome']) }}</span></td>
+                        <td class="lb-cell-clip" title="{{ entry['Notes'] or '' }}"><span>{{ ui.value_or_dash(entry['Notes']) }}</span></td>
                     </tr>
                     {% endfor %}
                     <tr id="activity-log-table-noresults" class="d-none" data-lb-no-filter>

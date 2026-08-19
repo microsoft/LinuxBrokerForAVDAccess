@@ -29,17 +29,19 @@
       <div class="col-md-6">
         <label for="hostname" class="form-label">Hostname</label>
         <input type="text" class="form-control" id="hostname" name="hostname" required
+               aria-describedby="hostname-error"
                autocomplete="off" placeholder="linux-host-01">
-        <div class="invalid-feedback">Enter the host's name.</div>
+        <div class="invalid-feedback" id="hostname-error">Enter the host's name.</div>
       </div>
 
       <div class="col-md-6">
         <label for="ipaddress" class="form-label">IP address</label>
         <input type="text" class="form-control" id="ipaddress" name="ipaddress" required
+               aria-describedby="ipaddress-help ipaddress-error"
                autocomplete="off" placeholder="10.0.0.4"
                pattern="^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$">
-        <div class="form-text">IPv4 address the broker uses to reach the host.</div>
-        <div class="invalid-feedback">Enter a valid IPv4 address, for example 10.0.0.4.</div>
+        <div class="form-text" id="ipaddress-help">IPv4 address the broker uses to reach the host.</div>
+        <div class="invalid-feedback" id="ipaddress-error">Enter a valid IPv4 address, for example 10.0.0.4.</div>
       </div>
 
       <div class="col-md-4">
@@ -60,29 +62,29 @@
 
       <div class="col-md-4">
         <label for="vmstatus" class="form-label">VM status</label>
-        <select class="form-select" id="vmstatus" name="vmstatus" required>
+        <select class="form-select" id="vmstatus" name="vmstatus" required aria-describedby="vmstatus-help">
           <option value="Available">Available</option>
           <option value="CheckedOut">Checked out</option>
           <option value="Maintenance">Maintenance</option>
           <option value="Released">Released</option>
         </select>
-        <div class="form-text">Only <strong>Available</strong> hosts are offered for checkout.</div>
+        <div class="form-text" id="vmstatus-help">Only <strong>Available</strong> hosts are offered for checkout.</div>
       </div>
 
       <div class="col-md-6">
         <label for="username" class="form-label">
           Username <span class="text-body-secondary fw-normal">(optional)</span>
         </label>
-        <input type="text" class="form-control" id="username" name="username" autocomplete="off">
-        <div class="form-text">Only set this if the host is already assigned to someone.</div>
+        <input type="text" class="form-control" id="username" name="username" autocomplete="off" aria-describedby="username-help">
+        <div class="form-text" id="username-help">Only set this if the host is already assigned to someone.</div>
       </div>
 
       <div class="col-md-6">
         <label for="avdhost" class="form-label">
           AVD host <span class="text-body-secondary fw-normal">(optional)</span>
         </label>
-        <input type="text" class="form-control" id="avdhost" name="avdhost" autocomplete="off">
-        <div class="form-text">Session host this VM is currently brokered to.</div>
+        <input type="text" class="form-control" id="avdhost" name="avdhost" autocomplete="off" aria-describedby="avdhost-help">
+        <div class="form-text" id="avdhost-help">Session host this VM is currently brokered to.</div>
       </div>
 
       <div class="col-12">

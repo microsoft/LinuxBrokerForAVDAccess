@@ -88,12 +88,19 @@
                     </button>
                 </li>
                 {% if session.get('user') %}
+                    {#
+                      Guarded because base.html is also the shell for error.html.
+                      If session['user'] were ever not a mapping, an unguarded
+                      .get() here would break the error page itself, turning a
+                      handled error into an unhandled one.
+                    #}
+                    {% set current_user = session['user'] if session['user'] is mapping else {} %}
                     <li class="nav-item">
                         <a class="nav-link {% if request.endpoint == 'profile' %}active{% endif %}"
                            href="{{ url_for('profile') }}"
                            {% if request.endpoint == 'profile' %}aria-current="page"{% endif %}>
                             {{ ui.icon('person', 16) }}
-                            <span class="text-truncate" style="max-width: 16ch;">{{ session['user'].get('name', 'Profile') }}</span>
+                            <span class="text-truncate" style="max-width: 16ch;">{{ current_user.get('name') or 'Profile' }}</span>
                         </a>
                     </li>
                     <li class="nav-item">

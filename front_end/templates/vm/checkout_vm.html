@@ -30,20 +30,22 @@
     <div class="mb-3">
       <label for="username" class="form-label">Username</label>
       <input type="text" class="form-control" id="username" name="username" required
+             aria-describedby="username-help username-error"
              autocomplete="off"
-             value="{{ session['user'].get('preferred_username', '') if session.get('user') else '' }}">
-      <div class="form-text">
+             value="{{ session['user'].get('preferred_username', '') if session.get('user') is mapping else '' }}">
+      <div class="form-text" id="username-help">
         Pre-filled with your signed-in account. Change it to broker a host on behalf of another user.
       </div>
-      <div class="invalid-feedback">Enter the username to assign the host to.</div>
+      <div class="invalid-feedback" id="username-error">Enter the username to assign the host to.</div>
     </div>
 
     <div class="mb-3">
       <label for="avdhost" class="form-label">AVD host</label>
       <input type="text" class="form-control" id="avdhost" name="avdhost" required
+             aria-describedby="avdhost-help avdhost-error"
              autocomplete="off" placeholder="avd-session-host-01">
-      <div class="form-text">The Azure Virtual Desktop session host initiating the connection.</div>
-      <div class="invalid-feedback">Enter the AVD session host.</div>
+      <div class="form-text" id="avdhost-help">The Azure Virtual Desktop session host initiating the connection.</div>
+      <div class="invalid-feedback" id="avdhost-error">Enter the AVD session host.</div>
     </div>
 
     <div class="alert alert-info d-flex align-items-start gap-2" role="alert">
