@@ -1,29 +1,37 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
 {% block title %}Scaling Rule Details{% endblock %}
 
 {% block content %}
-<div class="container mt-5">
-    <h2>Scaling Rule Details</h2>
-    
-    <div class="card">
-        <div class="card-body">
-            <h5 class="card-title">Rule ID: {{ rule.RuleID }}</h5>
-            <p class="card-text"><strong>Min VMs:</strong> {{ rule.MinVMs }}</p>
-            <p class="card-text"><strong>Max VMs:</strong> {{ rule.MaxVMs }}</p>
-            <p class="card-text"><strong>Scale Up Ratio (%):</strong> {{ rule.ScaleUpRatio }}</p>
-            <p class="card-text"><strong>Scale Up Increment:</strong> {{ rule.ScaleUpIncrement }}</p>
-            <p class="card-text"><strong>Scale Down Ratio (%):</strong> {{ rule.ScaleDownRatio }}</p>
-            <p class="card-text"><strong>Scale Down Increment:</strong> {{ rule.ScaleDownIncrement }}</p>
+{% call ui.page_header('Scaling Rule #' ~ rule.RuleID, 'Review thresholds and capacity changes for this rule.', 'sliders') %}
+    <a href="{{ url_for('view_all_rules') }}" class="btn btn-outline-secondary btn-sm">{{ ui.icon('chevron-left', 14) }}<span class="ms-1">Back to rules</span></a>
+    <a href="{{ url_for('update_rule', ruleid=rule.RuleID) }}" class="btn btn-warning btn-sm">{{ ui.icon('pencil', 14) }}<span class="ms-1">Update rule</span></a>
+    {{ ui.confirm_action(url_for('delete_rule', ruleid=rule.RuleID), 'Delete', 'rule #' ~ rule.RuleID, title='Delete scaling rule?', body='Delete scaling rule #' ~ rule.RuleID ~ '? This cannot be undone.') }}
+{% endcall %}
 
-            <!-- Action Buttons -->
-            <a href="{{ url_for('view_all_rules') }}" class="btn btn-info">Back to Rules List</a>
-            <a href="{{ url_for('update_rule', ruleid=rule.RuleID) }}" class="btn btn-warning">Update Rule</a>
-            
-            <form action="{{ url_for('delete_rule', ruleid=rule.RuleID) }}" method="post" class="d-inline-block" onsubmit="return confirm('Are you sure you want to delete this rule?');">
-                <button type="submit" class="btn btn-danger" aria-label="Delete Rule {{ rule.RuleID }}">Delete</button>
-            </form>    
-        </div>
-    </div>
+<div class="lb-card p-4">
+    <dl class="lb-detail-list row mb-0">
+        <dt class="col-sm-4 col-lg-3">Rule ID</dt>
+        <dd class="col-sm-8 col-lg-9 lb-mono">{{ rule.RuleID }}</dd>
+
+        <dt class="col-sm-4 col-lg-3">Minimum VMs</dt>
+        <dd class="col-sm-8 col-lg-9">{{ rule.MinVMs }}</dd>
+
+        <dt class="col-sm-4 col-lg-3">Maximum VMs</dt>
+        <dd class="col-sm-8 col-lg-9">{{ rule.MaxVMs }}</dd>
+
+        <dt class="col-sm-4 col-lg-3">Scale Up Ratio</dt>
+        <dd class="col-sm-8 col-lg-9">{{ rule.ScaleUpRatio }}%</dd>
+
+        <dt class="col-sm-4 col-lg-3">Scale Up Increment</dt>
+        <dd class="col-sm-8 col-lg-9">{{ rule.ScaleUpIncrement }}</dd>
+
+        <dt class="col-sm-4 col-lg-3">Scale Down Ratio</dt>
+        <dd class="col-sm-8 col-lg-9">{{ rule.ScaleDownRatio }}%</dd>
+
+        <dt class="col-sm-4 col-lg-3">Scale Down Increment</dt>
+        <dd class="col-sm-8 col-lg-9 mb-0">{{ rule.ScaleDownIncrement }}</dd>
+    </dl>
 </div>
 {% endblock %}

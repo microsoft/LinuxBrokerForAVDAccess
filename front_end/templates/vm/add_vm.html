@@ -1,56 +1,106 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
-{% block title %}Add New VM{% endblock %}
+{% block title %}Add VM - Linux Broker Management Portal{% endblock %}
 
 {% block content %}
-<div class="container mt-5">
-    <h2>Add New Virtual Machine</h2>
-    <form action="{{ url_for('add_vm') }}" method="post">
-        <div class="mb-3">
-            <label for="hostname" class="form-label">Hostname</label>
-            <input type="text" class="form-control" id="hostname" name="hostname" required>
-        </div>
-        <div class="mb-3">
-            <label for="ipaddress" class="form-label">IP Address</label>
-            <input type="text" class="form-control" id="ipaddress" name="ipaddress" required>
-        </div>
-        <div class="mb-3">
-            <label for="powerstate" class="form-label">Power State</label>
-            <select class="form-select" id="powerstate" name="powerstate" required>
-                <option value="On">On</option>
-                <option value="Off">Off</option>
-            </select>
-        </div>
-        <div class="mb-3">
-            <label for="networkstatus" class="form-label">Network Status</label>
-            <select class="form-select" id="networkstatus" name="networkstatus" required>
-                <option value="Reachable">Reachable</option>
-                <option value="Unreachable">Unreachable</option>
-            </select>
-        </div>
-        <div class="mb-3">
-            <label for="vmstatus" class="form-label">VM Status</label>
-            <select class="form-select" id="vmstatus" name="vmstatus" required>
-                <option value="Available">Available</option>
-                <option value="CheckedOut">Checked Out</option>
-                <option value="Maintenance">Maintenance</option>
-                <option value="Released">Released</option>
-            </select>
-        </div>
-        <div class="mb-3">
-            <label for="username" class="form-label">Username</label>
-            <input type="text" class="form-control" id="username" name="username">
-        </div>
-        <div class="mb-3">
-            <label for="avdhost" class="form-label">AVD Host</label>
-            <input type="text" class="form-control" id="avdhost" name="avdhost">
-        </div>
-        <div class="mb-3">
-            <label for="description" class="form-label">Description</label>
-            <textarea class="form-control" id="description" name="description" rows="3"></textarea>
-        </div>
-        <button type="submit" class="btn btn-primary">Add VM</button>
-        <a href="{{ url_for('view_all_vms') }}" class="btn btn-secondary">Cancel</a>
-    </form>
+
+<nav aria-label="Breadcrumb">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{{ url_for('view_all_vms') }}">Virtual machines</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Add VM</li>
+  </ol>
+</nav>
+
+<div class="lb-page-header">
+  <div>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      {{ ui.icon('plus', 22, 'text-body-secondary') }} Add virtual machine
+    </h1>
+    <p class="text-body-secondary mb-0">Register an existing Linux host with the broker.</p>
+  </div>
 </div>
+
+<div class="lb-card lb-form-card p-4">
+  <form action="{{ url_for('add_vm') }}" method="post" class="needs-validation" novalidate>
+    {{ ui.csrf_field() }}
+
+    <div class="row g-3">
+      <div class="col-md-6">
+        <label for="hostname" class="form-label">Hostname</label>
+        <input type="text" class="form-control" id="hostname" name="hostname" required
+               autocomplete="off" placeholder="linux-host-01">
+        <div class="invalid-feedback">Enter the host's name.</div>
+      </div>
+
+      <div class="col-md-6">
+        <label for="ipaddress" class="form-label">IP address</label>
+        <input type="text" class="form-control" id="ipaddress" name="ipaddress" required
+               autocomplete="off" placeholder="10.0.0.4"
+               pattern="^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$">
+        <div class="form-text">IPv4 address the broker uses to reach the host.</div>
+        <div class="invalid-feedback">Enter a valid IPv4 address, for example 10.0.0.4.</div>
+      </div>
+
+      <div class="col-md-4">
+        <label for="powerstate" class="form-label">Power state</label>
+        <select class="form-select" id="powerstate" name="powerstate" required>
+          <option value="On">On</option>
+          <option value="Off">Off</option>
+        </select>
+      </div>
+
+      <div class="col-md-4">
+        <label for="networkstatus" class="form-label">Network status</label>
+        <select class="form-select" id="networkstatus" name="networkstatus" required>
+          <option value="Reachable">Reachable</option>
+          <option value="Unreachable">Unreachable</option>
+        </select>
+      </div>
+
+      <div class="col-md-4">
+        <label for="vmstatus" class="form-label">VM status</label>
+        <select class="form-select" id="vmstatus" name="vmstatus" required>
+          <option value="Available">Available</option>
+          <option value="CheckedOut">Checked out</option>
+          <option value="Maintenance">Maintenance</option>
+          <option value="Released">Released</option>
+        </select>
+        <div class="form-text">Only <strong>Available</strong> hosts are offered for checkout.</div>
+      </div>
+
+      <div class="col-md-6">
+        <label for="username" class="form-label">
+          Username <span class="text-body-secondary fw-normal">(optional)</span>
+        </label>
+        <input type="text" class="form-control" id="username" name="username" autocomplete="off">
+        <div class="form-text">Only set this if the host is already assigned to someone.</div>
+      </div>
+
+      <div class="col-md-6">
+        <label for="avdhost" class="form-label">
+          AVD host <span class="text-body-secondary fw-normal">(optional)</span>
+        </label>
+        <input type="text" class="form-control" id="avdhost" name="avdhost" autocomplete="off">
+        <div class="form-text">Session host this VM is currently brokered to.</div>
+      </div>
+
+      <div class="col-12">
+        <label for="description" class="form-label">
+          Description <span class="text-body-secondary fw-normal">(optional)</span>
+        </label>
+        <textarea class="form-control" id="description" name="description" rows="3"
+                  placeholder="Purpose, owning team, image version…"></textarea>
+      </div>
+    </div>
+
+    <div class="d-flex gap-2 mt-4">
+      <button type="submit" class="btn btn-primary">
+        {{ ui.icon('plus', 15) }}<span class="ms-1">Add VM</span>
+      </button>
+      <a href="{{ url_for('view_all_vms') }}" class="btn btn-outline-secondary">Cancel</a>
+    </div>
+  </form>
+</div>
+
 {% endblock %}

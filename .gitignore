@@ -26,3 +26,4 @@ priv-*
 
 # Visual Studio Code
 .vscode
+flask_session/

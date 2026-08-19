@@ -1,123 +1,137 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
-{% block title %}VM History{% endblock %}
+{% block title %}VM History - Linux Broker Management Portal{% endblock %}
 
 {% block content %}
-<div class="custom-container mt-5">
-    <h2>Virtual Machine History</h2>
-    
-    <!-- Filter form -->
-    <form method="POST" action="{{ url_for('vm_history') }}" class="mb-4">
-        <div class="form-row">
-            <div class="form-group col-md-3">
-                <label for="startdate">Start Date</label>
-                <input type="date" class="form-control" id="startdate" name="startdate" value="{{ request.form.get('startdate') }}" {% if request.form.get('ignore_dates') %}disabled{% endif %}>
-            </div>
-            <div class="form-group col-md-3">
-                <label for="enddate">End Date</label>
-                <input type="date" class="form-control" id="enddate" name="enddate" value="{{ request.form.get('enddate') }}" {% if request.form.get('ignore_dates') %}disabled{% endif %}>
-            </div>
-            <div class="form-group col-md-3">
-                <label for="limit">Limit</label>
-                <input type="number" class="form-control" id="limit" name="limit" value="{{ request.form.get('limit', 20) }}">
-            </div>
-            <div class="form-group col-md-3 align-self-end">
-                <div class="form-check">
-                    <input class="form-check-input" type="checkbox" id="ignore_dates" name="ignore_dates" {% if request.form.get('ignore_dates') %}checked{% endif %}>
-                    <label class="form-check-label" for="ignore_dates">
-                        Do not use dates
-                    </label>
-                </div>
-                <div class="form-check">
-                    <input class="form-check-input" type="checkbox" id="ignore_limit" name="ignore_limit" {% if request.form.get('ignore_limit') %}checked{% endif %}>
-                    <label class="form-check-label" for="ignore_limit">
-                        No Limit
-                    </label>
-                </div>
-                <button type="submit" class="btn btn-primary mt-3">Filter</button>
-            </div>
-        </div>
-    </form>
 
-    <!-- Table displaying VM history -->
-    <table class="table table-striped">
+<nav aria-label="Breadcrumb">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{{ url_for('view_all_vms') }}">Virtual machines</a></li>
+    <li class="breadcrumb-item active" aria-current="page">History</li>
+  </ol>
+</nav>
+
+<div class="lb-page-header">
+  <div>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      {{ ui.icon('clock', 22, 'text-body-secondary') }} Virtual machine history
+    </h1>
+    <p class="text-body-secondary mb-0">Point-in-time record of every VM state change.</p>
+  </div>
+  <div class="lb-page-header-actions">
+    <a href="{{ url_for('view_all_vms') }}" class="btn btn-outline-secondary btn-sm">
+      {{ ui.icon('chevron-left', 15) }}<span class="ms-1">Back to list</span>
+    </a>
+  </div>
+</div>
+
+{# Filter values are read from `filters`, which the route restores from the
+   session. Reading request.form here would always be empty because the POST
+   handler redirects. #}
+{% set f = filters | default({}) %}
+
+<form method="POST" action="{{ url_for('vm_history') }}" class="lb-filter-bar">
+  {{ ui.csrf_field() }}
+  <div class="row g-3 align-items-end">
+    <div class="col-12 col-md-6 col-lg-3 lb-field">
+      <label for="startdate" class="form-label">Start date</label>
+      <input type="date" class="form-control" id="startdate" name="startdate"
+             value="{{ f.get('startdate', '') }}">
+    </div>
+
+    <div class="col-12 col-md-6 col-lg-3 lb-field">
+      <label for="enddate" class="form-label">End date</label>
+      <input type="date" class="form-control" id="enddate" name="enddate"
+             value="{{ f.get('enddate', '') }}">
+    </div>
+
+    <div class="col-12 col-md-6 col-lg-2 lb-field">
+      <label for="limit" class="form-label">Limit</label>
+      <input type="number" min="1" class="form-control" id="limit" name="limit"
+             value="{{ f.get('limit', 20) }}">
+    </div>
+
+    <div class="col-12 col-md-6 col-lg-2">
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" id="ignore_dates" name="ignore_dates"
+               data-lb-disables="startdate,enddate"
+               {% if f.get('ignore_dates') %}checked{% endif %}>
+        <label class="form-check-label" for="ignore_dates">All dates</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" id="ignore_limit" name="ignore_limit"
+               data-lb-disables="limit"
+               {% if f.get('ignore_limit') %}checked{% endif %}>
+        <label class="form-check-label" for="ignore_limit">No limit</label>
+      </div>
+    </div>
+
+    <div class="col-12 col-lg-2 d-grid">
+      <button type="submit" class="btn btn-primary">
+        {{ ui.icon('funnel', 15) }}<span class="ms-1">Apply filter</span>
+      </button>
+    </div>
+  </div>
+</form>
+
+<div class="lb-card">
+  {{ ui.table_toolbar('history-table', 'Search this page…', vm_history|length, 'records') }}
+
+  {% if vm_history %}
+    <div class="lb-table-wrap">
+      <table class="table lb-table table-hover align-middle" id="history-table">
         <thead>
-            <tr>
-                <th scope="col">VMID</th>
-                <th scope="col">Hostname</th>
-                <th scope="col">IPAddress</th>
-                <th scope="col">PowerState</th>
-                <th scope="col">NetworkStatus</th>
-                <th scope="col">VmStatus</th>
-                <th scope="col">Description</th>
-                <th scope="col">Create Date</th>
-                <th scope="col">Last Update Date</th>
-                <th scope="col">Sys Start Time</th>
-                <th scope="col">Sys End Time</th>
-            </tr>
+          <tr>
+            {{ ui.th_sort('VMID', 'number') }}
+            {{ ui.th_sort('Hostname') }}
+            {{ ui.th_sort('IP address') }}
+            {{ ui.th_sort('Power') }}
+            {{ ui.th_sort('Network') }}
+            {{ ui.th_sort('Status') }}
+            <th scope="col">Description</th>
+            {{ ui.th_sort('Created', 'date') }}
+            {{ ui.th_sort('Last updated', 'date') }}
+            {{ ui.th_sort('Valid from', 'date') }}
+            {{ ui.th_sort('Valid to', 'date') }}
+          </tr>
         </thead>
         <tbody>
-            {% if vm_history %}
-                {% for vm in vm_history %}
-                <tr>
-                    <td>{{ vm.VMID }}</td>
-                    <td>{{ vm.Hostname }}</td>
-                    <td>{{ vm.IPAddress }}</td>
-                    <td>{{ vm.PowerState }}</td>
-                    <td>{{ vm.NetworkStatus }}</td>
-                    <td>{{ vm.VmStatus }}</td>
-                    <td>{{ vm.Description }}</td>
-                    <td>{{ vm.CreateDate }}</td>
-                    <td>{{ vm.LastUpdateDate }}</td>
-                    <td>{{ vm.SysStartTime }}</td>
-                    <td>{{ vm.SysEndTime }}</td>
-                </tr>
-                {% endfor %}
-            {% else %}
-                <tr>
-                    <td colspan="11" class="text-center">No VM history records found for the specified criteria.</td>
-                </tr>
-            {% endif %}
+          {% for vm in vm_history %}
+            <tr>
+              <td class="lb-mono">{{ vm.VMID }}</td>
+              <td class="fw-semibold text-nowrap">{{ ui.value_or_dash(vm.Hostname) }}</td>
+              <td class="lb-mono">{{ ui.value_or_dash(vm.IPAddress) }}</td>
+              <td data-lb-value="{{ vm.PowerState }}">{{ ui.power_badge(vm.PowerState) }}</td>
+              <td data-lb-value="{{ vm.NetworkStatus }}">{{ ui.network_badge(vm.NetworkStatus) }}</td>
+              <td data-lb-value="{{ vm.VmStatus }}">{{ ui.vm_status_badge(vm.VmStatus) }}</td>
+              <td class="small text-truncate" style="max-width: 22ch;" title="{{ vm.Description }}">
+                {{ ui.value_or_dash(vm.Description) }}
+              </td>
+              <td class="lb-mono text-nowrap small">{{ ui.value_or_dash(vm.CreateDate) }}</td>
+              <td class="lb-mono text-nowrap small">{{ ui.value_or_dash(vm.LastUpdateDate) }}</td>
+              <td class="lb-mono text-nowrap small">{{ ui.value_or_dash(vm.SysStartTime) }}</td>
+              <td class="lb-mono text-nowrap small">{{ ui.value_or_dash(vm.SysEndTime) }}</td>
+            </tr>
+          {% endfor %}
         </tbody>
-    </table>
+      </table>
+    </div>
 
-    <!-- Pagination controls -->
-    <form method="GET" action="{{ url_for('vm_history') }}" class="form-inline mb-2">
-        <div class="form-group mb-2">
-            <label for="per_page" class="mr-2">Items per page:</label>
-            <select class="form-control" id="per_page" name="per_page" onchange="this.form.submit()">
-                <option value="10" {% if per_page == 10 %}selected{% endif %}>10</option>
-                <option value="25" {% if per_page == 25 %}selected{% endif %}>25</option>
-                <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
-            </select>
-        </div>
-        <input type="hidden" name="page" value="1">
-    </form>
-    
+    <div class="lb-empty d-none" id="history-table-noresults">
+      {{ ui.icon('search', 32, 'text-body-secondary opacity-50') }}
+      <p class="fw-semibold mt-3 mb-1">No matching records on this page</p>
+      <p class="text-body-secondary mb-0">Try a different search term or page.</p>
+    </div>
 
-    <nav aria-label="Page navigation">
-        <ul class="pagination">
-            {% if page > 1 %}
-            <li class="page-item">
-                <a class="page-link" href="{{ url_for('vm_history', page=page-1, per_page=per_page) }}" aria-label="Previous">
-                    <span aria-hidden="true">&laquo;</span>
-                </a>
-            </li>
-            {% endif %}
-            {% for p in range(1, total_pages + 1) %}
-            <li class="page-item {% if p == page %}active{% endif %}">
-                <a class="page-link" href="{{ url_for('vm_history', page=p, per_page=per_page) }}">{{ p }}</a>
-            </li>
-            {% endfor %}
-            {% if page < total_pages %}
-            <li class="page-item">
-                <a class="page-link" href="{{ url_for('vm_history', page=page+1, per_page=per_page) }}" aria-label="Next">
-                    <span aria-hidden="true">&raquo;</span>
-                </a>
-            </li>
-            {% endif %}
-        </ul>
-    </nav>
-
+    <div class="lb-table-footer">
+      {{ ui.per_page_select('vm_history', per_page) }}
+      {{ ui.pagination('vm_history', page, total_pages, per_page) }}
+    </div>
+  {% else %}
+    {{ ui.empty_state('No history records',
+                      'Adjust the filter above and apply it to search the VM history.', 'clock') }}
+  {% endif %}
 </div>
+
 {% endblock %}

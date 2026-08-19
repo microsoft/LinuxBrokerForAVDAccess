@@ -151,6 +151,13 @@ def register_route_scaling_management(app):
 
                 ignore_dates = request.form.get('ignore_dates')
                 ignore_limit = request.form.get('ignore_limit')
+                filters = {
+                    "startdate": startdate or "",
+                    "enddate": enddate or "",
+                    "limit": limit or "",
+                    "ignore_dates": bool(ignore_dates),
+                    "ignore_limit": bool(ignore_limit)
+                }
 
                 logger.debug("Form data - StartDate: %s, EndDate: %s, Limit: %s", startdate, enddate, limit)
                 logger.debug("Flags - Ignore Dates: %s, Ignore Limit: %s", ignore_dates, ignore_limit)
@@ -189,6 +196,7 @@ def register_route_scaling_management(app):
                 logger.debug("Data for API request: %s", data)
 
                 session['scaling_activity_log_data'] = data
+                session['scaling_activity_log_filters'] = filters
 
                 access_token = session.get("access_token")
                 if not access_token:
@@ -219,6 +227,16 @@ def register_route_scaling_management(app):
         else:
             try:
                 log = session.get('scaling_activity_log', [])
+                filters = session.get('scaling_activity_log_filters')
+                if not filters:
+                    stored_data = session.get('scaling_activity_log_data', {})
+                    filters = {
+                        "startdate": "",
+                        "enddate": "",
+                        "limit": stored_data.get("limit", 100),
+                        "ignore_dates": stored_data.get("startdate") == "null" and stored_data.get("enddate") == "null",
+                        "ignore_limit": stored_data.get("limit") == "null"
+                    }
                 page = max(1, int(request.args.get('page', 1)))
                 per_page = max(1, int(request.args.get('per_page', 10)))
                 total_items = len(log)
@@ -235,7 +253,8 @@ def register_route_scaling_management(app):
                                        log=log_paginated,
                                        page=page,
                                        total_pages=total_pages,
-                                       per_page=per_page)
+                                       per_page=per_page,
+                                       filters=filters)
             except Exception as e:
                 flash("An unexpected error occurred while displaying scaling activity log.", "danger")
                 logger.error("Unexpected error in scaling_activity_log GET: %s", e)
@@ -252,6 +271,13 @@ def register_route_scaling_management(app):
 
                 ignore_dates = request.form.get('ignore_dates')
                 ignore_limit = request.form.get('ignore_limit')
+                filters = {
+                    "startdate": startdate or "",
+                    "enddate": enddate or "",
+                    "limit": limit or "",
+                    "ignore_dates": bool(ignore_dates),
+                    "ignore_limit": bool(ignore_limit)
+                }
 
                 if ignore_limit:
                     limit = "null"
@@ -285,6 +311,7 @@ def register_route_scaling_management(app):
                 }
 
                 session['scaling_rules_history_data'] = data
+                session['scaling_rules_history_filters'] = filters
 
                 access_token = session.get("access_token")
                 if not access_token:
@@ -315,6 +342,16 @@ def register_route_scaling_management(app):
         else:
             try:
                 history = session.get('scaling_rules_history', [])
+                filters = session.get('scaling_rules_history_filters')
+                if not filters:
+                    stored_data = session.get('scaling_rules_history_data', {})
+                    filters = {
+                        "startdate": "",
+                        "enddate": "",
+                        "limit": stored_data.get("limit", 100),
+                        "ignore_dates": stored_data.get("startdate") == "null" and stored_data.get("enddate") == "null",
+                        "ignore_limit": stored_data.get("limit") == "null"
+                    }
                 page = max(1, int(request.args.get('page', 1)))
                 per_page = max(1, int(request.args.get('per_page', 10)))
                 total_items = len(history)
@@ -331,7 +368,8 @@ def register_route_scaling_management(app):
                                        history=history_paginated,
                                        page=page,
                                        total_pages=total_pages,
-                                       per_page=per_page)
+                                       per_page=per_page,
+                                       filters=filters)
             except Exception as e:
                 flash("An unexpected error occurred while displaying scaling rules history.", "danger")
                 logger.error("Unexpected error in scaling_rules_history GET: %s", e)

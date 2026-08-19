@@ -1,23 +1,65 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
-{% block title %}Checkout VM{% endblock %}
+{% block title %}Checkout VM - Linux Broker Management Portal{% endblock %}
 
 {% block content %}
-<div class="container mt-5">
-    <h2>Checkout Virtual Machine</h2>
-    <form action="{{ url_for('checkout_vm') }}" method="post">
-        <div class="form-group">
-            <label for="username">Username</label>
-            <input type="text" class="form-control" id="username" name="username" placeholder="Enter your username" required>
-        </div>
 
-        <div class="form-group">
-            <label for="avdhost">AVD Host</label>
-            <input type="text" class="form-control" id="avdhost" name="avdhost" placeholder="Enter the AVD host" required>
-        </div>
+<nav aria-label="Breadcrumb">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{{ url_for('view_all_vms') }}">Virtual machines</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Checkout</li>
+  </ol>
+</nav>
 
-        <button type="submit" class="btn btn-primary">Checkout VM</button>
-        <a href="{{ url_for('view_all_vms') }}" class="btn btn-secondary">Cancel</a>
-    </form>
+<div class="lb-page-header">
+  <div>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      {{ ui.icon('person', 22, 'text-body-secondary') }} Checkout a virtual machine
+    </h1>
+    <p class="text-body-secondary mb-0">
+      The broker assigns the next available Linux host to the user below.
+    </p>
+  </div>
 </div>
+
+<div class="lb-card lb-form-card p-4">
+  <form action="{{ url_for('checkout_vm') }}" method="post" class="needs-validation" novalidate>
+    {{ ui.csrf_field() }}
+
+    <div class="mb-3">
+      <label for="username" class="form-label">Username</label>
+      <input type="text" class="form-control" id="username" name="username" required
+             autocomplete="off"
+             value="{{ session['user'].get('preferred_username', '') if session.get('user') else '' }}">
+      <div class="form-text">
+        Pre-filled with your signed-in account. Change it to broker a host on behalf of another user.
+      </div>
+      <div class="invalid-feedback">Enter the username to assign the host to.</div>
+    </div>
+
+    <div class="mb-3">
+      <label for="avdhost" class="form-label">AVD host</label>
+      <input type="text" class="form-control" id="avdhost" name="avdhost" required
+             autocomplete="off" placeholder="avd-session-host-01">
+      <div class="form-text">The Azure Virtual Desktop session host initiating the connection.</div>
+      <div class="invalid-feedback">Enter the AVD session host.</div>
+    </div>
+
+    <div class="alert alert-info d-flex align-items-start gap-2" role="alert">
+      {{ ui.icon('info-circle', 16) }}
+      <div class="small mb-0">
+        Only hosts that are powered on, reachable and unassigned can be checked out.
+      </div>
+    </div>
+
+    <div class="d-flex gap-2 mt-4">
+      <button type="submit" class="btn btn-primary">
+        {{ ui.icon('person', 15) }}<span class="ms-1">Checkout VM</span>
+      </button>
+      <a href="{{ url_for('view_all_vms') }}" class="btn btn-outline-secondary">Cancel</a>
+    </div>
+  </form>
+</div>
+
 {% endblock %}

@@ -1,39 +1,69 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
-{% block title %}Update VM Attributes{% endblock %}
+{% block title %}Update {{ vm.Hostname }} - Linux Broker Management Portal{% endblock %}
 
 {% block content %}
-<div class="container mt-5">
-    <h2>Update VM Attributes</h2>
-    <form action="{{ url_for('update_vm_attributes', vmid=vm.VMID) }}" method="post">
-        <div class="form-group">
-            <label for="powerstate">Power State</label>
-            <select class="form-control" id="powerstate" name="powerstate" required>
-                <option value="On" {% if vm.PowerState == 'On' %}selected{% endif %}>On</option>
-                <option value="Off" {% if vm.PowerState == 'Off' %}selected{% endif %}>Off</option>
-            </select>
-        </div>
 
-        <div class="form-group">
-            <label for="networkstatus">Network Status</label>
-            <select class="form-control" id="networkstatus" name="networkstatus" required>
-                <option value="Reachable" {% if vm.NetworkStatus == 'Reachable' %}selected{% endif %}>Reachable</option>
-                <option value="Unreachable" {% if vm.NetworkStatus == 'Unreachable' %}selected{% endif %}>Unreachable</option>
-            </select>
-        </div>
+<nav aria-label="Breadcrumb">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{{ url_for('view_all_vms') }}">Virtual machines</a></li>
+    <li class="breadcrumb-item"><a href="{{ url_for('view_vm_details', vmid=vm.VMID) }}">{{ vm.Hostname }}</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Update</li>
+  </ol>
+</nav>
 
-        <div class="form-group">
-            <label for="vmstatus">VM Status</label>
-            <select class="form-control" id="vmstatus" name="vmstatus" required>
-                <option value="Available" {% if vm.VmStatus == 'Available' %}selected{% endif %}>Available</option>
-                <option value="CheckedOut" {% if vm.VmStatus == 'CheckedOut' %}selected{% endif %}>Checked Out</option>
-                <option value="Maintenance" {% if vm.VmStatus == 'Maintenance' %}selected{% endif %}>Maintenance</option>
-                <option value="Released" {% if vm.VmStatus == 'Released' %}selected{% endif %}>Released</option>
-            </select>
-        </div>
-
-        <button type="submit" class="btn btn-primary">Update VM</button>
-        <a href="{{ url_for('view_vm_details', vmid=vm.VMID) }}" class="btn btn-secondary">Cancel</a>
-    </form>
+<div class="lb-page-header">
+  <div>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      {{ ui.icon('pencil', 22, 'text-body-secondary') }} Update attributes
+    </h1>
+    <p class="text-body-secondary mb-0">{{ vm.Hostname }} &middot; VMID {{ vm.VMID }}</p>
+  </div>
 </div>
+
+<div class="lb-card lb-form-card p-4">
+  <form action="{{ url_for('update_vm_attributes', vmid=vm.VMID) }}" method="post">
+    {{ ui.csrf_field() }}
+
+    <div class="mb-3">
+      <label for="powerstate" class="form-label">Power state</label>
+      <select class="form-select" id="powerstate" name="powerstate" required>
+        <option value="On" {% if vm.PowerState == 'On' %}selected{% endif %}>On</option>
+        <option value="Off" {% if vm.PowerState == 'Off' %}selected{% endif %}>Off</option>
+      </select>
+      <div class="form-text">Reflects whether the underlying Azure VM is running.</div>
+    </div>
+
+    <div class="mb-3">
+      <label for="networkstatus" class="form-label">Network status</label>
+      <select class="form-select" id="networkstatus" name="networkstatus" required>
+        <option value="Reachable" {% if vm.NetworkStatus == 'Reachable' %}selected{% endif %}>Reachable</option>
+        <option value="Unreachable" {% if vm.NetworkStatus == 'Unreachable' %}selected{% endif %}>Unreachable</option>
+      </select>
+      <div class="form-text">Unreachable hosts are skipped when brokering a session.</div>
+    </div>
+
+    <div class="mb-3">
+      <label for="vmstatus" class="form-label">VM status</label>
+      <select class="form-select" id="vmstatus" name="vmstatus" required>
+        <option value="Available" {% if vm.VmStatus == 'Available' %}selected{% endif %}>Available</option>
+        <option value="CheckedOut" {% if vm.VmStatus == 'CheckedOut' %}selected{% endif %}>Checked out</option>
+        <option value="Maintenance" {% if vm.VmStatus == 'Maintenance' %}selected{% endif %}>Maintenance</option>
+        <option value="Released" {% if vm.VmStatus == 'Released' %}selected{% endif %}>Released</option>
+      </select>
+      <div class="form-text">
+        Set <strong>Maintenance</strong> to take the host out of rotation without deleting it.
+      </div>
+    </div>
+
+    <div class="d-flex gap-2 mt-4">
+      <button type="submit" class="btn btn-primary">
+        {{ ui.icon('check-circle', 15) }}<span class="ms-1">Save changes</span>
+      </button>
+      <a href="{{ url_for('view_vm_details', vmid=vm.VMID) }}" class="btn btn-outline-secondary">Cancel</a>
+    </div>
+  </form>
+</div>
+
 {% endblock %}

@@ -1,0 +1,262 @@
+{#
+  Shared Jinja macros for the Linux Broker Management Portal.
+
+  Icons are hand-authored inline SVG so the portal has no icon-font dependency
+  and renders identically in disconnected / sovereign cloud environments.
+#}
+
+{% macro icon(name, size=16, cls='') -%}
+<svg xmlns="http://www.w3.org/2000/svg" width="{{ size }}" height="{{ size }}" viewBox="0 0 16 16"
+     fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+     class="lb-icon {{ cls }}" aria-hidden="true" focusable="false">
+{%- if name == 'check-circle' %}<circle cx="8" cy="8" r="6.25"/><path d="M5.2 8.2 7.2 10.2 10.9 6"/>
+{%- elif name == 'x-circle' %}<circle cx="8" cy="8" r="6.25"/><path d="M5.8 5.8 10.2 10.2M10.2 5.8 5.8 10.2"/>
+{%- elif name == 'dash-circle' %}<circle cx="8" cy="8" r="6.25"/><path d="M5.3 8h5.4"/>
+{%- elif name == 'info-circle' %}<circle cx="8" cy="8" r="6.25"/><path d="M8 7.4v3.6"/><path d="M8 5.1h.01"/>
+{%- elif name == 'alert-triangle' %}<path d="M8 2.2 14.4 13.4H1.6z"/><path d="M8 6.4v3"/><path d="M8 11.4h.01"/>
+{%- elif name == 'power' %}<path d="M4.9 3.9a5 5 0 1 0 6.2 0"/><path d="M8 1.6v6.1"/>
+{%- elif name == 'person' %}<circle cx="8" cy="5.2" r="2.6"/><path d="M2.9 13.7a5.2 5.2 0 0 1 10.2 0"/>
+{%- elif name == 'wifi' %}<path d="M1.6 6.1a9 9 0 0 1 12.8 0"/><path d="M4.1 8.7a5.5 5.5 0 0 1 7.8 0"/><path d="M8 11.8h.01"/>
+{%- elif name == 'wifi-off' %}<path d="M1.6 6.1a9 9 0 0 1 4-2.3"/><path d="M10.2 3.9a9 9 0 0 1 4.2 2.2"/><path d="M8 11.8h.01"/><path d="M1.8 1.8 14.2 14.2"/>
+{%- elif name == 'wrench' %}<path d="M10.6 1.9a3.7 3.7 0 0 0-4.2 4.8l-4.7 4.7 2.5 2.5 4.7-4.7a3.7 3.7 0 0 0 4.8-4.2L11.5 7 9 4.5z"/>
+{%- elif name == 'arrow-up' %}<path d="M8 13.2V3.2"/><path d="M4.2 7 8 3.2 11.8 7"/>
+{%- elif name == 'arrow-down' %}<path d="M8 2.8v10"/><path d="M4.2 9 8 12.8 11.8 9"/>
+{%- elif name == 'arrow-return' %}<path d="M13.2 3.6v2.9a3 3 0 0 1-3 3H3"/><path d="M6 6.5 3 9.5l3 3"/>
+{%- elif name == 'box-arrow-right' %}<path d="M9.4 2.4h4.2v11.2H9.4"/><path d="M2.4 8h7.6"/><path d="M7.2 5.2 10 8l-2.8 2.8"/>
+{%- elif name == 'clock' %}<circle cx="8" cy="8" r="6.25"/><path d="M8 4.4V8l2.5 1.5"/>
+{%- elif name == 'search' %}<circle cx="7.1" cy="7.1" r="4.6"/><path d="M10.5 10.5 14 14"/>
+{%- elif name == 'plus' %}<path d="M8 3.2v9.6M3.2 8h9.6"/>
+{%- elif name == 'pencil' %}<path d="M11.1 2.2 13.8 4.9 5.4 13.3l-3.2.5.5-3.2z"/>
+{%- elif name == 'trash' %}<path d="M2.4 4.3h11.2"/><path d="M6 4.3V2.6h4v1.7"/><path d="M3.9 4.3 4.7 13.6h6.6l.8-9.3"/>
+{%- elif name == 'eye' %}<path d="M1 8s2.7-4.4 7-4.4S15 8 15 8s-2.7 4.4-7 4.4S1 8 1 8Z"/><circle cx="8" cy="8" r="1.9"/>
+{%- elif name == 'sun' %}<circle cx="8" cy="8" r="3.1"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/>
+{%- elif name == 'moon' %}<path d="M13.2 9.7A5.6 5.6 0 1 1 6.4 2.9a4.6 4.6 0 0 0 6.8 6.8Z"/>
+{%- elif name == 'gauge' %}<path d="M2 11.8a6.6 6.6 0 1 1 12 0"/><path d="M8 11.2 11 6.6"/>
+{%- elif name == 'sliders' %}<path d="M2 4.6h12M2 11.4h12"/><circle cx="6" cy="4.6" r="1.7"/><circle cx="10.6" cy="11.4" r="1.7"/>
+{%- elif name == 'server' %}<rect x="1.9" y="2.4" width="12.2" height="4.6" rx="1.2"/><rect x="1.9" y="9" width="12.2" height="4.6" rx="1.2"/><path d="M4.4 4.7h.01M4.4 11.3h.01"/>
+{%- elif name == 'chevron-up' %}<path d="M4 10 8 6l4 4"/>
+{%- elif name == 'chevron-down' %}<path d="M4 6l4 4 4-4"/>
+{%- elif name == 'chevron-left' %}<path d="M10 4 6 8l4 4"/>
+{%- elif name == 'chevron-right' %}<path d="M6 4l4 4-4 4"/>
+{%- elif name == 'chevron-expand' %}<path d="M4.6 6.4 8 3l3.4 3.4"/><path d="M4.6 9.6 8 13l3.4-3.4"/>
+{%- elif name == 'funnel' %}<path d="M2 3h12L9.4 8.3V13L6.6 11.4V8.3z"/>
+{%- elif name == 'refresh' %}<path d="M13.6 8a5.6 5.6 0 1 1-1.7-4"/><path d="M13.9 1.6v2.9H11"/>
+{%- elif name == 'x' %}<path d="M3.6 3.6l8.8 8.8M12.4 3.6l-8.8 8.8"/>
+{%- elif name == 'list' %}<path d="M5.4 4.2h8.4M5.4 8h8.4M5.4 11.8h8.4"/><path d="M2.6 4.2h.01M2.6 8h.01M2.6 11.8h.01"/>
+{%- elif name == 'activity' %}<path d="M1.4 8h3l2-4.6L9.6 12l2-4h3.2"/>
+{%- elif name == 'shield' %}<path d="M8 1.6 13.2 3.6v4c0 3.2-2.2 5.6-5.2 6.8-3-1.2-5.2-3.6-5.2-6.8v-4z"/>
+{%- elif name == 'home' %}<path d="M2.2 7.2 8 2.4l5.8 4.8"/><path d="M3.7 8v5.6h8.6V8"/>
+{%- else %}<circle cx="8" cy="8" r="6.25"/>
+{%- endif %}
+</svg>
+{%- endmacro %}
+
+
+{# ---------------------------------------------------------------- badges #}
+
+{#
+  Every badge pairs colour with an icon and text so status is never conveyed
+  by colour alone (WCAG 1.4.1).
+#}
+{% macro _badge(text, variant, icon_name) -%}
+<span class="badge lb-badge text-bg-{{ variant }}">{{ icon(icon_name, 12) }}<span>{{ text }}</span></span>
+{%- endmacro %}
+
+{% macro vm_status_badge(value) -%}
+{%- set v = (value or '')|string -%}
+{%- if v == 'Available' %}{{ _badge('Available', 'success', 'check-circle') }}
+{%- elif v == 'CheckedOut' %}{{ _badge('Checked out', 'primary', 'person') }}
+{%- elif v == 'Maintenance' %}{{ _badge('Maintenance', 'warning', 'wrench') }}
+{%- elif v == 'Released' %}{{ _badge('Released', 'info', 'arrow-return') }}
+{%- elif v %}{{ _badge(v, 'secondary', 'dash-circle') }}
+{%- else %}<span class="text-body-secondary">&mdash;</span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro power_badge(value) -%}
+{%- set v = (value or '')|string -%}
+{%- if v == 'On' %}{{ _badge('On', 'success', 'power') }}
+{%- elif v == 'Off' %}{{ _badge('Off', 'secondary', 'power') }}
+{%- elif v %}{{ _badge(v, 'secondary', 'dash-circle') }}
+{%- else %}<span class="text-body-secondary">&mdash;</span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro network_badge(value) -%}
+{%- set v = (value or '')|string -%}
+{%- if v == 'Reachable' %}{{ _badge('Reachable', 'success', 'wifi') }}
+{%- elif v == 'Unreachable' %}{{ _badge('Unreachable', 'danger', 'wifi-off') }}
+{%- elif v %}{{ _badge(v, 'secondary', 'dash-circle') }}
+{%- else %}<span class="text-body-secondary">&mdash;</span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro action_badge(value) -%}
+{%- set v = (value or '')|string -%}
+{%- if v == 'Scale Up' %}{{ _badge('Scale up', 'success', 'arrow-up') }}
+{%- elif v == 'Scale Down' %}{{ _badge('Scale down', 'warning', 'arrow-down') }}
+{%- elif v == 'No Action' %}{{ _badge('No action', 'secondary', 'dash-circle') }}
+{%- elif v %}{{ _badge(v, 'secondary', 'dash-circle') }}
+{%- else %}<span class="text-body-secondary">&mdash;</span>
+{%- endif %}
+{%- endmacro %}
+
+{# Renders a possibly-empty cell without collapsing the table row. #}
+{% macro value_or_dash(value) -%}
+{%- if value is none or value|string|trim == '' %}<span class="text-body-secondary">&mdash;</span>
+{%- else %}{{ value }}{% endif %}
+{%- endmacro %}
+
+
+{# ------------------------------------------------------------ page header #}
+
+{% macro page_header(title, subtitle='', icon_name='') -%}
+<div class="lb-page-header">
+  <div>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      {%- if icon_name %}{{ icon(icon_name, 22, 'text-body-secondary') }}{% endif %}
+      {{ title }}
+    </h1>
+    {% if subtitle %}<p class="text-body-secondary mb-0">{{ subtitle }}</p>{% endif %}
+  </div>
+  <div class="lb-page-header-actions">{{ caller() if caller is defined else '' }}</div>
+</div>
+{%- endmacro %}
+
+
+{# -------------------------------------------------------------- csrf token #}
+
+{% macro csrf_field() -%}
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+{%- endmacro %}
+
+
+{# --------------------------------------------------------- empty / states #}
+
+{% macro empty_state(title, message='', icon_name='list') -%}
+<div class="lb-empty">
+  {{ icon(icon_name, 40, 'text-body-secondary opacity-50') }}
+  <p class="fw-semibold mt-3 mb-1">{{ title }}</p>
+  {% if message %}<p class="text-body-secondary mb-0">{{ message }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+
+{# ------------------------------------------------------------- pagination #}
+
+{#
+  Windowed pagination: first / ellipsis / current +/- `window` / ellipsis / last.
+  Replaces `range(1, total_pages + 1)`, which rendered every page number and
+  produced hundreds of links once the "No Limit" filter was used.
+#}
+{% macro pagination(endpoint, page, total_pages, per_page, window=2) -%}
+{%- if total_pages and total_pages > 1 -%}
+{%- set ns = namespace(pages=[]) -%}
+{%- for p in range(1, total_pages + 1) -%}
+  {%- if p == 1 or p == total_pages or (p >= page - window and p <= page + window) -%}
+    {%- set ns.pages = ns.pages + [p] -%}
+  {%- endif -%}
+{%- endfor -%}
+<nav aria-label="Pagination">
+  <ul class="pagination pagination-sm mb-0 flex-wrap">
+    <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+      <a class="page-link" href="{{ url_for(endpoint, page=page-1, per_page=per_page) }}"
+         aria-label="Previous page" {% if page <= 1 %}tabindex="-1" aria-disabled="true"{% endif %}>
+        {{ icon('chevron-left', 14) }}
+      </a>
+    </li>
+    {%- set nsprev = namespace(last=0) -%}
+    {%- for p in ns.pages %}
+      {%- if nsprev.last and p > nsprev.last + 1 %}
+      <li class="page-item disabled"><span class="page-link">&hellip;</span></li>
+      {%- endif %}
+      <li class="page-item {% if p == page %}active{% endif %}">
+        <a class="page-link" href="{{ url_for(endpoint, page=p, per_page=per_page) }}"
+           {% if p == page %}aria-current="page"{% endif %}>{{ p }}</a>
+      </li>
+      {%- set nsprev.last = p -%}
+    {%- endfor %}
+    <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+      <a class="page-link" href="{{ url_for(endpoint, page=page+1, per_page=per_page) }}"
+         aria-label="Next page" {% if page >= total_pages %}tabindex="-1" aria-disabled="true"{% endif %}>
+        {{ icon('chevron-right', 14) }}
+      </a>
+    </li>
+  </ul>
+</nav>
+{%- endif -%}
+{%- endmacro %}
+
+{#
+  Per-page selector. Includes the current value as an option when it is not one
+  of the presets, so a hand-edited ?per_page= no longer leaves nothing selected.
+#}
+{% macro per_page_select(endpoint, per_page, options=[10, 25, 50, 100]) -%}
+{%- set opts = options if per_page in options else (options + [per_page])|sort -%}
+<form method="GET" action="{{ url_for(endpoint) }}" class="d-flex align-items-center gap-2">
+  <label for="per_page" class="form-label mb-0 text-body-secondary small text-nowrap">Rows per page</label>
+  <select class="form-select form-select-sm w-auto" id="per_page" name="per_page" onchange="this.form.submit()">
+    {%- for o in opts %}
+    <option value="{{ o }}" {% if per_page == o %}selected{% endif %}>{{ o }}</option>
+    {%- endfor %}
+  </select>
+  <input type="hidden" name="page" value="1">
+  <noscript><button type="submit" class="btn btn-sm btn-outline-secondary">Apply</button></noscript>
+</form>
+{%- endmacro %}
+
+
+{# ----------------------------------------------------------- table toolbar #}
+
+{#
+  Client-side search box wired to app.js. `target` is the id of the table to
+  filter; the counter element is updated as rows are matched.
+#}
+{% macro table_toolbar(target, placeholder='Search…', total=0, noun='rows') -%}
+<div class="lb-toolbar">
+  <div class="lb-search">
+    <span class="lb-search-icon">{{ icon('search', 15) }}</span>
+    <label class="visually-hidden" for="{{ target }}-search">{{ placeholder }}</label>
+    <input type="search" id="{{ target }}-search" class="form-control form-control-sm"
+           placeholder="{{ placeholder }}" autocomplete="off"
+           data-lb-filter-target="{{ target }}" data-lb-filter-noun="{{ noun }}">
+  </div>
+  <span class="text-body-secondary small" id="{{ target }}-count"
+        data-lb-count-total="{{ total }}" data-lb-count-noun="{{ noun }}">
+    {{ total }} {{ noun }}
+  </span>
+</div>
+{%- endmacro %}
+
+{# Sortable column header. `type` is 'text' or 'number' for correct comparison. #}
+{% macro th_sort(label, type='text', cls='') -%}
+<th scope="col" class="lb-sortable {{ cls }}" data-lb-sort="{{ type }}" tabindex="0" role="button"
+    aria-sort="none" title="Sort by {{ label }}">
+  <span class="lb-th-inner">{{ label }}{{ icon('chevron-expand', 12, 'lb-sort-icon') }}</span>
+</th>
+{%- endmacro %}
+
+
+{# --------------------------------------------------------- confirm button #}
+
+{#
+  Destructive action button. Posts through a shared confirmation modal that
+  names the specific resource, replacing the generic native confirm() dialog.
+  Defaults to an outline button so a table full of Delete actions does not read
+  as a wall of red; pass outline=false for a deliberate standalone action.
+#}
+{% macro confirm_action(action_url, label, resource, variant='danger', icon_name='trash',
+                        title='', body='', size='sm', block=false, outline=true) -%}
+<form action="{{ action_url }}" method="post" class="d-inline-block lb-confirm-form"
+      data-lb-confirm-title="{{ title or (label ~ ' ' ~ resource) }}"
+      data-lb-confirm-body="{{ body or ('Are you sure you want to ' ~ label|lower ~ ' ' ~ resource ~ '? This cannot be undone.') }}"
+      data-lb-confirm-label="{{ label }}"
+      data-lb-confirm-variant="{{ variant }}">
+  {{ csrf_field() }}
+  <button type="submit"
+          class="btn btn-{{ 'outline-' if outline }}{{ variant }} btn-{{ size }} {{ 'w-100' if block }}"
+          aria-label="{{ label }} {{ resource }}">
+    {{ icon(icon_name, 14) }}<span class="ms-1">{{ label }}</span>
+  </button>
+</form>
+{%- endmacro %}

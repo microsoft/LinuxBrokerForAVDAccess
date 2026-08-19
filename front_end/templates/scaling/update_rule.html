@@ -1,39 +1,52 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
 {% block title %}Update Scaling Rule{% endblock %}
 
 {% block content %}
-<div class="container mt-5">
-    <h2>Update Scaling Rule</h2>
-    
-    <!-- Form to update an existing scaling rule -->
-    <form action="{{ url_for('update_rule', ruleid=rule.RuleID) }}" method="post">
-        <div class="form-group">
-            <label for="minVMs">Minimum VMs</label>
-            <input type="number" class="form-control" id="minVMs" name="minvms" value="{{ rule.MinVMs }}" required>
+{% call ui.page_header('Update Scaling Rule #' ~ rule.RuleID, 'Adjust capacity boundaries and scaling thresholds.', 'pencil') %}
+    <a href="{{ url_for('view_rule_details', ruleid=rule.RuleID) }}" class="btn btn-outline-secondary btn-sm">{{ ui.icon('chevron-left', 14) }}<span class="ms-1">Back to details</span></a>
+{% endcall %}
+
+<div class="lb-card lb-form-card p-4">
+    <form action="{{ url_for('update_rule', ruleid=rule.RuleID) }}" method="post" class="needs-validation" novalidate>
+        {{ ui.csrf_field() }}
+        <div class="row g-3">
+            <div class="col-md-6 lb-field">
+                <label for="minVMs" class="form-label">Minimum VMs</label>
+                <input type="number" class="form-control" id="minVMs" name="minvms" value="{{ rule.MinVMs }}" min="0" required>
+                <div class="form-text">Keep at least this many VMs powered on for baseline capacity.</div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="maxVMs" class="form-label">Maximum VMs</label>
+                <input type="number" class="form-control" id="maxVMs" name="maxvms" value="{{ rule.MaxVMs }}" min="0" required>
+                <div class="form-text">Do not power on more than this many VMs for this pool.</div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="scaleUpRatio" class="form-label">Scale Up Ratio (%)</label>
+                <input type="number" step="0.01" class="form-control" id="scaleUpRatio" name="scaleupratio" value="{{ rule.ScaleUpRatio }}" min="0" max="100" required>
+                <div class="form-text">Power on more VMs when checked-out VMs rise above this percentage.</div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="scaleUpIncrement" class="form-label">Scale Up Increment</label>
+                <input type="number" class="form-control" id="scaleUpIncrement" name="scaleupincrement" value="{{ rule.ScaleUpIncrement }}" min="0" required>
+                <div class="form-text">Number of VMs to power on each time the scale-up threshold is met.</div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="scaleDownRatio" class="form-label">Scale Down Ratio (%)</label>
+                <input type="number" step="0.01" class="form-control" id="scaleDownRatio" name="scaledownratio" value="{{ rule.ScaleDownRatio }}" min="0" max="100" required>
+                <div class="form-text">Power off VMs when checked-out VMs fall below this percentage.</div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="scaleDownIncrement" class="form-label">Scale Down Increment</label>
+                <input type="number" class="form-control" id="scaleDownIncrement" name="scaledownincrement" value="{{ rule.ScaleDownIncrement }}" min="0" required>
+                <div class="form-text">Number of idle VMs to power off each time the scale-down threshold is met.</div>
+            </div>
         </div>
-        <div class="form-group">
-            <label for="maxVMs">Maximum VMs</label>
-            <input type="number" class="form-control" id="maxVMs" name="maxvms" value="{{ rule.MaxVMs }}" required>
+        <div class="d-flex flex-wrap gap-2 mt-4">
+            <button type="submit" class="btn btn-primary">{{ ui.icon('check-circle', 14) }}<span class="ms-1">Update rule</span></button>
+            <a href="{{ url_for('view_rule_details', ruleid=rule.RuleID) }}" class="btn btn-outline-secondary">Cancel</a>
         </div>
-        <div class="form-group">
-            <label for="scaleUpRatio">Scale Up Ratio (%)</label>
-            <input type="number" step="0.01" class="form-control" id="scaleUpRatio" name="scaleupratio" value="{{ rule.ScaleUpRatio }}" required>
-        </div>
-        <div class="form-group">
-            <label for="scaleUpIncrement">Scale Up Increment</label>
-            <input type="number" class="form-control" id="scaleUpIncrement" name="scaleupincrement" value="{{ rule.ScaleUpIncrement }}" required>
-        </div>
-        <div class="form-group">
-            <label for="scaleDownRatio">Scale Down Ratio (%)</label>
-            <input type="number" step="0.01" class="form-control" id="scaleDownRatio" name="scaledownratio" value="{{ rule.ScaleDownRatio }}" required>
-        </div>
-        <div class="form-group">
-            <label for="scaleDownIncrement">Scale Down Increment</label>
-            <input type="number" class="form-control" id="scaleDownIncrement" name="scaledownincrement" value="{{ rule.ScaleDownIncrement }}" required>
-        </div>
-        <button type="submit" class="btn btn-primary">Update Rule</button>
-        <a href="{{ url_for('view_rule_details', ruleid=rule.RuleID) }}" class="btn btn-secondary">Cancel</a>
     </form>
 </div>
 {% endblock %}
