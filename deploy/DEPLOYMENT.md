@@ -92,6 +92,8 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `linuxHostVmSize`: Linux host VM size.
 - `avdVmSize`: AVD host VM size.
 - `linuxHostOsVersion`: Linux image SKU.
+- `azureCloudName`: `AzurePublic`, `AzureUSGovernment`, or `AzureCustom`. See [Choosing The Target Azure Cloud](#choosing-the-target-azure-cloud).
+- `scriptSourceRoot`: root URL the Linux host bootstrap scripts are downloaded from.
 - `domainName`: domain suffix used by the broker when connecting to Linux hosts.
 - `nfsShare`: NFS share path if required by your Linux host configuration.
 - `vmHostResourceGroup`: override if managed VMs live in a different resource group.
@@ -106,6 +108,75 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - AVD and Linux host group IDs
 
 When `AZURE_LOCATION` is not already set, `azd up` will prompt you to select an Azure region before provisioning starts. The selected value is saved into the azd environment automatically. You can also pre-set it with `azd env set AZURE_LOCATION <region>` to skip the prompt.
+
+## Choosing The Target Azure Cloud
+
+The deployment supports Azure commercial, Azure US Government, and custom or sovereign clouds. The selection is stored in the azd environment as `azureCloudName` (also mirrored to `AZURE_CLOUD_NAME`) and accepts:
+
+- `AzurePublic`
+- `AzureUSGovernment`
+- `AzureCustom`
+
+If the value is not already set, `preprovision` infers a default from whichever cloud the Azure CLI is signed in to and, on a local interactive run, prompts you to confirm or change it. Non-interactive runs use the inferred value without prompting. Set it ahead of time to skip the prompt entirely:
+
+```powershell
+azd env set azureCloudName AzureUSGovernment
+```
+
+Sign the Azure CLI in to the matching cloud before deploying, because the deployment reads the subscription, creates the Entra app registrations, and builds container images there:
+
+```powershell
+az cloud set --name AzureUSGovernment
+az login
+```
+
+### Endpoints resolved per cloud
+
+`AzurePublic` and `AzureUSGovernment` have built-in endpoints, so nothing else is required:
+
+| Value | AzurePublic | AzureUSGovernment |
+| --- | --- | --- |
+| `graphEndpoint` | `https://graph.microsoft.com` | `https://graph.microsoft.us` |
+| `appServiceDomain` | `azurewebsites.net` | `azurewebsites.us` |
+| `stsIssuerHost` | `https://sts.windows.net` | `https://sts.windows.net` |
+
+The Entra authority host is not in that table because ARM already reports it for the cloud being deployed into, so Bicep resolves it with `environment().authentication.loginEndpoint`. SQL, Key Vault, storage, and container registry endpoints are likewise taken from resource properties rather than hardcoded suffixes.
+
+### Custom and sovereign clouds
+
+`AzureCustom` has no built-in profile, so every endpoint must be supplied. A local interactive run prompts for the missing values; a non-interactive run fails with the list of values it needs. Set them explicitly to keep the run deterministic:
+
+```powershell
+azd env set azureCloudName AzureCustom
+azd env set azureAuthorityHost https://login.<your-cloud>
+azd env set graphEndpoint https://graph.<your-cloud>
+azd env set stsIssuerHost https://sts.<your-cloud>
+azd env set appServiceDomain azurewebsites.<your-cloud>
+```
+
+Register the cloud with the Azure CLI first so `az` can reach its ARM endpoint:
+
+```powershell
+az cloud register --name MyCloud --endpoint-resource-manager https://management.<your-cloud> --endpoint-active-directory https://login.<your-cloud> --endpoint-active-directory-graph-resource-id https://graph.<your-cloud>/ --suffix-storage-endpoint <your-cloud> --suffix-keyvault-dns .vault.<your-cloud>
+az cloud set --name MyCloud
+az login
+```
+
+The resolved values flow into the frontend, API, and task app settings as `AZURE_CLOUD_NAME`, `AZURE_AUTHORITY_HOST`, `GRAPH_ENDPOINT`, and `STS_ISSUER_HOST`. The applications read those settings instead of assuming commercial-cloud endpoints, and `AZURE_AUTHORITY_HOST` is the standard variable the Azure SDK credentials already honor.
+
+### Linux host bootstrap source
+
+Linux hosts download their agent scripts from `scriptSourceRoot`, which defaults to this repository on GitHub. Government and air-gapped environments usually cannot reach `raw.githubusercontent.com`, so point it at a reachable mirror such as a storage account or internal Git host:
+
+```powershell
+azd env set scriptSourceRoot https://<your-mirror>/LinuxBrokerForAVDAccess/main
+```
+
+The mirror must preserve the repository layout, because the bootstrap scripts append paths such as `/linux_host/create-user.sh` and `/custom_script_extensions/Configure-RHEL9-Host.sh`. The same value is available as `-ScriptSourceRoot` on [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) for existing hosts.
+
+### Cloud availability caveats
+
+Confirm before deploying to a non-commercial cloud that the region offers Azure Virtual Desktop, the App Service Premium v3 `P2mv3` SKU, and the Linux and Windows VM images referenced by the deployment. Availability differs between clouds, and a missing SKU or image surfaces as a provisioning failure rather than a validation error.
 
 ### SSH key values for Linux hosts
 

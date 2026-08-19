@@ -9,7 +9,10 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ApiClientId,
 
-    [string]$RoleValue = 'ScheduledTask'
+    [string]$RoleValue = 'ScheduledTask',
+
+    [Parameter(Mandatory = $false)]
+    [string]$GraphEndpoint
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +25,7 @@ if (-not $identity.principalId) {
 & "$PSScriptRoot/Assign-ServicePrincipalApiRole.ps1" `
     -PrincipalId $identity.principalId `
     -ApiClientId $ApiClientId `
-    -RoleValue $RoleValue
+    -RoleValue $RoleValue `
+    -GraphEndpoint $GraphEndpoint
 
 Write-Host "Ensured '$RoleValue' application permission for function app '$TaskAppName'."

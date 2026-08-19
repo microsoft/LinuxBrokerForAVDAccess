@@ -27,12 +27,16 @@ epel_url="https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
 xpra_repo_path="/etc/yum.repos.d/xpra.repo"
 xpra_url="https://xpra.org/repos/CentOS/xpra.repo"
 microsoft_packages_url="https://packages.microsoft.com/config/rhel/7/packages-microsoft-prod.rpm"
-release_session_url="https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/linux_host/session_release_buffer/RHEL/release-session.sh"
-xrdp_who_xorg_url="https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/linux_host/session_release_buffer/xrdp-who-xorg.sh"
-logind_watcher_url="https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/linux_host/session_release_buffer/logind-session-watcher.sh"
-create_user_script_url="https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/linux_host/create-user.sh"
+# Override for sovereign or air-gapped clouds where raw.githubusercontent.com is unreachable.
+script_source_root="${LINUXBROKER_SCRIPT_SOURCE_ROOT:-https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main}"
+script_source_root="${script_source_root%/}"
+
+release_session_url="$script_source_root/linux_host/session_release_buffer/RHEL/release-session.sh"
+xrdp_who_xorg_url="$script_source_root/linux_host/session_release_buffer/xrdp-who-xorg.sh"
+logind_watcher_url="$script_source_root/linux_host/session_release_buffer/logind-session-watcher.sh"
+create_user_script_url="$script_source_root/linux_host/create-user.sh"
 create_user_script="/usr/local/bin/create-user.sh"
-manage_lease_script_url="https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/linux_host/manage-lease.sh"
+manage_lease_script_url="$script_source_root/linux_host/manage-lease.sh"
 manage_lease_script="/usr/local/bin/manage-lease.sh"
 
 arch=$( /bin/arch )

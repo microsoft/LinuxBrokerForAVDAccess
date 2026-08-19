@@ -137,7 +137,8 @@ if ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhite
 & "$PSScriptRoot/Assign-FunctionAppApiRole.ps1" `
     -ResourceGroupName $ResourceGroupName `
     -TaskAppName $TaskAppName `
-    -ApiClientId $ApiClientId
+    -ApiClientId $ApiClientId `
+    -GraphEndpoint (Get-AzdEnvValue -Key 'graphEndpoint')
 
 & "$PSScriptRoot/Assign-VmApiRoles.ps1" `
     -ResourceGroupName $ResourceGroupName `

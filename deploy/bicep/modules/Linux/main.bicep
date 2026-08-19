@@ -31,6 +31,13 @@ param sshPublicKey string = ''
 ])
 param OSVersion string
 
+@description('Root URL the host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds.')
+param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
+
+var normalizedScriptSourceRoot = endsWith(scriptSourceRoot, '/') ? take(scriptSourceRoot, length(scriptSourceRoot) - 1) : scriptSourceRoot
+var bootstrapArgs = '"${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
+var bootstrapEnv = 'LINUXBROKER_SCRIPT_SOURCE_ROOT="${normalizedScriptSourceRoot}"'
+
 var vmNames = [for i in range(1, numberOfVMs): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
 var adminCredentials = authType == 'Password' ? {
   adminPassword: adminPassword
@@ -60,8 +67,8 @@ var imageConfigs = {
       version: 'latest'
     }
     script: {
-      uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL7-Host.sh'
-      cmd: 'bash Configure-RHEL7-Host.sh "${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL7-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL7-Host.sh ${bootstrapArgs}'
     }
   }
   '8-LVM': {
@@ -72,8 +79,8 @@ var imageConfigs = {
       version: 'latest'
     }
     script: {
-      uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL8-Host.sh'
-      cmd: 'bash Configure-RHEL8-Host.sh "${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL8-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL8-Host.sh ${bootstrapArgs}'
     }
   }
   '9-LVM': {
@@ -84,8 +91,8 @@ var imageConfigs = {
       version: 'latest'
     }
     script: {
-      uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL9-Host.sh'
-      cmd: 'bash Configure-RHEL9-Host.sh "${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL9-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL9-Host.sh ${bootstrapArgs}'
     }
   }
   '24_04-lts': {
@@ -96,8 +103,8 @@ var imageConfigs = {
       version: 'latest'
     }
     script: {
-      uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh'
-      cmd: 'bash Configure-Ubuntu24_desktop-Host.sh "${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-Ubuntu24_desktop-Host.sh ${bootstrapArgs}'
     }
   }
 }

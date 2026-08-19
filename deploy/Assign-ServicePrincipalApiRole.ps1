@@ -7,18 +7,28 @@ param(
     [string]$ApiClientId,
 
     [Parameter(Mandatory = $true)]
-    [string]$RoleValue
+    [string]$RoleValue,
+
+    [Parameter(Mandatory = $false)]
+    [string]$GraphEndpoint
 )
 
 $ErrorActionPreference = 'Stop'
 
-$cloud = az cloud show --output json | ConvertFrom-Json
-$graphUrl = if ($cloud.name -eq 'AzureUSGovernment') {
-    'https://graph.microsoft.us'
+if ([string]::IsNullOrWhiteSpace($GraphEndpoint)) {
+    $GraphEndpoint = $env:GRAPH_ENDPOINT
 }
-else {
-    'https://graph.microsoft.com'
+
+if ([string]::IsNullOrWhiteSpace($GraphEndpoint)) {
+    $cloud = az cloud show --output json | ConvertFrom-Json
+    $GraphEndpoint = switch ($cloud.name) {
+        'AzureUSGovernment' { 'https://graph.microsoft.us' }
+        'AzureCloud' { 'https://graph.microsoft.com' }
+        default { throw "Cloud '$($cloud.name)' has no built-in Microsoft Graph endpoint. Pass -GraphEndpoint or set GRAPH_ENDPOINT." }
+    }
 }
+
+$graphUrl = $GraphEndpoint.TrimEnd('/')
 
 $apiServicePrincipal = az ad sp list --filter "appId eq '$ApiClientId'" --output json | ConvertFrom-Json | Select-Object -First 1
 if (-not $apiServicePrincipal) {

@@ -28,6 +28,29 @@ param linuxHostAdminLoginName string = 'avdadmin'
 param hostAdminPassword string
 param vmHostResourceGroup string = ''
 param vmSubscriptionId string = subscription().subscriptionId
+
+@description('Azure cloud the deployment targets. AzureCustom requires every custom endpoint parameter to be supplied.')
+@allowed([
+  'AzurePublic'
+  'AzureUSGovernment'
+  'AzureCustom'
+])
+param azureCloudName string = 'AzurePublic'
+
+@description('Entra authority host. Leave empty to use the built-in value for the selected cloud.')
+param azureAuthorityHost string = ''
+
+@description('Microsoft Graph endpoint. Leave empty to use the built-in value for the selected cloud.')
+param graphEndpoint string = ''
+
+@description('Legacy STS issuer host used to validate v1 tokens. Leave empty to use the built-in value for the selected cloud.')
+param stsIssuerHost string = ''
+
+@description('App Service public hostname suffix. Leave empty to use the built-in value for the selected cloud.')
+param appServiceDomain string = ''
+
+@description('Root URL the Linux host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds.')
+param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
 param allowedClientIp string = ''
 param appServicePlanSku string = 'P2mv3'
 param deployLinuxHosts bool = false
@@ -178,7 +201,32 @@ resource keyVaultResource 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
 var frontendImageName = '${containerRegistry.outputs.loginServer}/frontend:latest'
 var apiImageName = '${containerRegistry.outputs.loginServer}/api:latest'
 var taskImageName = '${containerRegistry.outputs.loginServer}/task:latest'
-var frontendApiBaseUrl = 'https://${apiAppName}.azurewebsites.net/api'
+// ARM already knows the login endpoint of the cloud it is deploying into, so only the
+// endpoints environment() cannot supply need a lookup table.
+var cloudProfiles = {
+  AzurePublic: {
+    graphEndpoint: 'https://graph.microsoft.com'
+    stsIssuerHost: 'https://sts.windows.net'
+    appServiceDomain: 'azurewebsites.net'
+  }
+  AzureUSGovernment: {
+    graphEndpoint: 'https://graph.microsoft.us'
+    stsIssuerHost: 'https://sts.windows.net'
+    appServiceDomain: 'azurewebsites.us'
+  }
+  AzureCustom: {
+    graphEndpoint: ''
+    stsIssuerHost: ''
+    appServiceDomain: ''
+  }
+}
+var cloudProfile = cloudProfiles[azureCloudName]
+// Carries a trailing slash; both azure-identity and the app config normalize it away.
+var resolvedAuthorityHost = empty(azureAuthorityHost) ? environment().authentication.loginEndpoint : azureAuthorityHost
+var resolvedGraphEndpoint = empty(graphEndpoint) ? cloudProfile.graphEndpoint : graphEndpoint
+var resolvedStsIssuerHost = empty(stsIssuerHost) ? cloudProfile.stsIssuerHost : stsIssuerHost
+var resolvedAppServiceDomain = empty(appServiceDomain) ? cloudProfile.appServiceDomain : appServiceDomain
+var frontendApiBaseUrl = 'https://${apiAppName}.${resolvedAppServiceDomain}/api'
 var storageConnectionString = storageAccount.outputs.connectionString
 var tenantIssuerUrl = '${environment().authentication.loginEndpoint}${tenantId}/v2.0'
 var frontendAllowedAudiences = [
@@ -256,6 +304,8 @@ var apiAuthSettings = {
 var frontendSettings = {
   API_CLIENT_ID: apiClientId
   API_URL: frontendApiBaseUrl
+  AZURE_AUTHORITY_HOST: resolvedAuthorityHost
+  AZURE_CLOUD_NAME: azureCloudName
   CLIENT_ID: frontendClientId
   FLASK_KEY: flaskKey
   MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: frontendClientSecret
@@ -266,13 +316,16 @@ var frontendSettings = {
 }
 var apiSettings = {
   AVD_HOST_GROUP_ID: avdHostGroupId
+  AZURE_AUTHORITY_HOST: resolvedAuthorityHost
+  AZURE_CLOUD_NAME: azureCloudName
   CLIENT_ID: apiClientId
   DB_DATABASE: sql.outputs.databaseName
   DB_PASSWORD_NAME: databasePasswordSecretName
   DB_SERVER: sql.outputs.sqlServerFullyQualifiedDomainName
   DB_USERNAME: sqlAdminLogin
   DOMAIN_NAME: domainName
-  GRAPH_API_ENDPOINT: 'https://graph.microsoft.com/.default'
+  GRAPH_API_ENDPOINT: '${resolvedGraphEndpoint}/.default'
+  GRAPH_ENDPOINT: resolvedGraphEndpoint
   KEY_NAME: linuxHostPrivateKeySecretName
   LINUX_HOST_ADMIN_LOGIN_NAME: linuxHostAdminLoginName
   LINUX_HOST_GROUP_ID: linuxHostGroupId
@@ -280,6 +333,7 @@ var apiSettings = {
   NFS_SHARE: nfsShare
   OTEL_SERVICE_NAME: apiAppName
   SCM_DO_BUILD_DURING_DEPLOYMENT: 'false'
+  STS_ISSUER_HOST: resolvedStsIssuerHost
   TENANT_ID: tenantId
   VAULT_URL: keyVault.outputs.vaultUri
   VM_RESOURCE_GROUP: effectiveVmResourceGroup
@@ -288,6 +342,8 @@ var apiSettings = {
 var functionSettings = {
   API_CLIENT_ID: apiClientId
   API_URL: frontendApiBaseUrl
+  AZURE_AUTHORITY_HOST: resolvedAuthorityHost
+  AZURE_CLOUD_NAME: azureCloudName
   AzureWebJobsStorage: storageConnectionString
   FUNCTIONS_EXTENSION_VERSION: '~4'
   FUNCTIONS_WORKER_RUNTIME: 'python'
@@ -414,6 +470,7 @@ module linuxHosts 'modules/Linux/main.bicep' = if (deployLinuxHosts && linuxHost
     OSVersion: linuxHostOsVersion
     linuxBrokerApiBaseUrl: frontendApiBaseUrl
     linuxBrokerApiClientId: apiClientId
+    scriptSourceRoot: scriptSourceRoot
   }
 }
 
@@ -439,9 +496,9 @@ module avdHosts 'modules/AVD/main.bicep' = if (deployAvdHosts && avdSessionHostC
 }
 
 output frontendAppName string = frontendAppName
-output frontendUrl string = 'https://${frontendAppName}.azurewebsites.net'
+output frontendUrl string = 'https://${frontendAppName}.${resolvedAppServiceDomain}'
 output apiAppName string = apiAppName
-output apiUrl string = 'https://${apiAppName}.azurewebsites.net/api'
+output apiUrl string = 'https://${apiAppName}.${resolvedAppServiceDomain}/api'
 output taskAppName string = taskAppName
 output keyVaultName string = keyVaultName
 output containerRegistryName string = containerRegistryName

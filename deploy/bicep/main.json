@@ -4,8 +4,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.25.53.49325",
-      "templateHash": "16092647517579810232"
+      "version": "0.44.1.10279",
+      "templateHash": "17172461120686127001"
     }
   },
   "parameters": {
@@ -160,6 +160,53 @@
         "description": "Subscription ID that contains managed VMs. Defaults to the current subscription."
       }
     },
+    "azureCloudName": {
+      "type": "string",
+      "defaultValue": "AzurePublic",
+      "allowedValues": [
+        "AzurePublic",
+        "AzureUSGovernment",
+        "AzureCustom"
+      ],
+      "metadata": {
+        "description": "Azure cloud the deployment targets. AzureCustom requires every custom endpoint parameter to be supplied."
+      }
+    },
+    "azureAuthorityHost": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Entra authority host. Leave empty to use the built-in value for the selected cloud."
+      }
+    },
+    "graphEndpoint": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Microsoft Graph endpoint. Leave empty to use the built-in value for the selected cloud."
+      }
+    },
+    "stsIssuerHost": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Legacy STS issuer host used to validate v1 tokens. Leave empty to use the built-in value for the selected cloud."
+      }
+    },
+    "appServiceDomain": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "App Service public hostname suffix. Leave empty to use the built-in value for the selected cloud."
+      }
+    },
+    "scriptSourceRoot": {
+      "type": "string",
+      "defaultValue": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main",
+      "metadata": {
+        "description": "Root URL the Linux host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds."
+      }
+    },
     "allowedClientIp": {
       "type": "string",
       "defaultValue": "",
@@ -300,7 +347,7 @@
     },
     {
       "type": "Microsoft.Resources/deployments",
-      "apiVersion": "2022-09-01",
+      "apiVersion": "2025-04-01",
       "name": "resources",
       "resourceGroup": "[variables('effectiveResourceGroupName')]",
       "properties": {
@@ -372,6 +419,24 @@
           "vmSubscriptionId": {
             "value": "[parameters('vmSubscriptionId')]"
           },
+          "azureCloudName": {
+            "value": "[parameters('azureCloudName')]"
+          },
+          "azureAuthorityHost": {
+            "value": "[parameters('azureAuthorityHost')]"
+          },
+          "graphEndpoint": {
+            "value": "[parameters('graphEndpoint')]"
+          },
+          "stsIssuerHost": {
+            "value": "[parameters('stsIssuerHost')]"
+          },
+          "appServiceDomain": {
+            "value": "[parameters('appServiceDomain')]"
+          },
+          "scriptSourceRoot": {
+            "value": "[parameters('scriptSourceRoot')]"
+          },
           "allowedClientIp": {
             "value": "[parameters('allowedClientIp')]"
           },
@@ -424,8 +489,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.25.53.49325",
-              "templateHash": "14112124161390832818"
+              "version": "0.44.1.10279",
+              "templateHash": "6081907387066907354"
             }
           },
           "parameters": {
@@ -504,6 +569,53 @@
             "vmSubscriptionId": {
               "type": "string",
               "defaultValue": "[subscription().subscriptionId]"
+            },
+            "azureCloudName": {
+              "type": "string",
+              "defaultValue": "AzurePublic",
+              "allowedValues": [
+                "AzurePublic",
+                "AzureUSGovernment",
+                "AzureCustom"
+              ],
+              "metadata": {
+                "description": "Azure cloud the deployment targets. AzureCustom requires every custom endpoint parameter to be supplied."
+              }
+            },
+            "azureAuthorityHost": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Entra authority host. Leave empty to use the built-in value for the selected cloud."
+              }
+            },
+            "graphEndpoint": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Microsoft Graph endpoint. Leave empty to use the built-in value for the selected cloud."
+              }
+            },
+            "stsIssuerHost": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Legacy STS issuer host used to validate v1 tokens. Leave empty to use the built-in value for the selected cloud."
+              }
+            },
+            "appServiceDomain": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "App Service public hostname suffix. Leave empty to use the built-in value for the selected cloud."
+              }
+            },
+            "scriptSourceRoot": {
+              "type": "string",
+              "defaultValue": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main",
+              "metadata": {
+                "description": "Root URL the Linux host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds."
+              }
             },
             "allowedClientIp": {
               "type": "string",
@@ -614,7 +726,29 @@
             "acrPullRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
             "databasePasswordSecretName": "db-password",
             "linuxHostPrivateKeySecretName": "linux-host",
-            "frontendApiBaseUrl": "[format('https://{0}.azurewebsites.net/api', variables('apiAppName'))]",
+            "cloudProfiles": {
+              "AzurePublic": {
+                "graphEndpoint": "https://graph.microsoft.com",
+                "stsIssuerHost": "https://sts.windows.net",
+                "appServiceDomain": "azurewebsites.net"
+              },
+              "AzureUSGovernment": {
+                "graphEndpoint": "https://graph.microsoft.us",
+                "stsIssuerHost": "https://sts.windows.net",
+                "appServiceDomain": "azurewebsites.us"
+              },
+              "AzureCustom": {
+                "graphEndpoint": "",
+                "stsIssuerHost": "",
+                "appServiceDomain": ""
+              }
+            },
+            "cloudProfile": "[variables('cloudProfiles')[parameters('azureCloudName')]]",
+            "resolvedAuthorityHost": "[if(empty(parameters('azureAuthorityHost')), environment().authentication.loginEndpoint, parameters('azureAuthorityHost'))]",
+            "resolvedGraphEndpoint": "[if(empty(parameters('graphEndpoint')), variables('cloudProfile').graphEndpoint, parameters('graphEndpoint'))]",
+            "resolvedStsIssuerHost": "[if(empty(parameters('stsIssuerHost')), variables('cloudProfile').stsIssuerHost, parameters('stsIssuerHost'))]",
+            "resolvedAppServiceDomain": "[if(empty(parameters('appServiceDomain')), variables('cloudProfile').appServiceDomain, parameters('appServiceDomain'))]",
+            "frontendApiBaseUrl": "[format('https://{0}.{1}/api', variables('apiAppName'), variables('resolvedAppServiceDomain'))]",
             "tenantIssuerUrl": "[format('{0}{1}/v2.0', environment().authentication.loginEndpoint, parameters('tenantId'))]",
             "frontendAllowedAudiences": [
               "[parameters('frontendClientId')]",
@@ -661,7 +795,7 @@
             },
             "apiAuthSettings": {
               "platform": {
-                "enabled": true,
+                "enabled": false,
                 "runtimeVersion": "~1"
               },
               "globalValidation": {
@@ -691,6 +825,8 @@
             "frontendSettings": {
               "API_CLIENT_ID": "[parameters('apiClientId')]",
               "API_URL": "[variables('frontendApiBaseUrl')]",
+              "AZURE_AUTHORITY_HOST": "[variables('resolvedAuthorityHost')]",
+              "AZURE_CLOUD_NAME": "[parameters('azureCloudName')]",
               "CLIENT_ID": "[parameters('frontendClientId')]",
               "FLASK_KEY": "[parameters('flaskKey')]",
               "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "[parameters('frontendClientSecret')]",
@@ -704,10 +840,10 @@
             {
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
-              "scope": "[format('Microsoft.ContainerRegistry/registries/{0}', variables('containerRegistryName'))]",
+              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName'))]",
               "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), variables('frontendAppName'), 'frontend-acr-pull')]",
               "properties": {
-                "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'frontendApp'), '2022-09-01').outputs.principalId.value]",
+                "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'frontendApp'), '2025-04-01').outputs.principalId.value]",
                 "principalType": "ServicePrincipal",
                 "roleDefinitionId": "[variables('acrPullRoleDefinitionId')]"
               },
@@ -718,10 +854,10 @@
             {
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
-              "scope": "[format('Microsoft.ContainerRegistry/registries/{0}', variables('containerRegistryName'))]",
+              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName'))]",
               "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), variables('apiAppName'), 'api-acr-pull')]",
               "properties": {
-                "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2022-09-01').outputs.principalId.value]",
+                "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2025-04-01').outputs.principalId.value]",
                 "principalType": "ServicePrincipal",
                 "roleDefinitionId": "[variables('acrPullRoleDefinitionId')]"
               },
@@ -732,10 +868,10 @@
             {
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
-              "scope": "[format('Microsoft.ContainerRegistry/registries/{0}', variables('containerRegistryName'))]",
+              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName'))]",
               "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), variables('taskAppName'), 'task-acr-pull')]",
               "properties": {
-                "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'taskApp'), '2022-09-01').outputs.principalId.value]",
+                "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'taskApp'), '2025-04-01').outputs.principalId.value]",
                 "principalType": "ServicePrincipal",
                 "roleDefinitionId": "[variables('acrPullRoleDefinitionId')]"
               },
@@ -746,10 +882,10 @@
             {
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
-              "scope": "[format('Microsoft.KeyVault/vaults/{0}', variables('keyVaultName'))]",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]",
               "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName')), variables('apiAppName'), 'api-keyvault-secrets-user')]",
               "properties": {
-                "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2022-09-01').outputs.principalId.value]",
+                "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2025-04-01').outputs.principalId.value]",
                 "principalType": "ServicePrincipal",
                 "roleDefinitionId": "[variables('keyVaultSecretsUserRoleDefinitionId')]"
               },
@@ -759,7 +895,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "networking",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -795,8 +931,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "8950926823151503542"
+                      "version": "0.44.1.10279",
+                      "templateHash": "14934542853432924784"
                     }
                   },
                   "parameters": {
@@ -947,7 +1083,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "observability",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -974,8 +1110,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "5711525070604425972"
+                      "version": "0.44.1.10279",
+                      "templateHash": "10067415946987550221"
                     }
                   },
                   "parameters": {
@@ -1047,7 +1183,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "containerRegistry",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -1071,8 +1207,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "7030396897292414962"
+                      "version": "0.44.1.10279",
+                      "templateHash": "3588414506722776755"
                     }
                   },
                   "parameters": {
@@ -1123,7 +1259,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "storageAccount",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -1147,8 +1283,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "11175018908924583799"
+                      "version": "0.44.1.10279",
+                      "templateHash": "13920674143716137459"
                     }
                   },
                   "parameters": {
@@ -1203,7 +1339,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "keyVault",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -1233,8 +1369,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "11314698381309119362"
+                      "version": "0.44.1.10279",
+                      "templateHash": "2106182123526042709"
                     }
                   },
                   "parameters": {
@@ -1319,7 +1455,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "sql",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -1355,8 +1491,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "4013855852680854809"
+                      "version": "0.44.1.10279",
+                      "templateHash": "2004737624686870436"
                     }
                   },
                   "parameters": {
@@ -1460,7 +1596,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "appServicePlan",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -1487,8 +1623,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "4807701873718480196"
+                      "version": "0.44.1.10279",
+                      "templateHash": "1639916006898550317"
                     }
                   },
                   "parameters": {
@@ -1542,7 +1678,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "frontendApp",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -1560,16 +1696,16 @@
                     "value": "[variables('frontendAppName')]"
                   },
                   "serverFarmId": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'appServicePlan'), '2022-09-01').outputs.id.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'appServicePlan'), '2025-04-01').outputs.id.value]"
                   },
                   "containerImageName": {
-                    "value": "[format('{0}/frontend:latest', reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2022-09-01').outputs.loginServer.value)]"
+                    "value": "[format('{0}/frontend:latest', reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2025-04-01').outputs.loginServer.value)]"
                   },
                   "containerRegistryLoginServer": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2022-09-01').outputs.loginServer.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2025-04-01').outputs.loginServer.value]"
                   },
                   "applicationInsightsConnectionString": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2022-09-01').outputs.applicationInsightsConnectionString.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2025-04-01').outputs.applicationInsightsConnectionString.value]"
                   },
                   "appSettings": {
                     "value": "[variables('frontendSettings')]"
@@ -1593,8 +1729,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "876570250764564740"
+                      "version": "0.44.1.10279",
+                      "templateHash": "4486542650804701912"
                     }
                   },
                   "parameters": {
@@ -1739,7 +1875,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "apiApp",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -1757,27 +1893,30 @@
                     "value": "[variables('apiAppName')]"
                   },
                   "serverFarmId": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'appServicePlan'), '2022-09-01').outputs.id.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'appServicePlan'), '2025-04-01').outputs.id.value]"
                   },
                   "containerImageName": {
-                    "value": "[format('{0}/api:latest', reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2022-09-01').outputs.loginServer.value)]"
+                    "value": "[format('{0}/api:latest', reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2025-04-01').outputs.loginServer.value)]"
                   },
                   "containerRegistryLoginServer": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2022-09-01').outputs.loginServer.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2025-04-01').outputs.loginServer.value]"
                   },
                   "applicationInsightsConnectionString": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2022-09-01').outputs.applicationInsightsConnectionString.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2025-04-01').outputs.applicationInsightsConnectionString.value]"
                   },
                   "appSettings": {
                     "value": {
                       "AVD_HOST_GROUP_ID": "[parameters('avdHostGroupId')]",
+                      "AZURE_AUTHORITY_HOST": "[variables('resolvedAuthorityHost')]",
+                      "AZURE_CLOUD_NAME": "[parameters('azureCloudName')]",
                       "CLIENT_ID": "[parameters('apiClientId')]",
-                      "DB_DATABASE": "[reference(resourceId('Microsoft.Resources/deployments', 'sql'), '2022-09-01').outputs.databaseName.value]",
+                      "DB_DATABASE": "[reference(resourceId('Microsoft.Resources/deployments', 'sql'), '2025-04-01').outputs.databaseName.value]",
                       "DB_PASSWORD_NAME": "[variables('databasePasswordSecretName')]",
-                      "DB_SERVER": "[reference(resourceId('Microsoft.Resources/deployments', 'sql'), '2022-09-01').outputs.sqlServerFullyQualifiedDomainName.value]",
+                      "DB_SERVER": "[reference(resourceId('Microsoft.Resources/deployments', 'sql'), '2025-04-01').outputs.sqlServerFullyQualifiedDomainName.value]",
                       "DB_USERNAME": "[parameters('sqlAdminLogin')]",
                       "DOMAIN_NAME": "[parameters('domainName')]",
-                      "GRAPH_API_ENDPOINT": "https://graph.microsoft.com/.default",
+                      "GRAPH_API_ENDPOINT": "[format('{0}/.default', variables('resolvedGraphEndpoint'))]",
+                      "GRAPH_ENDPOINT": "[variables('resolvedGraphEndpoint')]",
                       "KEY_NAME": "[variables('linuxHostPrivateKeySecretName')]",
                       "LINUX_HOST_ADMIN_LOGIN_NAME": "[parameters('linuxHostAdminLoginName')]",
                       "LINUX_HOST_GROUP_ID": "[parameters('linuxHostGroupId')]",
@@ -1785,8 +1924,9 @@
                       "NFS_SHARE": "[parameters('nfsShare')]",
                       "OTEL_SERVICE_NAME": "[variables('apiAppName')]",
                       "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
+                      "STS_ISSUER_HOST": "[variables('resolvedStsIssuerHost')]",
                       "TENANT_ID": "[parameters('tenantId')]",
-                      "VAULT_URL": "[reference(resourceId('Microsoft.Resources/deployments', 'keyVault'), '2022-09-01').outputs.vaultUri.value]",
+                      "VAULT_URL": "[reference(resourceId('Microsoft.Resources/deployments', 'keyVault'), '2025-04-01').outputs.vaultUri.value]",
                       "VM_RESOURCE_GROUP": "[variables('effectiveVmResourceGroup')]",
                       "VM_SUBSCRIPTION_ID": "[parameters('vmSubscriptionId')]"
                     }
@@ -1810,8 +1950,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "876570250764564740"
+                      "version": "0.44.1.10279",
+                      "templateHash": "4486542650804701912"
                     }
                   },
                   "parameters": {
@@ -1958,7 +2098,7 @@
             },
             {
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "taskApp",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -1976,29 +2116,31 @@
                     "value": "[variables('taskAppName')]"
                   },
                   "serverFarmId": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'appServicePlan'), '2022-09-01').outputs.id.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'appServicePlan'), '2025-04-01').outputs.id.value]"
                   },
                   "containerImageName": {
-                    "value": "[format('{0}/task:latest', reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2022-09-01').outputs.loginServer.value)]"
+                    "value": "[format('{0}/task:latest', reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2025-04-01').outputs.loginServer.value)]"
                   },
                   "containerRegistryLoginServer": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2022-09-01').outputs.loginServer.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'containerRegistry'), '2025-04-01').outputs.loginServer.value]"
                   },
                   "applicationInsightsConnectionString": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2022-09-01').outputs.applicationInsightsConnectionString.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2025-04-01').outputs.applicationInsightsConnectionString.value]"
                   },
                   "storageConnectionString": {
-                    "value": "[createObject('API_CLIENT_ID', parameters('apiClientId'), 'API_URL', variables('frontendApiBaseUrl'), 'AzureWebJobsStorage', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.connectionString.value, 'FUNCTIONS_EXTENSION_VERSION', '~4', 'FUNCTIONS_WORKER_RUNTIME', 'python', 'SCM_DO_BUILD_DURING_DEPLOYMENT', 'false', 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.connectionString.value, 'WEBSITE_CONTENTSHARE', toLower(take(format('{0}content', variables('taskAppName')), 63))).AzureWebJobsStorage]"
+                    "value": "[createObject('API_CLIENT_ID', parameters('apiClientId'), 'API_URL', variables('frontendApiBaseUrl'), 'AZURE_AUTHORITY_HOST', variables('resolvedAuthorityHost'), 'AZURE_CLOUD_NAME', parameters('azureCloudName'), 'AzureWebJobsStorage', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2025-04-01').outputs.connectionString.value, 'FUNCTIONS_EXTENSION_VERSION', '~4', 'FUNCTIONS_WORKER_RUNTIME', 'python', 'SCM_DO_BUILD_DURING_DEPLOYMENT', 'false', 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING', reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2025-04-01').outputs.connectionString.value, 'WEBSITE_CONTENTSHARE', toLower(take(format('{0}content', variables('taskAppName')), 63))).AzureWebJobsStorage]"
                   },
                   "appSettings": {
                     "value": {
                       "API_CLIENT_ID": "[parameters('apiClientId')]",
                       "API_URL": "[variables('frontendApiBaseUrl')]",
-                      "AzureWebJobsStorage": "[reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.connectionString.value]",
+                      "AZURE_AUTHORITY_HOST": "[variables('resolvedAuthorityHost')]",
+                      "AZURE_CLOUD_NAME": "[parameters('azureCloudName')]",
+                      "AzureWebJobsStorage": "[reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2025-04-01').outputs.connectionString.value]",
                       "FUNCTIONS_EXTENSION_VERSION": "~4",
                       "FUNCTIONS_WORKER_RUNTIME": "python",
                       "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
-                      "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING": "[reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2022-09-01').outputs.connectionString.value]",
+                      "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING": "[reference(resourceId('Microsoft.Resources/deployments', 'storageAccount'), '2025-04-01').outputs.connectionString.value]",
                       "WEBSITE_CONTENTSHARE": "[toLower(take(format('{0}content', variables('taskAppName')), 63))]"
                     }
                   },
@@ -2012,8 +2154,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "18147226453473071152"
+                      "version": "0.44.1.10279",
+                      "templateHash": "9382984199753345417"
                     }
                   },
                   "parameters": {
@@ -2116,7 +2258,7 @@
             {
               "condition": "[and(parameters('deployLinuxHosts'), greater(parameters('linuxHostCount'), 0))]",
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "linuxHosts",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -2131,10 +2273,10 @@
                     "value": "[union(parameters('tags'), createObject('broker-role', 'linux-host'))]"
                   },
                   "vnetName": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2022-09-01').outputs.vnetName.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.vnetName.value]"
                   },
                   "subnetName": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2022-09-01').outputs.linuxSubnetName.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.linuxSubnetName.value]"
                   },
                   "vnetResourceGroup": {
                     "value": "[resourceGroup().name]"
@@ -2168,6 +2310,9 @@
                   },
                   "linuxBrokerApiClientId": {
                     "value": "[parameters('apiClientId')]"
+                  },
+                  "scriptSourceRoot": {
+                    "value": "[parameters('scriptSourceRoot')]"
                   }
                 },
                 "template": {
@@ -2176,8 +2321,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "7373843181961101080"
+                      "version": "0.44.1.10279",
+                      "templateHash": "2539702079136955532"
                     }
                   },
                   "parameters": {
@@ -2240,6 +2385,13 @@
                         "9-LVM",
                         "24_04-lts"
                       ]
+                    },
+                    "scriptSourceRoot": {
+                      "type": "string",
+                      "defaultValue": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main",
+                      "metadata": {
+                        "description": "Root URL the host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds."
+                      }
                     }
                   },
                   "variables": {
@@ -2250,6 +2402,9 @@
                         "input": "[format('{0}-{1}', parameters('vmNamePrefix'), padLeft(range(1, parameters('numberOfVMs'))[copyIndex('vmNames')], 2, '0'))]"
                       }
                     ],
+                    "normalizedScriptSourceRoot": "[if(endsWith(parameters('scriptSourceRoot'), '/'), take(parameters('scriptSourceRoot'), sub(length(parameters('scriptSourceRoot')), 1)), parameters('scriptSourceRoot'))]",
+                    "bootstrapArgs": "[format('\"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]",
+                    "bootstrapEnv": "[format('LINUXBROKER_SCRIPT_SOURCE_ROOT=\"{0}\"', variables('normalizedScriptSourceRoot'))]",
                     "adminCredentials": "[if(equals(parameters('authType'), 'Password'), createObject('adminPassword', parameters('adminPassword')), createObject())]",
                     "linuxConfiguration": "[if(equals(parameters('authType'), 'SSH'), createObject('disablePasswordAuthentication', true(), 'ssh', createObject('publicKeys', createArray(createObject('path', format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername')), 'keyData', parameters('sshPublicKey'))))), createObject('disablePasswordAuthentication', false()))]",
                     "imageConfigs": {
@@ -2261,8 +2416,8 @@
                           "version": "latest"
                         },
                         "script": {
-                          "uri": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL7-Host.sh",
-                          "cmd": "[format('bash Configure-RHEL7-Host.sh \"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]"
+                          "uri": "[format('{0}/custom_script_extensions/Configure-RHEL7-Host.sh', variables('normalizedScriptSourceRoot'))]",
+                          "cmd": "[format('{0} bash Configure-RHEL7-Host.sh {1}', variables('bootstrapEnv'), variables('bootstrapArgs'))]"
                         }
                       },
                       "8-LVM": {
@@ -2273,8 +2428,8 @@
                           "version": "latest"
                         },
                         "script": {
-                          "uri": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL8-Host.sh",
-                          "cmd": "[format('bash Configure-RHEL8-Host.sh \"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]"
+                          "uri": "[format('{0}/custom_script_extensions/Configure-RHEL8-Host.sh', variables('normalizedScriptSourceRoot'))]",
+                          "cmd": "[format('{0} bash Configure-RHEL8-Host.sh {1}', variables('bootstrapEnv'), variables('bootstrapArgs'))]"
                         }
                       },
                       "9-LVM": {
@@ -2285,8 +2440,8 @@
                           "version": "latest"
                         },
                         "script": {
-                          "uri": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL9-Host.sh",
-                          "cmd": "[format('bash Configure-RHEL9-Host.sh \"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]"
+                          "uri": "[format('{0}/custom_script_extensions/Configure-RHEL9-Host.sh', variables('normalizedScriptSourceRoot'))]",
+                          "cmd": "[format('{0} bash Configure-RHEL9-Host.sh {1}', variables('bootstrapEnv'), variables('bootstrapArgs'))]"
                         }
                       },
                       "24_04-lts": {
@@ -2297,8 +2452,8 @@
                           "version": "latest"
                         },
                         "script": {
-                          "uri": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh",
-                          "cmd": "[format('bash Configure-Ubuntu24_desktop-Host.sh \"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]"
+                          "uri": "[format('{0}/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh', variables('normalizedScriptSourceRoot'))]",
+                          "cmd": "[format('{0} bash Configure-Ubuntu24_desktop-Host.sh {1}', variables('bootstrapEnv'), variables('bootstrapArgs'))]"
                         }
                       }
                     },
@@ -2410,7 +2565,7 @@
             {
               "condition": "[and(and(parameters('deployAvdHosts'), greater(parameters('avdSessionHostCount'), 0)), not(empty(parameters('avdHostPoolName'))))]",
               "type": "Microsoft.Resources/deployments",
-              "apiVersion": "2022-09-01",
+              "apiVersion": "2025-04-01",
               "name": "avdHosts",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -2425,10 +2580,10 @@
                     "value": "[union(parameters('tags'), createObject('broker-role', 'avd-host'))]"
                   },
                   "vnetName": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2022-09-01').outputs.vnetName.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.vnetName.value]"
                   },
                   "subnetName": {
-                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2022-09-01').outputs.avdSubnetName.value]"
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.avdSubnetName.value]"
                   },
                   "vnetResourceGroup": {
                     "value": "[resourceGroup().name]"
@@ -2464,8 +2619,8 @@
                   "metadata": {
                     "_generator": {
                       "name": "bicep",
-                      "version": "0.25.53.49325",
-                      "templateHash": "12345906028026815088"
+                      "version": "0.44.1.10279",
+                      "templateHash": "5588312421727355350"
                     }
                   },
                   "parameters": {
@@ -2787,7 +2942,7 @@
                         },
                         "protectedSettings": {
                           "Items": {
-                            "RegistrationInfoToken": "[reference(resourceId('Microsoft.Resources/deployments', 'hostPoolRegistrationToken'), '2022-09-01').outputs.registrationToken.value]"
+                            "RegistrationInfoToken": "[reference(resourceId('Microsoft.Resources/deployments', 'hostPoolRegistrationToken'), '2025-04-01').outputs.registrationToken.value]"
                           }
                         }
                       },
@@ -2828,7 +2983,7 @@
                     },
                     {
                       "type": "Microsoft.Resources/deployments",
-                      "apiVersion": "2022-09-01",
+                      "apiVersion": "2025-04-01",
                       "name": "hostPoolRegistrationToken",
                       "properties": {
                         "expressionEvaluationOptions": {
@@ -2876,8 +3031,8 @@
                           "metadata": {
                             "_generator": {
                               "name": "bicep",
-                              "version": "0.25.53.49325",
-                              "templateHash": "16967542276948022964"
+                              "version": "0.44.1.10279",
+                              "templateHash": "2461663034710599677"
                             }
                           },
                           "parameters": {
@@ -2983,7 +3138,7 @@
             },
             "frontendUrl": {
               "type": "string",
-              "value": "[format('https://{0}.azurewebsites.net', variables('frontendAppName'))]"
+              "value": "[format('https://{0}.{1}', variables('frontendAppName'), variables('resolvedAppServiceDomain'))]"
             },
             "apiAppName": {
               "type": "string",
@@ -2991,7 +3146,7 @@
             },
             "apiUrl": {
               "type": "string",
-              "value": "[format('https://{0}.azurewebsites.net/api', variables('apiAppName'))]"
+              "value": "[format('https://{0}.{1}/api', variables('apiAppName'), variables('resolvedAppServiceDomain'))]"
             },
             "taskAppName": {
               "type": "string",
@@ -3007,15 +3162,15 @@
             },
             "sqlServerName": {
               "type": "string",
-              "value": "[reference(resourceId('Microsoft.Resources/deployments', 'sql'), '2022-09-01').outputs.sqlServerName.value]"
+              "value": "[reference(resourceId('Microsoft.Resources/deployments', 'sql'), '2025-04-01').outputs.sqlServerName.value]"
             },
             "sqlDatabaseName": {
               "type": "string",
-              "value": "[reference(resourceId('Microsoft.Resources/deployments', 'sql'), '2022-09-01').outputs.databaseName.value]"
+              "value": "[reference(resourceId('Microsoft.Resources/deployments', 'sql'), '2025-04-01').outputs.databaseName.value]"
             },
             "virtualNetworkName": {
               "type": "string",
-              "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2022-09-01').outputs.vnetName.value]"
+              "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.vnetName.value]"
             }
           }
         }
@@ -3032,43 +3187,43 @@
     },
     "frontendAppName": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.frontendAppName.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.frontendAppName.value]"
     },
     "frontendUrl": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.frontendUrl.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.frontendUrl.value]"
     },
     "apiAppName": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.apiAppName.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.apiAppName.value]"
     },
     "apiUrl": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.apiUrl.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.apiUrl.value]"
     },
     "taskAppName": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.taskAppName.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.taskAppName.value]"
     },
     "keyVaultName": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.keyVaultName.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.keyVaultName.value]"
     },
     "containerRegistryName": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.containerRegistryName.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.containerRegistryName.value]"
     },
     "sqlServerName": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.sqlServerName.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.sqlServerName.value]"
     },
     "sqlDatabaseName": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.sqlDatabaseName.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.sqlDatabaseName.value]"
     },
     "virtualNetworkName": {
       "type": "string",
-      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2022-09-01').outputs.virtualNetworkName.value]"
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.virtualNetworkName.value]"
     }
   }
 }

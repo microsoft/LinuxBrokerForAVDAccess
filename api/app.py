@@ -128,13 +128,13 @@ def retrieve_pem_key_from_key_vault(vault_url, key_name):
     return pem_file_path
 
 def get_access_token(tenant_id, client_id, client_secret):
-    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    url = f"{AUTHORITY_HOST}/{tenant_id}/oauth2/v2.0/token"
     headers = {
         "Content-Type": "application/x-www-form-urlencoded"
     }
     data = {
         "client_id": client_id,
-        "scope": "https://graph.microsoft.com/.default",
+        "scope": f"{GRAPH_ENDPOINT}/.default",
         "client_secret": client_secret,
         "grant_type": "client_credentials"
     }
@@ -300,7 +300,7 @@ def is_member_of_group(service_principal_id, group_ids):
         'Content-Type': 'application/json'
     }
 
-    url = f"https://graph.microsoft.com/v1.0/servicePrincipals/{service_principal_id}/checkMemberGroups"
+    url = f"{GRAPH_ENDPOINT}/v1.0/servicePrincipals/{service_principal_id}/checkMemberGroups"
 
     body = {
         "groupIds": group_ids
@@ -383,7 +383,7 @@ def token_required(required_permissions=None, required_group_ids=None):
                 return jsonify({'message': 'Token is missing!'}), 401
 
             try:
-                jwks_uri = f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys"
+                jwks_uri = f"{AUTHORITY_HOST}/{TENANT_ID}/discovery/v2.0/keys"
                 jwks_response = requests.get(jwks_uri)
                 if jwks_response.status_code != 200:
                     return jsonify({'message': 'Failed to retrieve JWKS.'}), 500
@@ -412,9 +412,9 @@ def token_required(required_permissions=None, required_group_ids=None):
                 ]
                 
                 expected_issuers = [
-                    f"https://login.microsoftonline.com/{TENANT_ID}/v2.0",
-                    f"https://login.microsoftonline.com/{TENANT_ID}/",
-                    f"https://sts.windows.net/{TENANT_ID}/"
+                    f"{AUTHORITY_HOST}/{TENANT_ID}/v2.0",
+                    f"{AUTHORITY_HOST}/{TENANT_ID}/",
+                    f"{STS_ISSUER_HOST}/{TENANT_ID}/"
                 ]
                 
                 payload = jwt.decode(

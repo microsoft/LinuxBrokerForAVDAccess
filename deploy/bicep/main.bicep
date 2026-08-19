@@ -72,6 +72,29 @@ param vmHostResourceGroup string = ''
 @description('Subscription ID that contains managed VMs. Defaults to the current subscription.')
 param vmSubscriptionId string = subscription().subscriptionId
 
+@description('Azure cloud the deployment targets. AzureCustom requires every custom endpoint parameter to be supplied.')
+@allowed([
+  'AzurePublic'
+  'AzureUSGovernment'
+  'AzureCustom'
+])
+param azureCloudName string = 'AzurePublic'
+
+@description('Entra authority host. Leave empty to use the built-in value for the selected cloud.')
+param azureAuthorityHost string = ''
+
+@description('Microsoft Graph endpoint. Leave empty to use the built-in value for the selected cloud.')
+param graphEndpoint string = ''
+
+@description('Legacy STS issuer host used to validate v1 tokens. Leave empty to use the built-in value for the selected cloud.')
+param stsIssuerHost string = ''
+
+@description('App Service public hostname suffix. Leave empty to use the built-in value for the selected cloud.')
+param appServiceDomain string = ''
+
+@description('Root URL the Linux host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds.')
+param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
+
 @description('Optional IPv4 address allowed through the SQL firewall.')
 param allowedClientIp string = ''
 
@@ -172,6 +195,12 @@ module resources 'main.resources.bicep' = {
     hostAdminPassword: hostAdminPassword
     vmHostResourceGroup: vmHostResourceGroup
     vmSubscriptionId: vmSubscriptionId
+    azureCloudName: azureCloudName
+    azureAuthorityHost: azureAuthorityHost
+    graphEndpoint: graphEndpoint
+    stsIssuerHost: stsIssuerHost
+    appServiceDomain: appServiceDomain
+    scriptSourceRoot: scriptSourceRoot
     allowedClientIp: allowedClientIp
     appServicePlanSku: appServicePlanSku
     deployLinuxHosts: deployLinuxHosts

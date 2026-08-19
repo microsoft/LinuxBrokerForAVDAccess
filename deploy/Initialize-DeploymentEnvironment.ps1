@@ -76,24 +76,130 @@ $apiRoleIds = @{
     LinuxHost = '29a8a5a0-2090-4e94-a49d-3386640f0058'
 }
 
-function Get-CloudContext {
+$cloudProfiles = @{
+    AzurePublic = @{
+        GraphUrl = 'https://graph.microsoft.com'
+        AppServiceDomain = 'azurewebsites.net'
+        StsIssuerHost = 'https://sts.windows.net'
+    }
+    AzureUSGovernment = @{
+        GraphUrl = 'https://graph.microsoft.us'
+        AppServiceDomain = 'azurewebsites.us'
+        StsIssuerHost = 'https://sts.windows.net'
+    }
+}
+
+# Maps the cloud name reported by the Azure CLI onto this solution's cloud names.
+$azCliCloudNameMap = @{
+    AzureCloud = 'AzurePublic'
+    AzureUSGovernment = 'AzureUSGovernment'
+}
+
+function Get-DefaultCloudName {
     $cloud = az cloud show --output json | ConvertFrom-Json
 
-    switch ($cloud.name) {
-        'AzureUSGovernment' {
-            return @{
-                Name = $cloud.name
-                GraphUrl = 'https://graph.microsoft.us'
-                AppServiceDomain = 'azurewebsites.us'
+    if ($azCliCloudNameMap.ContainsKey($cloud.name)) {
+        return $azCliCloudNameMap[$cloud.name]
+    }
+
+    return 'AzureCustom'
+}
+
+function Show-CloudChoicePrompt {
+    param([Parameter(Mandatory = $true)][string]$DefaultCloudName)
+
+    $names = @('AzurePublic', 'AzureUSGovernment', 'AzureCustom')
+    $choices = [System.Management.Automation.Host.ChoiceDescription[]]@(
+        (New-Object System.Management.Automation.Host.ChoiceDescription '&Public', 'Azure commercial cloud.')
+        (New-Object System.Management.Automation.Host.ChoiceDescription '&Government', 'Azure US Government cloud.')
+        (New-Object System.Management.Automation.Host.ChoiceDescription '&Custom', 'A sovereign or air-gapped cloud whose endpoints you supply explicitly.')
+    )
+
+    $defaultIndex = [Math]::Max([Array]::IndexOf($names, $DefaultCloudName), 0)
+    $message = "The Azure CLI is currently signed in to a cloud that maps to '$DefaultCloudName'."
+
+    try {
+        $selection = $Host.UI.PromptForChoice('Target Azure cloud', $message, $choices, $defaultIndex)
+        return $names[$selection]
+    }
+    catch {
+        return $DefaultCloudName
+    }
+}
+
+function Resolve-AzureCloudName {
+    $configured = Get-AzdEnvValue -Key 'azureCloudName'
+    if ([string]::IsNullOrWhiteSpace($configured)) {
+        $configured = Get-AzdEnvValue -Key 'AZURE_CLOUD_NAME'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($configured)) {
+        if ($configured -notin @('AzurePublic', 'AzureUSGovernment', 'AzureCustom')) {
+            throw "AZURE_CLOUD_NAME '$configured' is not supported. Use AzurePublic, AzureUSGovernment, or AzureCustom."
+        }
+
+        return $configured
+    }
+
+    $defaultCloudName = Get-DefaultCloudName
+
+    if (Test-IsInteractiveLocalRun) {
+        return Show-CloudChoicePrompt -DefaultCloudName $defaultCloudName
+    }
+
+    return $defaultCloudName
+}
+
+function Get-CloudContext {
+    $cloudName = Resolve-AzureCloudName
+
+    $graphUrl = Get-AzdEnvValue -Key 'graphEndpoint'
+    $appServiceDomain = Get-AzdEnvValue -Key 'appServiceDomain'
+    $stsIssuerHost = Get-AzdEnvValue -Key 'stsIssuerHost'
+    $authorityHost = Get-AzdEnvValue -Key 'azureAuthorityHost'
+
+    $profile = $cloudProfiles[$cloudName]
+    if ($profile) {
+        if ([string]::IsNullOrWhiteSpace($graphUrl)) { $graphUrl = $profile.GraphUrl }
+        if ([string]::IsNullOrWhiteSpace($appServiceDomain)) { $appServiceDomain = $profile.AppServiceDomain }
+        if ([string]::IsNullOrWhiteSpace($stsIssuerHost)) { $stsIssuerHost = $profile.StsIssuerHost }
+    }
+
+    # Custom clouds have no built-in profile, so every endpoint has to be supplied.
+    $missing = @()
+    if ([string]::IsNullOrWhiteSpace($graphUrl)) { $missing += 'graphEndpoint' }
+    if ([string]::IsNullOrWhiteSpace($appServiceDomain)) { $missing += 'appServiceDomain' }
+    if ([string]::IsNullOrWhiteSpace($stsIssuerHost)) { $missing += 'stsIssuerHost' }
+
+    if ($missing.Count -gt 0) {
+        if (-not (Test-IsInteractiveLocalRun)) {
+            throw "Cloud '$cloudName' requires these values to be set in the azd environment before deployment: $($missing -join ', ')."
+        }
+
+        foreach ($key in $missing) {
+            $entered = (Read-Host "Enter $key for cloud '$cloudName'").Trim()
+            if ([string]::IsNullOrWhiteSpace($entered)) {
+                throw "Cloud '$cloudName' requires a value for $key."
+            }
+
+            switch ($key) {
+                'graphEndpoint' { $graphUrl = $entered }
+                'appServiceDomain' { $appServiceDomain = $entered }
+                'stsIssuerHost' { $stsIssuerHost = $entered }
             }
         }
-        default {
-            return @{
-                Name = $cloud.name
-                GraphUrl = 'https://graph.microsoft.com'
-                AppServiceDomain = 'azurewebsites.net'
-            }
-        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($authorityHost) -and $cloudName -eq 'AzureCustom' -and (Test-IsInteractiveLocalRun)) {
+        $authorityHost = (Read-Host "Enter azureAuthorityHost for cloud '$cloudName' (leave blank to use the endpoint the Azure CLI reports)").Trim()
+    }
+
+    return @{
+        Name = $cloudName
+        GraphUrl = $graphUrl.TrimEnd('/')
+        AppServiceDomain = $appServiceDomain.TrimStart('.')
+        StsIssuerHost = $stsIssuerHost.TrimEnd('/')
+        AuthorityHost = $authorityHost.TrimEnd('/')
     }
 }
 
@@ -828,6 +934,14 @@ function Ensure-ApiApplication {
 
 $cloudContext = Get-CloudContext
 
+Set-AzdEnvValue -Key 'AZURE_CLOUD_NAME' -Value $cloudContext.Name
+Set-AzdEnvValue -Key 'azureCloudName' -Value $cloudContext.Name
+Set-AzdEnvValue -Key 'graphEndpoint' -Value $cloudContext.GraphUrl
+Set-AzdEnvValue -Key 'appServiceDomain' -Value $cloudContext.AppServiceDomain
+Set-AzdEnvValue -Key 'stsIssuerHost' -Value $cloudContext.StsIssuerHost
+Set-AzdEnvValue -Key 'azureAuthorityHost' -Value $cloudContext.AuthorityHost
+Write-Host "Targeting Azure cloud '$($cloudContext.Name)' (Graph: $($cloudContext.GraphUrl), App Service domain: $($cloudContext.AppServiceDomain))."
+
 $frontendAppDisplayName = "$AppName-$EnvironmentName-frontend-ar"
 $apiAppDisplayName = "$AppName-$EnvironmentName-api-ar"
 $frontendAppServiceName = "fe-$AppName-$EnvironmentName"
@@ -875,6 +989,7 @@ Ensure-DefaultEnvValue -Key 'linuxHostAdminLoginName' -ValueFactory { 'avdadmin'
 Ensure-DefaultEnvValue -Key 'domainName' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'nfsShare' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'vmHostResourceGroup' -ValueFactory { '' } | Out-Null
+Ensure-DefaultEnvValue -Key 'scriptSourceRoot' -ValueFactory { 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main' } | Out-Null
 # Always refresh the client IP since it can change between runs
 $detectedIp = try { (Invoke-RestMethod -Uri 'https://ifconfig.me/ip' -TimeoutSec 10).Trim() } catch { '' }
 Set-AzdEnvValue -Key 'allowedClientIp' -Value $detectedIp
@@ -986,6 +1101,12 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdMaxSessionLimit' -Value (ConvertTo-IntParameterValue -Key 'avdMaxSessionLimit' -DefaultValue 5)
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdVmNamePrefix' -Value (Get-RequiredAzdEnvValue -Key 'avdVmNamePrefix')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdVmSize' -Value (Get-RequiredAzdEnvValue -Key 'avdVmSize')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'azureCloudName' -Value (Get-RequiredAzdEnvValue -Key 'azureCloudName')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'azureAuthorityHost' -Value (Get-AzdEnvValue -Key 'azureAuthorityHost')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'graphEndpoint' -Value (Get-RequiredAzdEnvValue -Key 'graphEndpoint')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'stsIssuerHost' -Value (Get-RequiredAzdEnvValue -Key 'stsIssuerHost')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'appServiceDomain' -Value (Get-RequiredAzdEnvValue -Key 'appServiceDomain')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'scriptSourceRoot' -Value (Get-RequiredAzdEnvValue -Key 'scriptSourceRoot')
 
 $bicepParameters = [ordered]@{
     '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'

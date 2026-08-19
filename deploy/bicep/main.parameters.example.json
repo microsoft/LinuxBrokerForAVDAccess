@@ -14,6 +14,24 @@
     "appName": {
       "value": "linuxbroker"
     },
+    "azureCloudName": {
+      "value": "AzurePublic"
+    },
+    "azureAuthorityHost": {
+      "value": ""
+    },
+    "graphEndpoint": {
+      "value": ""
+    },
+    "stsIssuerHost": {
+      "value": ""
+    },
+    "appServiceDomain": {
+      "value": ""
+    },
+    "scriptSourceRoot": {
+      "value": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main"
+    },
     "tenantId": {
       "value": "<tenant-id>"
     },

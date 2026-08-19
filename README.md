@@ -200,6 +200,7 @@ That guide covers:
 - prerequisites and required permissions
 - azd environment values and defaults
 - how `azd up` prompts for subscription and deployment region when not pre-set
+- choosing between Azure commercial, Azure US Government, and custom or sovereign clouds
 - Entra app and group bootstrap behavior
 - SSH key reuse, prompt, and auto-generation behavior
 - what `preprovision`, Bicep provisioning, and `postprovision` each do
@@ -216,6 +217,8 @@ azd up
 ```
 
 For existing environments that need in-place rollout instead of new-environment provisioning, use [deploy/Migrate-ExistingEnvironment.ps1](deploy/Migrate-ExistingEnvironment.ps1) from the `deploy/` directory. `azd up` remains the supported greenfield path.
+
+The deployment targets Azure commercial by default. Set `azureCloudName` to `AzureUSGovernment` or `AzureCustom` to deploy elsewhere; commercial and Government resolve their endpoints automatically, while custom and sovereign clouds require their own authority, Graph, STS, and App Service FQDNs. Air-gapped environments should also set `scriptSourceRoot` to a reachable mirror of this repository, because the Linux hosts download their agent scripts from it during bootstrap.
 
 The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps.
 
