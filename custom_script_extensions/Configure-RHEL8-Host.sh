@@ -62,11 +62,27 @@ xrdp_ini="/etc/xrdp/xrdp.ini"
 arch=$( /bin/arch )
 remoteAccessTool="both"  # Options: "xrdp", "xpra", or "both"
 
+# Disable the GNOME screen saver and screen lock on this host. Enabled by default because a
+# locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which
+# strands the host's lease. Set LINUXBROKER_DISABLE_SCREEN_LOCK=false to keep the lock screen.
+disableScreenLock="${LINUXBROKER_DISABLE_SCREEN_LOCK:-true}"
+disableScreenLock=$(printf '%s' "$disableScreenLock" | tr '[:upper:]' '[:lower:]')
+
+case "$disableScreenLock" in
+    true|1|yes|y) disableScreenLock="true" ;;
+    false|0|no|n) disableScreenLock="false" ;;
+    *)
+        echo "Unsupported LINUXBROKER_DISABLE_SCREEN_LOCK value: $disableScreenLock (expected true or false)"
+        exit 1
+        ;;
+esac
+
 orgId="${RHEL_ORG_ID:-}"
 activationKey="${RHEL_ACTIVATION_KEY:-}"
 
 output_directory="/usr/local/bin"
 dconf_local_directory="/etc/dconf/db/local.d"
+dconf_profile_file="/etc/dconf/profile/user"
 state_directory="/var/lib/linuxbroker-release-session"
 
 SCRIPT_PATH="$output_directory/release-session.sh"
@@ -310,10 +326,49 @@ fi
 echo "avdadmin user is created and permissioned"
 
 # Disable screen lock on Gnome desktop
-echo "Downloading Gnome Desktop screen lock settings..."
-sudo wget -O "$dconf_local_directory/00-screensaver" "$screensaver_settings_url"
-sudo wget -O "$dconf_local_directory/locks/screensaver" "$screensaver_locks_url"
-sudo dconf update
+if [ "$disableScreenLock" = "true" ]; then
+    echo "Disabling the Gnome Desktop screen saver and screen lock..."
+
+    sudo mkdir -p "$dconf_local_directory/locks"
+
+    echo "Downloading Gnome Desktop screen lock settings..."
+    if ! sudo wget -O "$dconf_local_directory/00-screensaver" "$screensaver_settings_url"; then
+        echo "ERROR: Failed to download screen lock settings from $screensaver_settings_url"
+        exit 1
+    fi
+
+    if ! sudo wget -O "$dconf_local_directory/locks/screensaver" "$screensaver_locks_url"; then
+        echo "ERROR: Failed to download screen lock overrides from $screensaver_locks_url"
+        exit 1
+    fi
+
+    sudo chmod 644 "$dconf_local_directory/00-screensaver" "$dconf_local_directory/locks/screensaver"
+
+    # A system dconf database is only consulted when a profile references it. RHEL does not
+    # ship /etc/dconf/profile/user, so without this the settings above are silently ignored.
+    sudo mkdir -p "$(dirname "$dconf_profile_file")"
+    if [ ! -s "$dconf_profile_file" ]; then
+        printf 'user-db:user\nsystem-db:local\n' | sudo tee "$dconf_profile_file" >/dev/null
+        echo "Created dconf profile $dconf_profile_file."
+    elif ! grep -qx 'system-db:local' "$dconf_profile_file"; then
+        # Guarantee a trailing newline before appending to an existing profile.
+        sudo sed -i -e '$a\' "$dconf_profile_file"
+        echo 'system-db:local' | sudo tee -a "$dconf_profile_file" >/dev/null
+        echo "Added system-db:local to existing dconf profile $dconf_profile_file."
+    else
+        echo "dconf profile $dconf_profile_file already references system-db:local."
+    fi
+    sudo chmod 644 "$dconf_profile_file"
+
+    if ! sudo dconf update; then
+        echo "ERROR: 'dconf update' failed; the screen lock settings were not applied."
+        exit 1
+    fi
+
+    echo "Gnome Desktop screen lock is disabled."
+else
+    echo "Skipping Gnome Desktop screen lock configuration (LINUXBROKER_DISABLE_SCREEN_LOCK=false)."
+fi
 
 # Complete
 echo "System configuration complete."
