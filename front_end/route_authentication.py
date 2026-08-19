@@ -3,7 +3,7 @@ import logging
 from msal import ConfidentialClientApplication
 from flask import request, redirect, url_for, session
 from datetime import datetime, timedelta
-from config import CLIENT_ID, TENANT_ID, CLIENT_SECRET, AUTHORITY, API_SCOPE
+from config import CLIENT_ID, TENANT_ID, CLIENT_SECRET, AUTHORITY, AUTHORITY_HOST, API_SCOPE
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def register_route_authentication(app):
             session.clear()
 
             logout_url = (
-                f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/logout"
+                f"{AUTHORITY_HOST}/{TENANT_ID}/oauth2/v2.0/logout"
                 f"?post_logout_redirect_uri={url_for('index', _external=True)}"
             )
 

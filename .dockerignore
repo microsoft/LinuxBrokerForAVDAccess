@@ -1,0 +1,17 @@
+.git
+.github
+.azure
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.db
+.env
+local.settings.json
+bin
+obj
+artifacts
+example_code
+priv-folder

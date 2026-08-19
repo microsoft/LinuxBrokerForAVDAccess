@@ -4,11 +4,10 @@
 
 ## Purpose
 
-The **Linux Broker for AVD Access** is a solution designed to manage and broker user access to Linux hosts via Azure Virtual Desktop (AVD). It provides a scalable and efficient way to connect users to Linux virtual machines (VMs) using either Remote Desktop Protocol (RDP) for full desktop experiences or XRPA (X Remote Application) for virtualized applications.
+The **Linux Broker for AVD Access** is a solution designed to manage and broker user access to Linux hosts via Azure Virtual Desktop (AVD). It provides a scalable and efficient way to connect users to Linux virtual machines (VMs) using either Remote Desktop Protocol (RDP) for full desktop experiences or xpra (X Remote Application) for virtualized applications.
 
 This solution leverages Azure services such as managed identities, security groups, Azure App Service, Azure Functions, and Azure SQL Database to provide secure and efficient brokering, session management, and scaling of Linux hosts.
 
-https://github.com/user-attachments/assets/46dcf413-a54c-4512-ac04-08dfc8d3a2d4
 
 ## Architecture Description
 
@@ -16,11 +15,11 @@ The solution consists of the following components:
 
 - **Azure Virtual Desktop (AVD)**: Provides the interface for users to access Linux hosts. Users can connect via the AVD web client or any supported AVD client.
 
-- **Broker Agent (`Connect-LinuxBroker.ps1`)**: A PowerShell script running on each AVD host that acts as an agent to broker connections to Linux hosts. It connects to the Broker API using managed identity to check out a Linux VM and initiate the appropriate connection (RDP or XRPA).
+- **Broker Agent (`Connect-LinuxBroker.ps1`)**: A PowerShell script running on each AVD host that acts as an agent to broker connections to Linux hosts. It connects to the Broker API using managed identity to check out a Linux VM and initiate the appropriate connection (RDP or xpra).
 
 - **Linux Hosts Cluster**: A set of Linux VMs that users connect to. Each Linux host has managed identity enabled and runs a Session Release Agent.
 
-- **Session Release Agent**: A cron job running on each Linux host that checks for disconnected user sessions (both XRDP and XRPA) and initiates a 20-minute logoff process, releasing the VM for other users while allowing the disconnected user to reconnect within that time frame.
+- **Session Release Agent**: A host-side reconciliation service that keeps the one-minute poll as a safety net, uses XRDP/Xorg session inspection as the source of truth, and can wake early from `systemd-logind` signals to shorten disconnect detection time. It still enforces the same 20-minute reconnect window before final logoff and cleanup.
 
 - **Broker API**: A RESTful API running on Azure App Service that handles interactions between the Broker Agent, Session Release Agent, and the Broker Database. It uses managed identities and Azure Key Vault for secure access to resources.
 
@@ -46,7 +45,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 - **Azure Virtual Desktop (AVD)**: Provides virtual desktop infrastructure.
 - **Broker Agent (`Connect-LinuxBroker.ps1`)**: PowerShell script acting as an agent on AVD hosts.
 - **Linux Hosts Cluster**: The set of Linux VMs users connect to.
-- **Session Release Agent**: Cron job on Linux hosts for session management.
+- **Session Release Agent**: Systemd-timer-based reconciliation service on Linux hosts, optionally accelerated by a `systemd-logind` watcher.
 - **Broker API**: RESTful API for brokering connections and managing VMs.
 - **Broker Database**: Azure SQL Database for storing VM and scaling data.
 - **Azure Function for Scaling Tasks**: Manages scaling of Linux hosts.
@@ -58,15 +57,15 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 ## User Workflow
 
 1. **User Logs into AVD**: The user accesses the AVD web client or any supported client.
-2. **Selects Linux Host Connection**: The user selects a desktop icon for full RDP session or an application for XRPA session.
+2. **Selects Linux Host Connection**: The user selects a desktop icon for full RDP session or an application for xpra session.
 3. **Broker Agent Initiates Connection**:
    - The Broker Agent script (`Connect-LinuxBroker.ps1`) connects to the Broker API using the AVD host's managed identity.
    - It checks out an available Linux VM for the user.
    - The user's ID is added to the Linux host with a unique 25-character password.
-   - The user is added to appropriate user groups on the Linux host for RDP or XRPA access.
-4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP or XRPA and can work as needed.
+   - The user is added to appropriate user groups on the Linux host for RDP or xpra access.
+4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP or xpra and can work as needed.
 5. **Session Management**:
-   - If the user disconnects or logs off, the Session Release Agent on the Linux host detects the disconnected session.
+   - If the user disconnects or logs off, the Session Release Agent on the Linux host reconciles the XRDP/Xorg session state immediately when possible and otherwise on the next one-minute safety-net poll.
    - A 20-minute timer is initiated to allow the user to reconnect.
    - If the user reconnects within 20 minutes, they resume their session.
    - If not, the user's account is removed from the Linux host, and the VM is made available for other users.
@@ -136,9 +135,9 @@ The custom script extensions support the following Linux distributions:
 
 These scripts:
 
-- **Install XRDP and XRPA**: Set up XRDP for full desktop access (RDP) and XRPA for application virtualization, enabling users to connect via AVD.
+- **Install XRDP and xpra**: Set up XRDP for full desktop access (RDP) and xpra for application virtualization, enabling users to connect via AVD.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
-- **Deploy the Linux Session Release Agent**: Installs the session release agent, a crucial component that monitors user sessions and manages session disconnection. It ensures that disconnected sessions are properly released, allowing VMs to be efficiently reused by other users.
+- **Deploy the Linux Session Release Agent**: Installs the minute-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The minute timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.
 
 ## Additional Details
 
@@ -153,7 +152,7 @@ These scripts:
 
 ### Session Release Mechanism
 
-- **Session Monitoring**: The Session Release Agent monitors user sessions for disconnections.
+- **Session Monitoring**: The Session Release Agent reconciles XRDP/Xorg session state on a one-minute timer and can also wake early from `systemd-logind` session signals.
 - **Release State**: When a session is disconnected, the VM enters a 'released' state, allowing the user to reconnect within 20 minutes.
 - **Session Termination**: If the user does not reconnect within the 20-minute window, their account is removed from the Linux host, and the VM becomes available for other users.
 
@@ -192,9 +191,38 @@ Given that AVD acts as a pass-through in this solution, starting with **light to
 
 ## Getting Started
 
-*(Instructions on deployment, configuration, and usage will be provided here.)*
+The supported deployment entrypoint for this repository is in `deploy/`.
 
-While we work on more detailed instructions, you can deploy the web apps from VS Code or running az web deploy. You can deploy function using VS Code. To support managed identity versus using SAS keys, there are a number of permissions that must be applied, please use the RBAC section to facility implementing them. We will release detailed instructions with video guidance over the coming weeks.
+For the full deployment walkthrough, see [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md).
+
+That guide covers:
+
+- prerequisites and required permissions
+- azd environment values and defaults
+- how `azd up` prompts for subscription and deployment region when not pre-set
+- choosing between Azure commercial, Azure US Government, and custom or sovereign clouds
+- Entra app and group bootstrap behavior
+- SSH key reuse, prompt, and auto-generation behavior
+- what `preprovision`, Bicep provisioning, and `postprovision` each do
+- the separate migration path for existing deployed environments
+- SQL bootstrap, Linux host SQL registration, and validation steps
+- troubleshooting and rerun paths
+
+Quick start from the repository root:
+
+```powershell
+cd .\deploy
+azd env new <environment-name>
+azd up
+```
+
+For existing environments that need in-place rollout instead of new-environment provisioning, use [deploy/Migrate-ExistingEnvironment.ps1](deploy/Migrate-ExistingEnvironment.ps1) from the `deploy/` directory. `azd up` remains the supported greenfield path.
+
+The deployment targets Azure commercial by default. Set `azureCloudName` to `AzureUSGovernment` or `AzureCustom` to deploy elsewhere; commercial and Government resolve their endpoints automatically, while custom and sovereign clouds require their own authority, Graph, STS, and App Service FQDNs. Air-gapped environments should also set `scriptSourceRoot` to a reachable mirror of this repository, because the Linux hosts download their agent scripts from it during bootstrap.
+
+The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps.
+
+Before running `azd up`, review the detailed guide and set any environment-specific values you need, especially networking, host counts, VM sizes, App Service plan sizing, and SQL firewall access. The deployment scripts under `deploy/` now handle the Entra bootstrap, SSH key flow, App Service health checks on `/health`, Application Insights wiring for the frontend and API, post-provision role assignment, container image builds, SQL initialization, and Linux host SQL registration used by this solution.
 
 ## Contributing
 

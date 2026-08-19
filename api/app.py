@@ -9,6 +9,15 @@ import string
 import time
 import threading
 import logging
+import re
+import shlex
+import uuid
+
+from azure.monitor.opentelemetry import configure_azure_monitor
+
+connection_string = os.environ.get('APPLICATIONINSIGHTS_CONNECTION_STRING')
+if connection_string:
+    configure_azure_monitor(connection_string=connection_string, logger_name='linuxbroker.api')
 
 from flask import Flask, jsonify, request
 from azure.identity import DefaultAzureCredential
@@ -22,15 +31,36 @@ from config import *
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.153'
+app.config['VERSION'] = '0.157'
 
 cache = Cache(app, config={'CACHE_TYPE': 'simple'})
+
+REMOTE_CREATE_USER_SCRIPT = '/usr/local/bin/create-user.sh'
+REMOTE_MANAGE_LEASE_SCRIPT = '/usr/local/bin/manage-lease.sh'
 
 # ===============================
 # Logging Configuration
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('linuxbroker.api')
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'status': 'unhealthy'}), 503
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1')
+        cursor.fetchone()
+        return jsonify({'status': 'healthy', 'version': app.config['VERSION']}), 200
+    except Exception as e:
+        logger.error("Health check failed: %s", e)
+        return jsonify({'status': 'unhealthy'}), 503
+    finally:
+        conn.close()
 
 # ===============================
 # Functions
@@ -98,13 +128,13 @@ def retrieve_pem_key_from_key_vault(vault_url, key_name):
     return pem_file_path
 
 def get_access_token(tenant_id, client_id, client_secret):
-    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    url = f"{AUTHORITY_HOST}/{tenant_id}/oauth2/v2.0/token"
     headers = {
         "Content-Type": "application/x-www-form-urlencoded"
     }
     data = {
         "client_id": client_id,
-        "scope": "https://graph.microsoft.com/.default",
+        "scope": f"{GRAPH_ENDPOINT}/.default",
         "client_secret": client_secret,
         "grant_type": "client_credentials"
     }
@@ -115,28 +145,144 @@ def get_access_token(tenant_id, client_id, client_secret):
     else:
         response.raise_for_status()
 
-def create_or_update_remote_user(hostname: str, username: str, password: str) -> bool:
-    pem_file_path = retrieve_pem_key_from_key_vault(VAULT_URL, KEY_NAME)
+def get_or_create_uid(username):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Database connection failed while resolving uid for %s", username)
+            return None
+
+        cursor = conn.cursor(as_dict=True)
+
+        # Check if user already exists
+        cursor.execute("SELECT uid FROM VmUsers WHERE username = %s", (username,))
+        result = cursor.fetchone()
+        if result:
+            conn.close()
+            return result['uid']
+
+        # Assign a new UID starting from 2000
+        cursor.execute("SELECT MAX(uid) AS max_uid FROM VmUsers")
+        max_uid = cursor.fetchone()['max_uid'] or 1999
+        new_uid = max_uid + 1
+
+        # Insert new user
+        cursor.execute("INSERT INTO VmUsers (username, uid) VALUES (%s, %s)", (username, new_uid))
+        conn.commit()
+        conn.close()
+
+        return new_uid
+    except Exception as e:
+        logger.error("Failed to resolve uid for %s: %s", username, e)
+        return None
+
+def normalize_lease_id(value):
+    if value in (None, ''):
+        return None
 
     try:
-        host_fqdn = f"avdadmin@{hostname}.{DOMAIN_NAME}"
-        check_create_user_command = f"sudo id -u {username} >/dev/null 2>&1 || sudo useradd {username} -m"
-        set_password_command = f"echo '{username}:{password}' | sudo chpasswd"
-        command = f"{check_create_user_command} && {set_password_command}"
+        return str(uuid.UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        return None
 
-        result = subprocess.run(
-            ['ssh', '-i', pem_file_path, '-o', 'StrictHostKeyChecking=no', host_fqdn, command],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            return True
-        else:
-            print("Failed to create or update user '%s' on VM '%s'. Error: %s", username, host_fqdn, result.stderr)
-            return False
-    except Exception as e:
-        print("Error creating or updating user '%s' on VM '%s': %s", username, host_fqdn, e)
+def serialize_for_json(value):
+    if isinstance(value, uuid.UUID):
+        return str(value)
+
+    if isinstance(value, dict):
+        return {key: serialize_for_json(item) for key, item in value.items()}
+
+    if isinstance(value, list):
+        return [serialize_for_json(item) for item in value]
+
+    return value
+
+def get_remote_host_fqdn(hostname: str) -> str:
+    linux_host_admin_login_name = LINUX_HOST_ADMIN_LOGIN_NAME or 'avdadmin'
+    return f"{linux_host_admin_login_name}@{hostname}.{DOMAIN_NAME}"
+
+def run_remote_command(hostname: str, command: str, stdin_input: str = None):
+    pem_file_path = retrieve_pem_key_from_key_vault(VAULT_URL, KEY_NAME)
+    host_fqdn = get_remote_host_fqdn(hostname)
+    result = subprocess.run(
+        ['ssh', '-i', pem_file_path, '-o', 'StrictHostKeyChecking=no', host_fqdn, command],
+        capture_output=True,
+        text=True,
+        input=stdin_input
+    )
+    return result, host_fqdn
+
+def create_or_update_remote_user(hostname: str, username: str, password: str, lease_id: str) -> bool:
+    normalized_lease_id = normalize_lease_id(lease_id)
+    if not normalized_lease_id:
+        logger.error("Cannot provision remote user %s on %s without a valid LeaseId.", username, hostname)
         return False
+
+    try:
+        uid = get_or_create_uid(username)
+        if not isinstance(uid, int):
+            logger.error("Cannot provision remote user %s on %s without a uid.", username, hostname)
+            return False
+
+        create_user_command = "sudo {script} {nfs_share} {uid} {username} {lease_id}".format(
+            script=REMOTE_CREATE_USER_SCRIPT,
+            nfs_share=shlex.quote(NFS_SHARE or ''),
+            uid=shlex.quote(str(uid)),
+            username=shlex.quote(username),
+            lease_id=shlex.quote(normalized_lease_id)
+        )
+
+        result, host_fqdn = run_remote_command(hostname, create_user_command)
+        if result.returncode != 0:
+            logger.error("Failed to create or update user '%s' on VM '%s'. Error: %s", username, host_fqdn, result.stderr)
+            return False
+
+        # Sent over stdin so the credential never appears in the remote process list or auth logs.
+        result, host_fqdn = run_remote_command(hostname, 'sudo chpasswd', stdin_input=f"{username}:{password}\n")
+        if result.returncode != 0:
+            logger.error("Failed to set password for user '%s' on VM '%s'. Error: %s", username, host_fqdn, result.stderr)
+            return False
+
+        return True
+    except Exception as e:
+        logger.error("Error creating or updating user '%s' on VM '%s': %s", username, hostname, e)
+        return False
+
+def release_vm_assignment(vmid, lease_id) -> bool:
+    """Undo a checkout whose Linux-side provisioning failed, so the VM is not stranded."""
+    normalized_lease_id = normalize_lease_id(lease_id)
+
+    if not vmid or not normalized_lease_id:
+        return False
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Database connection failed while releasing VMID %s after a failed checkout.", vmid)
+            return False
+
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute(
+                "EXEC ReturnVm @VMID = %s, @ExpectedLeaseId = %s",
+                (vmid, normalized_lease_id)
+            )
+            row = cursor.fetchone()
+
+        conn.commit()
+
+        if not row:
+            logger.error("Could not release VMID %s after a failed checkout; the lease no longer matches.", vmid)
+            return False
+
+        logger.info("Released VMID %s after a failed checkout.", vmid)
+        return True
+    except Exception as e:
+        logger.error("Error releasing VMID %s after a failed checkout: %s", vmid, e)
+        return False
+    finally:
+        if conn:
+            conn.close()
 
 def generate_secure_password(length=25) -> str:
     characters = string.ascii_letters + string.digits + string.punctuation
@@ -154,7 +300,7 @@ def is_member_of_group(service_principal_id, group_ids):
         'Content-Type': 'application/json'
     }
 
-    url = f"https://graph.microsoft.com/v1.0/servicePrincipals/{service_principal_id}/checkMemberGroups"
+    url = f"{GRAPH_ENDPOINT}/v1.0/servicePrincipals/{service_principal_id}/checkMemberGroups"
 
     body = {
         "groupIds": group_ids
@@ -170,6 +316,47 @@ def is_member_of_group(service_principal_id, group_ids):
             return False
     else:
         print("Graph API error: %s - %s", response.status_code, response.text)
+        return False
+
+def delete_remote_user(hostname: str, username: str, lease_id: str = None) -> bool:
+    normalized_lease_id = normalize_lease_id(lease_id)
+
+    try:
+        quoted_username = shlex.quote(username)
+        missing_user_message = shlex.quote(f"User {username} does not exist")
+        delete_user_command = f"sudo userdel -r {quoted_username} 2>/dev/null || echo {missing_user_message}"
+
+        if normalized_lease_id:
+            clear_lease_command = "sudo {script} clear {username} {lease_id}".format(
+                script=REMOTE_MANAGE_LEASE_SCRIPT,
+                username=quoted_username,
+                lease_id=shlex.quote(normalized_lease_id)
+            )
+
+            result, host_fqdn = run_remote_command(hostname, clear_lease_command)
+            if result.returncode != 0:
+                logger.error("Failed to evaluate lease for user '%s' on VM '%s'. Error: %s", username, host_fqdn, result.stderr)
+                return False
+
+            if '__LEASE_ACTION=cleared__' not in result.stdout:
+                logger.info("Skipped deleting user '%s' on VM '%s' because the lease no longer matches.", username, hostname)
+                return True
+        else:
+            clear_lease_command = "sudo {script} clear-any {username} >/dev/null 2>&1 || true".format(
+                script=REMOTE_MANAGE_LEASE_SCRIPT,
+                username=quoted_username
+            )
+            delete_user_command = f"{delete_user_command}; {clear_lease_command}"
+
+        result, host_fqdn = run_remote_command(hostname, delete_user_command)
+
+        if result.returncode != 0:
+            logger.error("Failed to delete user '%s' on VM '%s'. Error: %s", username, host_fqdn, result.stderr)
+            return False
+
+        return True
+    except Exception as e:
+        logger.error("Error deleting user '%s' on VM '%s': %s", username, hostname, e)
         return False
 
 @cache.memoize(timeout=300)
@@ -196,7 +383,7 @@ def token_required(required_permissions=None, required_group_ids=None):
                 return jsonify({'message': 'Token is missing!'}), 401
 
             try:
-                jwks_uri = f"https://login.microsoftonline.com/{TENANT_ID}/discovery/v2.0/keys"
+                jwks_uri = f"{AUTHORITY_HOST}/{TENANT_ID}/discovery/v2.0/keys"
                 jwks_response = requests.get(jwks_uri)
                 if jwks_response.status_code != 200:
                     return jsonify({'message': 'Failed to retrieve JWKS.'}), 500
@@ -225,9 +412,9 @@ def token_required(required_permissions=None, required_group_ids=None):
                 ]
                 
                 expected_issuers = [
-                    f"https://login.microsoftonline.com/{TENANT_ID}/v2.0",
-                    f"https://login.microsoftonline.com/{TENANT_ID}/",
-                    f"https://sts.windows.net/{TENANT_ID}/"
+                    f"{AUTHORITY_HOST}/{TENANT_ID}/v2.0",
+                    f"{AUTHORITY_HOST}/{TENANT_ID}/",
+                    f"{STS_ISSUER_HOST}/{TENANT_ID}/"
                 ]
                 
                 payload = jwt.decode(
@@ -281,80 +468,49 @@ def token_required(required_permissions=None, required_group_ids=None):
     return decorator
  
 def remote_group_exists(hostname: str, group_name: str) -> bool:
-    pem_file_path = retrieve_pem_key_from_key_vault(VAULT_URL, KEY_NAME)
-
     try:
-        host_fqdn = f"avdadmin@{hostname}.{DOMAIN_NAME}"
-        result = subprocess.run(
-            ['ssh', '-i', pem_file_path, '-o', 'StrictHostKeyChecking=no', host_fqdn, f'getent group {group_name}'],
-            capture_output=True,
-            text=True
-        )
+        result, host_fqdn = run_remote_command(hostname, f"getent group {shlex.quote(group_name)}")
         if result.returncode == 0:
             return True
-        else:
-            print("Group '%s' does not exist on VM '%s'. Error: %s", group_name, host_fqdn, result.stderr)
-            return False
+
+        logger.info("Group '%s' does not exist on VM '%s'. Error: %s", group_name, host_fqdn, result.stderr)
+        return False
     except Exception as e:
-        print("Error checking group '%s' on VM '%s': %s", group_name, host_fqdn, e)
+        logger.error("Error checking group '%s' on VM '%s': %s", group_name, hostname, e)
         return False
 
 def create_remote_group(hostname: str, group_name: str) -> bool:
-    pem_file_path = retrieve_pem_key_from_key_vault(VAULT_URL, KEY_NAME)
-
     try:
-        host_fqdn = f"avdadmin@{hostname}.{DOMAIN_NAME}"
-        result = subprocess.run(
-            ['ssh', '-i', pem_file_path, '-o', 'StrictHostKeyChecking=no', host_fqdn, f'sudo groupadd {group_name}'],
-            capture_output=True,
-            text=True
-        )
+        result, host_fqdn = run_remote_command(hostname, f"sudo groupadd {shlex.quote(group_name)}")
         if result.returncode == 0:
             return True
-        else:
-            print("Failed to create group '%s' on VM '%s'. Error: %s", group_name, host_fqdn, result.stderr)
-            return False
+
+        logger.error("Failed to create group '%s' on VM '%s'. Error: %s", group_name, host_fqdn, result.stderr)
+        return False
     except Exception as e:
-        print("Error creating group '%s' on VM '%s': %s", group_name, host_fqdn, e)
+        logger.error("Error creating group '%s' on VM '%s': %s", group_name, hostname, e)
         return False
 
 def is_user_in_remote_group(hostname: str, username: str, group_name: str) -> bool:
-    pem_file_path = retrieve_pem_key_from_key_vault(VAULT_URL, KEY_NAME)
-
     try:
-        host_fqdn = f"avdadmin@{hostname}.{DOMAIN_NAME}"
-        result = subprocess.run(
-            ['ssh', '-i', pem_file_path, '-o', 'StrictHostKeyChecking=no', host_fqdn, f'id -nG {username}'], 
-            capture_output=True, 
-            text=True
-        )
-        if result.returncode == 0:
-            groups = result.stdout.strip().split()
-            if group_name in groups:
-                return True
-            else:
-                return False
-        else:
-            print("Error checking user '%s' on VM '%s': %s", username, host_fqdn, result.stderr)
+        result, host_fqdn = run_remote_command(hostname, f"id -nG {shlex.quote(username)}")
+        if result.returncode != 0:
+            logger.error("Error checking user '%s' on VM '%s': %s", username, host_fqdn, result.stderr)
             return False
+
+        return group_name in result.stdout.strip().split()
     except Exception as e:
-        print("Error checking user '%s' in group '%s' on VM '%s': %s", username, group_name, host_fqdn, e)
+        logger.error("Error checking user '%s' in group '%s' on VM '%s': %s", username, group_name, hostname, e)
         return False
 
 def add_user_to_remote_group(hostname: str, username: str, group_name: str) -> None:
-    pem_file_path = retrieve_pem_key_from_key_vault(VAULT_URL, KEY_NAME)
-
     try:
-        host_fqdn = f"avdadmin@{hostname}.{DOMAIN_NAME}"
-        result = subprocess.run(
-            ['ssh', '-i', pem_file_path, '-o', 'StrictHostKeyChecking=no', host_fqdn, f'sudo usermod -aG {group_name} {username}'], 
-            capture_output=True, 
-            text=True
-        )
+        command = f"sudo usermod -aG {shlex.quote(group_name)} {shlex.quote(username)}"
+        result, host_fqdn = run_remote_command(hostname, command)
         if result.returncode != 0:
-            print("Failed to add user '%s' to group '%s' on VM '%s': %s", username, group_name, host_fqdn, result.stderr)
+            logger.error("Failed to add user '%s' to group '%s' on VM '%s': %s", username, group_name, host_fqdn, result.stderr)
     except Exception as e:
-        print("Error adding user '%s' to group '%s' on VM '%s': %s", username, group_name, host_fqdn, e)
+        logger.error("Error adding user '%s' to group '%s' on VM '%s': %s", username, group_name, hostname, e)
 
 # ===============================
 # App Management APIs
@@ -380,9 +536,9 @@ def get_all_vms():
         conn.close()
 
         if not rows:
-            return "No VMs found.", 404
+            return jsonify([]), 200
 
-        return jsonify(rows), 200
+        return jsonify(serialize_for_json(rows)), 200
 
     except Exception as e:
         return f"An unexpected error occurred: {str(e)}", 500
@@ -433,6 +589,7 @@ def checkout_vm():
         if not username or not avdhost:
             return "Please provide 'username' and 'avdhost' in the request body.", 400
 
+        username = re.sub(r'[^a-zA-Z0-9_]', '', username)
         user_password = generate_secure_password()
 
         conn = get_db_connection()
@@ -449,11 +606,13 @@ def checkout_vm():
 
         checked_out_vm = rows[0]
         vm_hostname = checked_out_vm.get('Hostname')
+        lease_id = normalize_lease_id(checked_out_vm.get('LeaseId'))
 
-        if not vm_hostname:
-            return "No hostname found for the checked-out VM.", 500
+        if not vm_hostname or not lease_id:
+            return "No hostname or LeaseId found for the checked-out VM.", 500
 
-        if not create_or_update_remote_user(vm_hostname, username, user_password):
+        if not create_or_update_remote_user(vm_hostname, username, user_password, lease_id):
+            release_vm_assignment(checked_out_vm.get("VMID"), lease_id)
             return f"Failed to create or update user '{username}' on VM '{vm_hostname}'.", 500
         
         groups_to_add = ["tsusers", "appusers"]
@@ -474,12 +633,13 @@ def checkout_vm():
             "VMID": checked_out_vm.get("VMID"),
             "Hostname": checked_out_vm.get("Hostname"),
             "IPAddress": checked_out_vm.get("IPAddress"),
+            "LeaseId": lease_id,
             "password": user_password
         }
 
-        print(f"================= Response data: {response_data}")    
+        #print(f"================= Response data: {response_data}")    
 
-        return jsonify(response_data), 200
+        return jsonify(serialize_for_json(response_data)), 200
 
     except json.JSONDecodeError:
         return "Invalid JSON data", 400
@@ -607,7 +767,7 @@ def get_vm_details(vmid):
         if not row:
             return f"VM with VMID {vmid} was not found.", 404
 
-        return jsonify(row), 200
+        return jsonify(serialize_for_json(row)), 200
 
     except Exception as e:
         return f"Error: {str(e)}", 500
@@ -629,7 +789,18 @@ def return_vm(vmid):
         if not row:
             return f"VM with VMID {vmid} was not found or is not currently checked out.", 404
 
-        return jsonify(row), 200
+        hostname = row.get('Hostname')
+        username = row.get('ReturnedUsername')
+        lease_id = row.get('ReturnedLeaseId')
+
+        if hostname and username:
+            success = delete_remote_user(hostname, username, lease_id)
+            if success:
+                logger.info("Successfully deleted user %s from %s during manual return.", username, hostname)
+            else:
+                logger.error("Failed to delete user %s from %s during manual return.", username, hostname)
+
+        return jsonify(serialize_for_json(row)), 200
 
     except Exception as e:
         return f"Error: {str(e)}", 500
@@ -638,12 +809,26 @@ def return_vm(vmid):
 @token_required(['LinuxHost', 'access_as_user', 'FullAccess'], required_group_ids=[LINUX_HOST_GROUP_ID])
 def release_vm(hostname):
     try:
+        req_body = request.get_json(silent=True) or {}
+        lease_id_raw = req_body.get('leaseId') or request.args.get('leaseId')
+        username = req_body.get('username') or request.args.get('username')
+        lease_id = normalize_lease_id(lease_id_raw)
+
+        if lease_id_raw and not lease_id:
+            return jsonify({'error': 'Invalid leaseId format.'}), 400
+
+        if username:
+            username = re.sub(r'[^a-zA-Z0-9_]', '', username)
+
         conn = get_db_connection()
         if not conn:
             return "Database connection failed.", 500
 
         with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC ReleaseVm @Hostname = %s", (hostname,))
+            cursor.execute(
+                "EXEC ReleaseVm @Hostname = %s, @LeaseId = %s, @Username = %s",
+                (hostname, lease_id, username)
+            )
             row = cursor.fetchone()
         
         conn.commit()
@@ -652,7 +837,19 @@ def release_vm(hostname):
         if not row:
             return f"Failed to release VM with Hostname {hostname}. Please try again.", 500
 
-        return jsonify(row), 200
+        release_status = (row.get('ReleaseStatus') or '').strip()
+
+        if release_status == 'NotFound':
+            return jsonify({'error': f"No VM found with Hostname {hostname}.", 'ReleaseStatus': release_status}), 404
+
+        if release_status == 'LeaseMismatch':
+            return jsonify({
+                'error': f"Release request did not match the current assignment for Hostname {hostname}.",
+                'ReleaseStatus': release_status
+            }), 409
+
+        # NoActiveAssignment means the VM is already released, so the agent should stop retrying.
+        return jsonify(serialize_for_json(row)), 200
 
     except Exception as e:
         return f"Error: {str(e)}", 500
@@ -674,10 +871,23 @@ def return_released_vm_api():
         if not rows:
             return "No VMs to return at this time.", 200
 
-        return jsonify(rows), 200
+        for row in rows:
+            hostname = row.get("Hostname")
+            username = row.get("ReturnedUsername")
+            lease_id = row.get("ReturnedLeaseId")
+
+            if hostname and username:
+                success = delete_remote_user(hostname, username, lease_id)
+                if success:
+                    logger.info("Successfully deleted user %s from %s", username, hostname)
+                else:
+                    logger.error("Failed to delete user %s from %s", username, hostname)
+
+        return jsonify(serialize_for_json(rows)), 200
 
     except Exception as e:
         return f"Error: {str(e)}", 500
+
 
 @app.route('/api/vms/history', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
@@ -701,7 +911,7 @@ def get_vm_history():
             rows = cursor.fetchall()
         conn.close()
 
-        return jsonify(rows), 200
+        return jsonify(serialize_for_json(rows)), 200
 
     except json.JSONDecodeError:
         return "Invalid JSON data", 400

@@ -1,8 +1,9 @@
 Flask==2.2.2
 gunicorn
 Werkzeug==2.2.2
+azure-monitor-opentelemetry==1.8.7
 requests==2.32.2
 msal==1.31.0
 Flask-Session==0.8.0
 pyjwt==2.9.0
-cryptography==43.0.3
+cryptography==44.0.1

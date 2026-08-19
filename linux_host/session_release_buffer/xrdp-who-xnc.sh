@@ -9,13 +9,23 @@
 #
 
 # Setting up color variables for output formatting using tput for portability and readability
-RED=$(tput setaf 1; tput bold) # Set text color to bold red
-GREEN=$(tput setaf 2; tput bold) # Set text color to bold green
-YELLOW=$(tput setaf 3; tput bold) # Set text color to bold yellow
-ENDCOLOR=$(tput sgr0) # Reset text formatting to default
-BLINK=$(tput blink) # Unused in this script, would make text blink
-REVERSE=$(tput smso) # Unused in this script, would reverse the background and foreground colors
-UNDERLINE=$(tput smul) # Unused in this script, would underline text
+if [ -t 1 ] && [ -n "$TERM" ]; then
+    RED=$(tput setaf 1; tput bold) # Set text color to bold red
+    GREEN=$(tput setaf 2; tput bold) # Set text color to bold green
+    YELLOW=$(tput setaf 3; tput bold) # Set text color to bold yellow
+    ENDCOLOR=$(tput sgr0) # Reset text formatting to default
+    BLINK=$(tput blink) # Unused in this script, would make text blink
+    REVERSE=$(tput smso) # Unused in this script, would reverse the background and foreground colors
+    UNDERLINE=$(tput smul) # Unused in this script, would underline text
+else
+    RED=""
+    GREEN=""
+    YELLOW=""
+    ENDCOLOR=""
+    BLINK=""
+    REVERSE=""
+    UNDERLINE=""
+fi
 
 # Format string for printf to maintain consistent column widths and alignments in the output
 _printf="%7s %-20s %-19s %-10s %4s %-12s\n"
@@ -36,7 +46,7 @@ ps h -C Xvnc -o user:20,pid,lstart,cmd | while read username pid dt1 dt2 dt3 dt4
     # Parse the Xvnc command for geometry (resolution) and color depth (bits)
     read geometry colorbits <<< $(echo ${xvnc_cmd} | awk '{for(i=i;i<=NF;i++){if($i=="-geometry"){geom=$(++i)} if($i=="-depth"){bits=$(++i)}} print geom,bits}');
     # Check if the session is active by looking for its PID in the socket state (ss) command output
-    ss -tep 2>/dev/null | grep -q pid\=${pid}, && status="${GREEN}active${ENDCOLOR}" || status="${RED}disconnected${ENDCOLOR}";
+    sudo ss -tep 2>/dev/null | grep -q pid\=${pid}, && status="${GREEN}active${ENDCOLOR}" || status="${RED}disconnected${ENDCOLOR}";
     # Print the session details using the format string defined earlier
     printf "${_printf}" ${pid} ${username} "${start_time}" ${geometry} ${colorbits} "${status}";
 done
