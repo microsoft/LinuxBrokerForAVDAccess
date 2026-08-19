@@ -1,12 +1,10 @@
 param location string = resourceGroup().location
 param tags object = {}
 
-// Network Parameters
 param vnetName string
 param subnetName string
 param vnetResourceGroup string
 
-// AVD Parameters
 param hostPoolName string
 param friendlyName string = hostPoolName
 param loadBalancerType string = 'BreadthFirst'
@@ -14,7 +12,7 @@ param preferredAppGroupType string = 'Desktop'
 param sessionHostCount int
 param maxSessionLimit int
 @description('Token validity duration in ISO 8601 format')
-param tokenValidityLength string = 'PT8H' // 8 hours by default
+param tokenValidityLength string = 'PT8H'
 @description('Generated. Do not provide a value! This date value is used to generate a registration token.')
 param baseTime string = utcNow('u')
 @description('Agent update configuration')
@@ -31,7 +29,6 @@ param agentUpdate object = {
   ]
 }
 
-// Session Host VM Parameters
 @maxLength(10)
 param vmNamePrefix string
 @description('The size of the session host VMs')
@@ -51,17 +48,13 @@ param adminUsername string
 @secure()
 param adminPassword string
 
-// Linux Broker API Base URL
 @description('Base URL for the AVD Linux Broker API')
 param linuxBrokerApiBaseUrl string
-// Linux Broker Configuration Script URI
 @description('URI for the AVD Linux Broker configuration script')
 param linuxBrokerConfigScriptUri string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-AVD-Host.ps1'
 
-// Multisession image without Office
 var osImage = 'microsoftwindowsdesktop:Windows-11:win11-24h2-avd:latest'
 var vmNames = [for i in range(1, sessionHostCount): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
-// URL to the AVD artifacts location
 var storageAccountName = 'wvdportalstorageblob'
 var containerName = 'galleryartifacts'
 var blobName01 = 'Configuration_1.0.02990.697.zip'
@@ -70,7 +63,6 @@ var intune = false
 var aadJoin = true
 var aadJoinPreview = false
 
-// Create AVD Host Pool
 resource hostPool 'Microsoft.DesktopVirtualization/hostPools@2024-04-03' = {
   name: hostPoolName
   location: location
@@ -91,7 +83,6 @@ resource hostPool 'Microsoft.DesktopVirtualization/hostPools@2024-04-03' = {
   }
 }
 
-// Create Desktop Application Group
 resource desktopAppGroup 'Microsoft.DesktopVirtualization/applicationGroups@2024-04-03' = {
   name: '${hostPoolName}-desktopAppGroup'
   location: location
@@ -102,7 +93,6 @@ resource desktopAppGroup 'Microsoft.DesktopVirtualization/applicationGroups@2024
   }
 }
 
-// Create Workspace
 resource workspace 'Microsoft.DesktopVirtualization/workspaces@2024-11-01-preview' = {
   name: '${hostPoolName}-workspace'
   location: location
@@ -136,7 +126,6 @@ module hostPoolRegistrationToken 'token.bicep' = {
   ]
 }
 
-// Retrieve the existing VNet and Subnet
 resource existingVNet 'Microsoft.Network/virtualNetworks@2021-05-01' existing = {
   name: vnetName
   scope: resourceGroup(vnetResourceGroup)
@@ -229,7 +218,6 @@ resource vmSessionHost 'Microsoft.Compute/virtualMachines@2024-11-01' = [
   }
 ]
 
-// EntraLoginForWindows Extension
 resource entraloginExtension 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' = [
   for (name, i) in vmNames: {
     name: '${name}/AADLoginForWindows'
@@ -252,7 +240,6 @@ resource entraloginExtension 'Microsoft.Compute/virtualMachines/extensions@2024-
   }
 ]
 
-// AVD DSC Configuration
 resource avdDscExtension 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' = [
   for (name, i) in vmNames: {
     name: '${name}/Microsoft.PowerShell.DSC'

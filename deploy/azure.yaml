@@ -1,0 +1,15 @@
+name: linuxbrokerforavdaccess
+metadata:
+  template: linuxbrokerforavdaccess@0.0.1
+infra:
+  provider: bicep
+  path: ./bicep
+hooks:
+  preprovision:
+    windows:
+      shell: pwsh
+      run: ./Initialize-DeploymentEnvironment.ps1
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./Post-Provision.ps1

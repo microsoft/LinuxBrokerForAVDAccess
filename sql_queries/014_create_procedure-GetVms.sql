@@ -10,6 +10,7 @@ BEGIN
         VmStatus,
         Username,
         AvdHost,
+        LeaseId,
         CreateDate,
         LastUpdateDate,
         Description

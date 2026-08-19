@@ -1,0 +1,129 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "appServicePlanSku": {
+      "value": "P2mv3"
+    },
+    "appName": {
+      "value": "linuxbroker"
+    },
+    "azureCloudName": {
+      "value": "AzurePublic"
+    },
+    "azureAuthorityHost": {
+      "value": ""
+    },
+    "graphEndpoint": {
+      "value": ""
+    },
+    "stsIssuerHost": {
+      "value": ""
+    },
+    "appServiceDomain": {
+      "value": ""
+    },
+    "scriptSourceRoot": {
+      "value": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main"
+    },
+    "tenantId": {
+      "value": "<tenant-id>"
+    },
+    "frontendClientId": {
+      "value": "<frontend-app-client-id>"
+    },
+    "frontendClientSecret": {
+      "value": "<frontend-app-client-secret>"
+    },
+    "apiClientId": {
+      "value": "<api-app-client-id>"
+    },
+    "apiClientSecret": {
+      "value": "<api-app-client-secret>"
+    },
+    "avdHostGroupId": {
+      "value": "<avd-host-group-id>"
+    },
+    "linuxHostGroupId": {
+      "value": "<linux-host-group-id>"
+    },
+    "linuxHostSshPrivateKey": {
+      "value": "<linux-host-ssh-private-key>"
+    },
+    "linuxHostSshPublicKey": {
+      "value": "<linux-host-ssh-public-key>"
+    },
+    "sqlAdminLogin": {
+      "value": "brokeradmin"
+    },
+    "sqlAdminPassword": {
+      "value": "<sql-admin-password>"
+    },
+    "flaskKey": {
+      "value": "<flask-session-secret>"
+    },
+    "hostAdminPassword": {
+      "value": "<host-admin-password>"
+    },
+    "linuxHostAdminLoginName": {
+      "value": "avdadmin"
+    },
+    "domainName": {
+      "value": ""
+    },
+    "nfsShare": {
+      "value": ""
+    },
+    "vmHostResourceGroup": {
+      "value": ""
+    },
+    "vmSubscriptionId": {
+      "value": "<subscription-id>"
+    },
+    "allowedClientIp": {
+      "value": "<public-client-ip>"
+    },
+    "deployLinuxHosts": {
+      "value": true
+    },
+    "deployAvdHosts": {
+      "value": true
+    },
+    "linuxHostVmNamePrefix": {
+      "value": "lnxhost"
+    },
+    "linuxHostVmSize": {
+      "value": "Standard_D2s_v5"
+    },
+    "linuxHostCount": {
+      "value": 2
+    },
+    "linuxHostAuthType": {
+      "value": "SSH"
+    },
+    "linuxHostOsVersion": {
+      "value": "24_04-lts"
+    },
+    "avdHostPoolName": {
+      "value": "linuxbroker-<environment-name>-hp"
+    },
+    "avdSessionHostCount": {
+      "value": 1
+    },
+    "avdMaxSessionLimit": {
+      "value": 5
+    },
+    "avdVmNamePrefix": {
+      "value": "avdhost"
+    },
+    "avdVmSize": {
+      "value": "Standard_D8s_v5"
+    }
+  }
+}

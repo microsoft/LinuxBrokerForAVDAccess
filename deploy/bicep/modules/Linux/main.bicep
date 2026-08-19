@@ -1,19 +1,18 @@
 param location string = resourceGroup().location
 param tags object = {}
 
-// Network Parameters
 param vnetName string
 param subnetName string
 param vnetResourceGroup string
 
-// VM Parameters - General
 param vmNamePrefix string
 param vmSize string
 @minValue(1)
 @maxValue(20)
 param numberOfVMs int
+param linuxBrokerApiBaseUrl string
+param linuxBrokerApiClientId string
 
-// VM Parameters - Authentication
 @allowed([
   'Password'
   'SSH'
@@ -24,17 +23,40 @@ param adminUsername string
 param adminPassword string
 param sshPublicKey string = ''
 
-// VM Parameters - OS Image
 @allowed([
-  '7-LVM' // RHEL 7
-  '8-LVM' // RHEL 8
-  '9-LVM' // RHEL 9
-  '24_04-lts' // Ubuntu 24.04
+  '7-LVM'
+  '8-LVM'
+  '9-LVM'
+  '24_04-lts'
 ])
 param OSVersion string
 
+@description('Root URL the host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds.')
+param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
+
+var normalizedScriptSourceRoot = endsWith(scriptSourceRoot, '/') ? take(scriptSourceRoot, length(scriptSourceRoot) - 1) : scriptSourceRoot
+var bootstrapArgs = '"${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
+var bootstrapEnv = 'LINUXBROKER_SCRIPT_SOURCE_ROOT="${normalizedScriptSourceRoot}"'
+
 var vmNames = [for i in range(1, numberOfVMs): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
-var adminPass = authType == 'Password' ? adminPassword : sshPublicKey
+var adminCredentials = authType == 'Password' ? {
+  adminPassword: adminPassword
+} : {}
+var linuxConfiguration = authType == 'SSH'
+  ? {
+      disablePasswordAuthentication: true
+      ssh: {
+        publicKeys: [
+          {
+            path: '/home/${adminUsername}/.ssh/authorized_keys'
+            keyData: sshPublicKey
+          }
+        ]
+      }
+    }
+  : {
+      disablePasswordAuthentication: false
+    }
 
 var imageConfigs = {
   '7-LVM': {
@@ -45,8 +67,8 @@ var imageConfigs = {
       version: 'latest'
     }
     script: {
-      uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL7-Host.sh'
-      cmd: 'bash Configure-RHEL7-Host.sh'
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL7-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL7-Host.sh ${bootstrapArgs}'
     }
   }
   '8-LVM': {
@@ -57,8 +79,8 @@ var imageConfigs = {
       version: 'latest'
     }
     script: {
-      uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL8-Host.sh'
-      cmd: 'bash Configure-RHEL8-Host.sh'
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL8-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL8-Host.sh ${bootstrapArgs}'
     }
   }
   '9-LVM': {
@@ -69,8 +91,8 @@ var imageConfigs = {
       version: 'latest'
     }
     script: {
-      uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-RHEL9-Host.sh'
-      cmd: 'bash Configure-RHEL9-Host.sh'
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL9-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL9-Host.sh ${bootstrapArgs}'
     }
   }
   '24_04-lts': {
@@ -81,16 +103,14 @@ var imageConfigs = {
       version: 'latest'
     }
     script: {
-      uri: 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh'
-      cmd: 'bash Configure-Ubuntu24_desktop-Host.sh'
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-Ubuntu24_desktop-Host.sh ${bootstrapArgs}'
     }
   }
 }
 
-// Selected configuration based on OSVersion parameter
 var selectedConfig = imageConfigs[OSVersion]
 
-// Retrieve existing VNet and Subnet
 resource existingVNet 'Microsoft.Network/virtualNetworks@2021-05-01' existing = {
   name: vnetName
   scope: resourceGroup(vnetResourceGroup)
@@ -101,7 +121,6 @@ resource existingSubnet 'Microsoft.Network/virtualNetworks/subnets@2021-05-01' e
   name: subnetName
 }
 
-// Create Network Interfaces
 resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = [
   for (name, i) in vmNames: {
     name: '${name}-nic'
@@ -127,7 +146,6 @@ resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = [
   }
 ]
 
-// Create Linux VMs 
 resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
   for (name, i) in vmNames: {
     name: name
@@ -140,26 +158,11 @@ resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
       hardwareProfile: {
         vmSize: vmSize
       }
-      osProfile: {
+      osProfile: union({
         computerName: vmNames[i]
         adminUsername: adminUsername
-        adminPassword: adminPass
-        linuxConfiguration: authType == 'SSH'
-          ? {
-              disablePasswordAuthentication: true
-              ssh: {
-                publicKeys: [
-                  {
-                    path: '/home/${adminUsername}/.ssh/authorized_keys'
-                    keyData: sshPublicKey
-                  }
-                ]
-              }
-            }
-          : {
-              disablePasswordAuthentication: false
-            }
-      }
+        linuxConfiguration: linuxConfiguration
+      }, adminCredentials)
       networkProfile: {
         networkInterfaces: [
           {
@@ -189,7 +192,6 @@ resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
   }
 ]
 
-// Apply Script Based on Image OS
 resource linuxCustomScriptExtension 'Microsoft.Compute/virtualMachines/extensions@2022-03-01' = [
   for (name, i) in vmNames: {
     name: '${name}/customScript'

@@ -1,7 +1,13 @@
 import os
 import logging
 
-from flask import Flask, render_template, send_from_directory
+from azure.monitor.opentelemetry import configure_azure_monitor
+
+connection_string = os.environ.get('APPLICATIONINSIGHTS_CONNECTION_STRING')
+if connection_string:
+    configure_azure_monitor(connection_string=connection_string, logger_name='linuxbroker.frontend')
+
+from flask import Flask, jsonify, render_template, send_from_directory
 from flask_session import Session
 from route_authentication import register_route_authentication
 from route_user import register_route_user
@@ -21,7 +27,7 @@ Session(app)
 # Logging Configuration
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('linuxbroker.frontend')
 
 # ===============================
 # General Routes
@@ -29,6 +35,10 @@ logger = logging.getLogger(__name__)
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "healthy", "version": app.config['VERSION']}), 200
 
 @app.route('/favicon.ico')
 def favicon():

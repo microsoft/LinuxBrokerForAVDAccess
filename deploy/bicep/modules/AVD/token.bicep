@@ -11,7 +11,7 @@ param validationEnvironment bool
 param agentUpdate object
 
 @description('Token validity duration in ISO 8601 format')
-param tokenValidityLength string = 'PT8H' // 8 hours by default
+param tokenValidityLength string = 'PT8H'
 @description('Generated. Do not provide a value! This date value is used to generate a registration token.')
 param baseTime string = utcNow('u')
 
@@ -28,7 +28,6 @@ resource hostPoolTokenUpdate 'Microsoft.DesktopVirtualization/hostPools@2024-04-
     startVMOnConnect: startVMOnConnect
     validationEnvironment: validationEnvironment
     agentUpdate: agentUpdate
-    // Update the registration info with a new token
     registrationInfo: {
       expirationTime: dateTimeAdd(baseTime, tokenValidityLength)
       registrationTokenOperation: 'Update'
@@ -36,5 +35,5 @@ resource hostPoolTokenUpdate 'Microsoft.DesktopVirtualization/hostPools@2024-04-
   }
 }
 
-@secure()
+#disable-next-line outputs-should-not-contain-secrets
 output registrationToken string = first(hostPoolTokenUpdate.listRegistrationTokens().value)!.token
