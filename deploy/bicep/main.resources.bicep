@@ -226,7 +226,7 @@ var frontendAuthSettings = {
 }
 var apiAuthSettings = {
   platform: {
-    enabled: true
+    enabled: false
     runtimeVersion: '~1'
   }
   globalValidation: {
