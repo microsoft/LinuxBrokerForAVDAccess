@@ -11,6 +11,7 @@ BEGIN
         VmStatus VARCHAR(16) CHECK(VmStatus IN ('Available', 'CheckedOut', 'Maintenance', 'Released')),
         Username VARCHAR(255),
         AvdHost VARCHAR(255),
+        LeaseId UNIQUEIDENTIFIER,
         CreateDate DATETIME DEFAULT(GETDATE()),
         LastUpdateDate DATETIME DEFAULT(GETDATE()),
         Description NVARCHAR(MAX),

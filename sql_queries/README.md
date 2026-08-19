@@ -49,6 +49,7 @@ Use that path when you need to:
 - `002_create_table-vm_scaling_activity_log.sql`: creates `dbo.VmScalingActivityLog`
 - `003_create_table-virtual_machines.sql`: creates `dbo.VirtualMachines`
 - `024_create_table-vmusers.sql`: creates `dbo.VmUsers`
+- `026_add_lease_id_to_virtual_machines.sql`: adds `LeaseId` to `dbo.VirtualMachines` for lease-aware checkout and cleanup
 
 The table scripts above are written to be rerunnable.
 
@@ -90,6 +91,13 @@ Two current behaviors are worth calling out:
 
 - `dbo.VmUsers` is required by the API path that creates and tracks Linux-side user IDs.
 - `dbo.RegisterLinuxHostVm` is the procedure used by post-provision automation to register Linux hosts automatically.
+
+The VM checkout lifecycle is now lease-aware:
+
+- `dbo.CheckoutVm` reuses an existing `CheckedOut` or `Released` assignment by `Username` and keeps the same `LeaseId` until the VM is returned to `Available`.
+- `dbo.ReleaseVm` can validate `Hostname`, `Username`, and `LeaseId` together while still tolerating older hostname-only callers during rollout. It always returns a `ReleaseStatus` column of `Released`, `NoActiveAssignment`, `LeaseMismatch`, or `NotFound` so the API can answer an already-released host with `200` instead of an error that the host agent would retry every minute.
+- `dbo.ReturnVm` and `dbo.ReturnReleasedVms` now preserve the returned username and lease metadata long enough for the API to perform lease-safe Linux-side cleanup.
+- `dbo.ReturnReleasedVms` expires released leases with a single set-based `UPDATE ... OUTPUT`, so the sweep is atomic and does not depend on `INSERT ... EXEC`.
 
 ## Automatic Linux Host Registration
 
