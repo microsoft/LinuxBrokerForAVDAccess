@@ -110,6 +110,9 @@
     "linuxHostOsVersion": {
       "value": "24_04-lts"
     },
+    "linuxHostDisableScreenLock": {
+      "value": true
+    },
     "avdHostPoolName": {
       "value": "linuxbroker-<environment-name>-hp"
     },
