@@ -222,11 +222,16 @@ desktop, and the host stays leased until the lease is released manually.
 
 The configuration is applied through a dconf system database:
 
-| File on the host | Source in this repo |
+| File on the host | Written by |
 | --- | --- |
-| `/etc/dconf/db/local.d/00-screensaver` | [linux_host/session_release_buffer/RHEL/00-screensaver](../linux_host/session_release_buffer/RHEL/00-screensaver) |
-| `/etc/dconf/db/local.d/locks/screensaver` | [linux_host/session_release_buffer/RHEL/screensaver](../linux_host/session_release_buffer/RHEL/screensaver) |
-| `/etc/dconf/profile/user` | created by the bootstrap script |
+| `/etc/dconf/db/local.d/00-screensaver` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
+| `/etc/dconf/db/local.d/locks/screensaver` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
+| `/etc/dconf/profile/user` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
+
+These files were previously static and downloaded during bootstrap. They are now generated from
+the fleet-wide host settings profile, which is what makes the values editable in the portal after
+deployment. The bootstrap seeds that profile once, and the release agent keeps each host converged
+to it from then on. See [Linux Host Settings](../README.md#linux-host-settings).
 
 It sets `idle-delay` to `0` so the session never goes idle, sets `lock-enabled` to `false` so
 the screen saver never locks, and sets `disable-lock-screen` to `true` so the lock screen is
@@ -234,8 +239,8 @@ removed entirely, including the `Super+L` shortcut and the `Lock` entry in the s
 lock list prevents users from changing any of those keys back.
 
 RHEL does not ship `/etc/dconf/profile/user`, and a system dconf database is only read when a
-profile references it, so the bootstrap script creates that file with `system-db:local`. An
-existing profile is preserved and only appended to.
+profile references it, so the bootstrap creates that file with `system-db:local`. An existing
+profile is preserved and only appended to.
 
 ### Keeping the lock screen
 
@@ -246,10 +251,12 @@ STIG or CIS benchmark:
 azd env set linuxHostDisableScreenLock false
 ```
 
-The bootstrap script then skips the dconf configuration entirely and leaves the distribution
-defaults in place. You can also set `LINUXBROKER_DISABLE_SCREEN_LOCK=false` in the environment
-if you run `Configure-RHEL7-Host.sh`, `Configure-RHEL8-Host.sh`, or `Configure-RHEL9-Host.sh`
-by hand.
+The bootstrap then seeds the profile with the lock screen left enabled. You can also set
+`LINUXBROKER_DISABLE_SCREEN_LOCK=false` in the environment if you run `Configure-RHEL7-Host.sh`,
+`Configure-RHEL8-Host.sh`, or `Configure-RHEL9-Host.sh` by hand.
+
+Because the values are part of the host settings profile, this posture can also be changed after
+deployment from **Host Settings** in the portal, without redeploying anything.
 
 This setting has no effect on the Ubuntu 24.04 image. That target uses the `server` SKU and does
 not install a desktop environment, so there is no GNOME screen lock to disable.
@@ -408,7 +415,11 @@ Set-Location .\deploy
 
 The host migration step updates only the release-agent-related files and services on existing Linux VMs. It does not reprovision infrastructure, replace the VM image, rerun the full Linux custom script extension, or attempt to reconcile every manual drift in an older environment.
 
-The migration also rewrites `/etc/sudoers.d/avdadmin`. Older hosts were provisioned with a broad allowlist that included `cat`, `rm`, `chmod`, `chown`, `cp`, `mount`, and `umount`. The current policy grants only `userdel`, `groupadd`, `usermod`, `chpasswd`, `/usr/local/bin/create-user.sh`, and `/usr/local/bin/manage-lease.sh`; all privileged file work now happens inside those two root-owned scripts. The generated policy is validated with `visudo -c` and moved into place only if it passes.
+The migration also rewrites `/etc/sudoers.d/avdadmin`. Older hosts were provisioned with a broad allowlist that included `cat`, `rm`, `chmod`, `chown`, `cp`, `mount`, and `umount`. The current policy grants only `userdel`, `groupadd`, `usermod`, `chpasswd`, `/usr/local/bin/create-user.sh`, `/usr/local/bin/manage-lease.sh`, and `/usr/local/bin/apply-host-settings.sh`; all privileged file work now happens inside those root-owned scripts. The generated policy is validated with `visudo -c` and moved into place only if it passes.
+
+`apply-host-settings.sh` is the only way the broker API can change host configuration. It accepts a JSON settings document on stdin and nothing on argv, rejects unknown keys, and clamps every value to a supported range before writing anything, so a bad value cannot strand the fleet.
+
+The migration additionally installs `dconf` and, where available, `xprintidle`. `xprintidle` backs the optional idle session timeout; if it cannot be installed the migration still succeeds and idle enforcement is simply skipped on that host. Existing hosts keep any settings profile they already have, and hosts with no profile are seeded with the shipped defaults, which match the values that were previously hardcoded.
 
 ## Manual Steps After `azd up`
 
@@ -469,7 +480,13 @@ This includes the newer objects used by the current deployment flow:
 - `dbo.VirtualMachines`
 - `dbo.VmScalingRules`
 - `dbo.VmScalingActivityLog`
+- `dbo.LinuxHostSettings`
 - `dbo.RegisterLinuxHostVm`
+- `dbo.GetLinuxHostSettings`
+- `dbo.UpdateLinuxHostSettings`
+- `dbo.RecordHostSettingsApplied`
+
+`dbo.LinuxHostSettings` holds a single fleet-wide profile and is seeded automatically with the values that were previously hardcoded in the release agent, so applying it changes no behavior. `dbo.VirtualMachines` also gains `SettingsVersion` and `SettingsAppliedDate`, which the portal uses to show which hosts have applied the current profile.
 
 For more database detail, see [../sql_queries/README.md](../sql_queries/README.md).
 
@@ -543,7 +560,7 @@ The GNOME lock screen inside an xrdp or xpra session often cannot be unlocked af
 
 ### The Custom Script Extension failed on the screen lock step
 
-The bootstrap script fails deliberately if it cannot download the dconf files or if `dconf update` fails, so the problem is visible instead of silently leaving the lock screen enabled. Check that `scriptSourceRoot` is reachable from the host, or set `linuxHostDisableScreenLock` to `false` to skip the step.
+The bootstrap fails deliberately if the host settings cannot be applied, so the problem is visible instead of silently leaving the lock screen enabled. Check that `scriptSourceRoot` is reachable from the host so `apply-host-settings.sh` can be downloaded, or set `linuxHostDisableScreenLock` to `false` to seed the profile with the lock screen left enabled.
 
 ## Related Files
 

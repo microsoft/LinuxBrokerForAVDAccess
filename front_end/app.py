@@ -17,6 +17,7 @@ from route_authentication import register_route_authentication
 from route_user import register_route_user
 from route_vm_management import register_route_vm_management
 from route_scaling_management import register_route_scaling_management
+from route_host_settings import register_route_host_settings
 
 # ===============================
 # Flask App
@@ -24,7 +25,7 @@ from route_scaling_management import register_route_scaling_management
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('FLASK_KEY') 
 app.config['SESSION_TYPE'] = 'filesystem'
-app.config['VERSION'] = '0.112'
+app.config['VERSION'] = '0.113'
 # Tokens stay valid for the life of the session rather than expiring after an
 # hour, so a long-lived management page does not start rejecting submissions.
 app.config['WTF_CSRF_TIME_LIMIT'] = None
@@ -143,6 +144,11 @@ register_route_vm_management(app)
 # Scaling and Scaling Rules
 
 register_route_scaling_management(app)
+
+# ===============================
+# Linux Host Settings
+
+register_route_host_settings(app)
 
 # ===============================
 # Main

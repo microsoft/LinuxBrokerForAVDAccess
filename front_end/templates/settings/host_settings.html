@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+
+{% block title %}Linux Host Settings{% endblock %}
+
+{% block content %}
+{% call ui.page_header('Linux Host Settings', 'Session lifecycle, idle handling and screen lock policy for every Linux host.', 'wrench') %}
+    <span class="badge text-bg-secondary align-self-center">Settings version {{ settings.SettingsVersion }}</span>
+{% endcall %}
+
+<div class="alert alert-info d-flex gap-2" role="alert">
+    <span>{{ ui.icon('info-circle', 16) }}</span>
+    <div>
+        These settings apply to every Linux host. Hosts fetch them on each reconcile run, so a saved
+        change reaches the fleet on its own, including hosts that are currently powered off or created
+        later by scale-up. Use <strong>Apply Now</strong> only when you want a change to take effect
+        immediately.
+    </div>
+</div>
+
+<div class="lb-card lb-form-card p-4">
+    <form action="{{ url_for('host_settings') }}" method="post" class="needs-validation" novalidate>
+        {{ ui.csrf_field() }}
+
+        <h2 class="h6 text-uppercase text-secondary mb-3">Session lifecycle</h2>
+        <div class="row g-3">
+            <div class="col-md-6 lb-field">
+                <label for="graceperiodseconds" class="form-label">Reconnect grace period (seconds)</label>
+                <input type="number" class="form-control" id="graceperiodseconds" name="graceperiodseconds"
+                       min="60" max="86400" value="{{ settings.GracePeriodSeconds }}" required
+                       aria-describedby="graceperiodseconds-help">
+                <div class="form-text" id="graceperiodseconds-help">
+                    How long a disconnected user can reconnect and resume before their account is removed
+                    and the VM returns to the pool. Between 60 and 86400. Default 1200 (20 minutes).
+                </div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="reconcileintervalseconds" class="form-label">Reconcile interval (seconds)</label>
+                <input type="number" class="form-control" id="reconcileintervalseconds" name="reconcileintervalseconds"
+                       min="30" max="900" value="{{ settings.ReconcileIntervalSeconds }}" required
+                       aria-describedby="reconcileintervalseconds-help">
+                <div class="form-text" id="reconcileintervalseconds-help">
+                    How often each host re-checks session state. Lower values detect disconnects sooner
+                    but poll the broker more often. Between 30 and 900. Default 60.
+                </div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="watcherdebounceseconds" class="form-label">Watcher debounce (seconds)</label>
+                <input type="number" class="form-control" id="watcherdebounceseconds" name="watcherdebounceseconds"
+                       min="1" max="300" value="{{ settings.WatcherDebounceSeconds }}" required
+                       aria-describedby="watcherdebounceseconds-help">
+                <div class="form-text" id="watcherdebounceseconds-help">
+                    Minimum gap between logind-triggered reconciliations. Between 1 and 300.
+                </div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="watchersettleseconds" class="form-label">Watcher settle (seconds)</label>
+                <input type="number" class="form-control" id="watchersettleseconds" name="watchersettleseconds"
+                       min="0" max="60" value="{{ settings.WatcherSettleSeconds }}" required
+                       aria-describedby="watchersettleseconds-help">
+                <div class="form-text" id="watchersettleseconds-help">
+                    Pause after a logind signal before reconciling. Between 0 and 60.
+                </div>
+            </div>
+        </div>
+
+        <hr class="my-4">
+
+        <h2 class="h6 text-uppercase text-secondary mb-3">Idle sessions</h2>
+        <div class="row g-3">
+            <div class="col-md-6 lb-field">
+                <label for="idletimeoutseconds" class="form-label">Idle timeout (seconds)</label>
+                <input type="number" class="form-control" id="idletimeoutseconds" name="idletimeoutseconds"
+                       min="0" max="86400" value="{{ settings.IdleTimeoutSeconds }}" required
+                       aria-describedby="idletimeoutseconds-help">
+                <div class="form-text" id="idletimeoutseconds-help">
+                    Disconnect a connected user after this much inactivity. The session stays alive, so
+                    the reconnect grace period above still applies and the user can resume.
+                    Enter <strong>0 to disable</strong>, otherwise at least 300.
+                    {% if settings.IdleTimeoutSeconds == 0 %}
+                        <span class="text-warning-emphasis">Idle enforcement is currently disabled.</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="idlewarningseconds" class="form-label">Idle warning lead time (seconds)</label>
+                <input type="number" class="form-control" id="idlewarningseconds" name="idlewarningseconds"
+                       min="0" max="900" value="{{ settings.IdleWarningSeconds }}" required
+                       aria-describedby="idlewarningseconds-help">
+                <div class="form-text" id="idlewarningseconds-help">
+                    How long before the idle timeout the user is warned on screen. Must be less than the
+                    idle timeout. Between 0 and 900, where 0 means no warning.
+                </div>
+            </div>
+        </div>
+
+        <hr class="my-4">
+
+        <h2 class="h6 text-uppercase text-secondary mb-3">Screen lock</h2>
+        <div class="alert alert-warning d-flex gap-2" role="alert">
+            <span>{{ ui.icon('alert-triangle', 16) }}</span>
+            <div>
+                A locked GNOME greeter inside an xrdp session frequently cannot be unlocked after a
+                reconnect, which strands the host's lease. The defaults therefore disable the lock
+                screen. Only enable it if you have an idle-lock control to satisfy.
+            </div>
+        </div>
+        <div class="row g-3">
+            <div class="col-12 lb-field">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="disablelockscreen" name="disablelockscreen"
+                           {% if settings.DisableLockScreen %}checked{% endif %}>
+                    <label class="form-check-label" for="disablelockscreen">Remove the lock screen entirely</label>
+                </div>
+                <div class="form-text">
+                    Disables the Super+L shortcut and the Lock entry in the system menu, so a user cannot
+                    lock the session manually.
+                </div>
+            </div>
+            <div class="col-12 lb-field">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="screenlockenabled" name="screenlockenabled"
+                           {% if settings.ScreenLockEnabled %}checked{% endif %}>
+                    <label class="form-check-label" for="screenlockenabled">Lock the screen when the screensaver activates</label>
+                </div>
+                <div class="form-text">Off by default, for the reason above.</div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="screenidledelayseconds" class="form-label">Screen blank delay (seconds)</label>
+                <input type="number" class="form-control" id="screenidledelayseconds" name="screenidledelayseconds"
+                       min="0" max="86400" value="{{ settings.ScreenIdleDelaySeconds }}" required
+                       aria-describedby="screenidledelayseconds-help">
+                <div class="form-text" id="screenidledelayseconds-help">
+                    Inactivity before the screen blanks. 0 means never blank. Between 0 and 86400.
+                </div>
+            </div>
+            <div class="col-md-6 lb-field">
+                <label for="screenlockdelayseconds" class="form-label">Lock delay after blanking (seconds)</label>
+                <input type="number" class="form-control" id="screenlockdelayseconds" name="screenlockdelayseconds"
+                       min="0" max="86400" value="{{ settings.ScreenLockDelaySeconds }}" required
+                       aria-describedby="screenlockdelayseconds-help">
+                <div class="form-text" id="screenlockdelayseconds-help">
+                    Grace period between the screen blanking and locking. 0 locks immediately. Between 0 and 86400.
+                </div>
+            </div>
+            <div class="col-12 lb-field">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="screenlocksettingslocked" name="screenlocksettingslocked"
+                           {% if settings.ScreenLockSettingsLocked %}checked{% endif %}>
+                    <label class="form-check-label" for="screenlocksettingslocked">Prevent users from changing these screen lock settings</label>
+                </div>
+                <div class="form-text">Applies dconf locks so the values above cannot be overridden inside a session.</div>
+            </div>
+        </div>
+
+        <div class="d-flex flex-wrap gap-2 mt-4">
+            <button type="submit" class="btn btn-primary">{{ ui.icon('check-circle', 14) }}<span class="ms-1">Save settings</span></button>
+            <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Cancel</a>
+        </div>
+    </form>
+</div>
+
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4 mb-3">
+    <h2 class="h5 mb-0">Host status</h2>
+    <form action="{{ url_for('apply_host_settings') }}" method="post" class="mb-0">
+        {{ ui.csrf_field() }}
+        <button type="submit" class="btn btn-outline-primary btn-sm">
+            {{ ui.icon('refresh', 14) }}<span class="ms-1">Apply now to all hosts</span>
+        </button>
+    </form>
+</div>
+
+{% if hosts %}
+<div class="lb-card">
+    <div class="table-responsive">
+        <table class="table lb-table align-middle mb-0">
+            <thead>
+                <tr>
+                    <th scope="col">Hostname</th>
+                    <th scope="col">Power</th>
+                    <th scope="col">Network</th>
+                    <th scope="col">Applied version</th>
+                    <th scope="col">Applied</th>
+                    <th scope="col" class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for host in hosts %}
+                <tr>
+                    <td>{{ host.Hostname }}</td>
+                    <td>{{ ui.power_badge(host.PowerState) }}</td>
+                    <td>{{ ui.network_badge(host.NetworkStatus) }}</td>
+                    <td>
+                        {% if host.SettingsVersion == settings.SettingsVersion %}
+                            <span class="badge text-bg-success">{{ host.SettingsVersion }}</span>
+                        {% elif host.SettingsVersion %}
+                            <span class="badge text-bg-warning">{{ host.SettingsVersion }} (pending {{ settings.SettingsVersion }})</span>
+                        {% else %}
+                            <span class="badge text-bg-secondary">not reported</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ ui.value_or_dash(host.SettingsAppliedDate) }}</td>
+                    <td class="text-end">
+                        <form action="{{ url_for('apply_host_settings') }}" method="post" class="mb-0">
+                            {{ ui.csrf_field() }}
+                            <input type="hidden" name="hostname" value="{{ host.Hostname }}">
+                            <button type="submit" class="btn btn-sm btn-outline-secondary">Apply now</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+<p class="form-text mt-2">
+    A host showing an older version has not reconciled yet. It converges on its own within one
+    reconcile interval of coming back online, so no action is required.
+</p>
+{% else %}
+{{ ui.empty_state('No Linux hosts registered', 'Hosts appear here once they are registered with the broker.', 'server') }}
+{% endif %}
+{% endblock %}

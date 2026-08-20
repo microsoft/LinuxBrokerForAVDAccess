@@ -51,6 +51,8 @@ Use that path when you need to:
 - `024_create_table-vmusers.sql`: creates `dbo.VmUsers`
 - `026_add_lease_id_to_virtual_machines.sql`: adds `LeaseId` to `dbo.VirtualMachines` for lease-aware checkout and cleanup
 - `027_add_unique_index-virtual_machines_hostname.sql`: enforces `Hostname` uniqueness on `dbo.VirtualMachines`
+- `028_create_table-linux_host_settings.sql`: creates `dbo.LinuxHostSettings` and seeds the single global profile
+- `029_add_settings_tracking_to_virtual_machines.sql`: adds `SettingsVersion` and `SettingsAppliedDate` to `dbo.VirtualMachines` so settings drift is visible
 
 The table scripts above are written to be rerunnable.
 
@@ -80,6 +82,12 @@ The scripts do not contain `USE <database>` statements. The target database come
 - `022_create_procedure-GetScalingRuleDetails.sql`: gets a specific scaling rule
 - `023_create_procedure-GetDeletedVirtualMachines.sql`: gets deleted VM history
 - `025_create_procedure-RegisterLinuxHostVm.sql`: upserts Linux host records into `dbo.VirtualMachines`
+- `030_create_procedure-GetLinuxHostSettings.sql`: reads the global Linux host settings profile
+- `031_create_procedure-UpdateLinuxHostSettings.sql`: updates the profile, bumping `SettingsVersion` only when a value actually changed
+- `032_create_procedure-RecordHostSettingsApplied.sql`: records the settings version a host has applied
+- `033_alter_procedure-GetVms.sql`: redefines `dbo.GetVms` to also return `SettingsVersion` and `SettingsAppliedDate`
+
+`033` exists as its own file rather than being folded into `014` because `014` runs before `029` adds those columns, and SQL Server validates column references against existing tables when a procedure is created.
 
 ## Current Runtime Expectations
 
@@ -89,6 +97,7 @@ The current code and deployment flow depend on the following SQL objects being p
 - `dbo.VmScalingActivityLog`
 - `dbo.VirtualMachines`
 - `dbo.VmUsers`
+- `dbo.LinuxHostSettings`
 - all of the stored procedures above
 - especially `dbo.CheckoutVm`, `dbo.ReleaseVm`, `dbo.UpdateVmAttributes`, and `dbo.RegisterLinuxHostVm`
 
@@ -96,6 +105,13 @@ Two current behaviors are worth calling out:
 
 - `dbo.VmUsers` is required by the API path that creates and tracks Linux-side user IDs.
 - `dbo.RegisterLinuxHostVm` is the procedure used by post-provision automation to register Linux hosts automatically.
+
+Linux host settings are a single fleet-wide profile:
+
+- `dbo.LinuxHostSettings` is a singleton. `SettingsScope` is constrained to `Global` and made unique, so only one active profile can exist.
+- The table is seeded with the values that were previously hardcoded in the release agent and the systemd units, so applying the schema changes no behavior.
+- The `CHECK` constraints on that table are the last line of defence for values that reach the Linux hosts. The API and `linux_host/apply-host-settings.sh` validate the same bounds, and all three definitions must be kept in agreement.
+- `dbo.VirtualMachines.SettingsVersion` and `SettingsAppliedDate` record what each host actually applied, which is what the portal uses to display drift.
 
 The VM checkout lifecycle is now lease-aware:
 
@@ -168,7 +184,7 @@ After bootstrap, verify both tables and procedures.
 ```sql
 SELECT name
 FROM sys.tables
-WHERE name IN ('VmScalingRules', 'VmScalingActivityLog', 'VirtualMachines', 'VmUsers')
+WHERE name IN ('VmScalingRules', 'VmScalingActivityLog', 'VirtualMachines', 'VmUsers', 'LinuxHostSettings')
 ORDER BY name;
 ```
 
@@ -197,7 +213,10 @@ WHERE name IN (
     'GetVmScalingRulesHistory',
     'GetScalingRuleDetails',
     'GetDeletedVirtualMachines',
-    'RegisterLinuxHostVm'
+    'RegisterLinuxHostVm',
+    'GetLinuxHostSettings',
+    'UpdateLinuxHostSettings',
+    'RecordHostSettingsApplied'
 )
 ORDER BY name;
 ```

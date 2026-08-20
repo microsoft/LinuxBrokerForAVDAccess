@@ -201,6 +201,7 @@ watcher_script="$output_directory/logind-session-watcher.sh"
 xorg_script="$output_directory/xrdp-who-xorg.sh"
 create_user_script="$output_directory/create-user.sh"
 manage_lease_script="$output_directory/manage-lease.sh"
+apply_settings_script="$output_directory/apply-host-settings.sh"
 release_service_name='linuxbroker-release-session.service'
 release_timer_name='linuxbroker-release-session.timer'
 watcher_service_name='linuxbroker-release-session-watcher.service'
@@ -262,6 +263,12 @@ download_file() {
 
 ensure_command curl curl
 ensure_command jq jq
+ensure_command dconf dconf || ensure_command dconf dconf-cli || echo 'dconf is unavailable; screen lock policy will be written but not compiled.'
+
+# Idle session enforcement fails open without xprintidle, so this must not abort the run.
+if ! command -v xprintidle >/dev/null 2>&1; then
+    ensure_command xprintidle xprintidle || echo 'xprintidle is unavailable; idle session enforcement will be skipped on this host.'
+fi
 
 if [ -r /etc/os-release ]; then
     . /etc/os-release
@@ -290,6 +297,7 @@ xorg_script_url="$script_source_root/linux_host/session_release_buffer/xrdp-who-
 watcher_script_url="$script_source_root/linux_host/session_release_buffer/logind-session-watcher.sh"
 create_user_script_url="$script_source_root/linux_host/create-user.sh"
 manage_lease_script_url="$script_source_root/linux_host/manage-lease.sh"
+apply_settings_script_url="$script_source_root/linux_host/apply-host-settings.sh"
 
 mkdir -p "$output_directory" "$state_directory" "$state_directory/leases"
 
@@ -298,8 +306,9 @@ download_file "$xorg_script_url" "$xorg_script"
 download_file "$watcher_script_url" "$watcher_script"
 download_file "$create_user_script_url" "$create_user_script"
 download_file "$manage_lease_script_url" "$manage_lease_script"
+download_file "$apply_settings_script_url" "$apply_settings_script"
 
-chmod +x "$release_script" "$xorg_script" "$watcher_script" "$create_user_script" "$manage_lease_script"
+chmod +x "$release_script" "$xorg_script" "$watcher_script" "$create_user_script" "$manage_lease_script" "$apply_settings_script"
 
 sed -i "s|YOUR_LINUX_BROKER_API_CLIENT_ID|$api_client_id|g" "$release_script"
 sed -i "s|YOUR_LINUX_BROKER_API_BASE_URL|$api_base_url|g" "$release_script"
@@ -313,7 +322,8 @@ if ! id avdadmin >/dev/null 2>&1; then
 fi
 
 # Only the commands the broker API actually invokes with sudo. Privileged file work
-# (mount, chown, chmod, lease markers) happens inside the two allowlisted scripts.
+# (mount, chown, chmod, lease markers, host settings) happens inside the allowlisted
+# scripts, each of which validates its own input.
 sudoers_commands=()
 for command_name in userdel groupadd usermod chpasswd; do
     resolved_command=$(command -v "$command_name" || true)
@@ -321,7 +331,7 @@ for command_name in userdel groupadd usermod chpasswd; do
         sudoers_commands+=("$resolved_command")
     fi
 done
-sudoers_commands+=("$create_user_script" "$manage_lease_script")
+sudoers_commands+=("$create_user_script" "$manage_lease_script" "$apply_settings_script")
 
 sudoers_tmp="${sudoers_path}.tmp"
 (
@@ -408,6 +418,18 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
+
+if [ -x "$apply_settings_script" ]; then
+    # Only seed when the host has no profile yet. Re-seeding would reset a host that already
+    # converged to the configured profile, until its next reconcile run pulled it back.
+    if [ -f /etc/linuxbroker/host-settings.conf ]; then
+        echo 'Existing Linux Broker host settings found. Leaving them in place.'
+    elif "$apply_settings_script" --defaults; then
+        echo 'Seeded default Linux Broker host settings.'
+    else
+        echo 'WARNING: Failed to seed default Linux Broker host settings.'
+    fi
+fi
 
 systemctl disable --now "$watcher_service_name" >/dev/null 2>&1 || true
 systemctl disable --now "$release_timer_name" >/dev/null 2>&1 || true

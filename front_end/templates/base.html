@@ -38,6 +38,7 @@
                        'checkout_vm', 'vm_history'] %}
 {% set scaling_endpoints = ['view_all_rules', 'view_rule_details', 'create_rule', 'update_rule',
                             'scaling_activity_log', 'scaling_rules_history'] %}
+{% set host_settings_endpoints = ['host_settings', 'apply_host_settings'] %}
 
 <nav class="navbar navbar-expand-lg lb-navbar" aria-label="Main navigation">
     <div class="lb-container d-flex flex-wrap align-items-center">
@@ -74,6 +75,13 @@
                            href="{{ url_for('view_all_rules') }}"
                            {% if request.endpoint in scaling_endpoints %}aria-current="page"{% endif %}>
                             {{ ui.icon('sliders', 16) }} Scaling Management
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint in host_settings_endpoints %}active{% endif %}"
+                           href="{{ url_for('host_settings') }}"
+                           {% if request.endpoint in host_settings_endpoints %}aria-current="page"{% endif %}>
+                            {{ ui.icon('wrench', 16) }} Host Settings
                         </a>
                     </li>
                 {% endif %}

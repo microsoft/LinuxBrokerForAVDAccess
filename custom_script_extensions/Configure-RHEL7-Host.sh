@@ -38,8 +38,8 @@ create_user_script_url="$script_source_root/linux_host/create-user.sh"
 create_user_script="/usr/local/bin/create-user.sh"
 manage_lease_script_url="$script_source_root/linux_host/manage-lease.sh"
 manage_lease_script="/usr/local/bin/manage-lease.sh"
-screensaver_settings_url="$script_source_root/linux_host/session_release_buffer/RHEL/00-screensaver"
-screensaver_locks_url="$script_source_root/linux_host/session_release_buffer/RHEL/screensaver"
+apply_settings_script_url="$script_source_root/linux_host/apply-host-settings.sh"
+apply_settings_script="/usr/local/bin/apply-host-settings.sh"
 
 arch=$( /bin/arch )
 remoteAccessTool="both"  # Options: "xrdp", "xpra", or "both"
@@ -63,8 +63,6 @@ orgId="${RHEL_ORG_ID:-}"
 activationKey="${RHEL_ACTIVATION_KEY:-}"
 
 output_directory="/usr/local/bin"
-dconf_local_directory="/etc/dconf/db/local.d"
-dconf_profile_file="/etc/dconf/profile/user"
 state_directory="/var/lib/linuxbroker-release-session"
 
 SCRIPT_PATH="$output_directory/release-session.sh"
@@ -100,7 +98,12 @@ sudo yum update -y
 sudo yum install -y "$epel_url"
 sudo yum install -y "$microsoft_packages_url"
 sudo wget -O "$xpra_repo_path" "$xpra_url"
-sudo yum install -y wget util-linux azure-cli nfs-utils xorgxrdp curl jq
+sudo yum install -y wget util-linux azure-cli nfs-utils xorgxrdp curl jq dconf
+
+# Idle session enforcement degrades gracefully without xprintidle, so a host that cannot
+# install it must still finish provisioning rather than fail the extension.
+echo "Installing idle detection support..."
+sudo yum install -y xprintidle || echo "xprintidle is unavailable. Idle session enforcement will be skipped on this host."
 sudo yum groupinstall -y "Server with GUI"
 
 case "$remoteAccessTool" in
@@ -189,11 +192,15 @@ sudo wget -O "$create_user_script" "$create_user_script_url"
 echo "Downloading manage-lease.sh..."
 sudo wget -O "$manage_lease_script" "$manage_lease_script_url"
 
+echo "Downloading apply-host-settings.sh..."
+sudo wget -O "$apply_settings_script" "$apply_settings_script_url"
+
 sudo chmod +x "$SCRIPT_PATH"
 sudo chmod +x "$output_directory/xrdp-who-xorg.sh"
 sudo chmod +x "$WATCHER_SCRIPT_PATH"
 sudo chmod +x "$create_user_script"
 sudo chmod +x "$manage_lease_script"
+sudo chmod +x "$apply_settings_script"
 echo "Downloaded scripts are now executable."
 
 sudo mkdir -p "$state_directory"
@@ -289,8 +296,9 @@ if ! id avdadmin >/dev/null 2>&1; then
 fi
 
 # Only the commands the broker API actually invokes with sudo. Privileged file work
-# (mount, chown, chmod, lease markers) happens inside the two allowlisted scripts.
-cmds=(userdel groupadd usermod chpasswd "$create_user_script" "$manage_lease_script")
+# (mount, chown, chmod, lease markers, host settings) happens inside the allowlisted
+# scripts, each of which validates its own input.
+cmds=(userdel groupadd usermod chpasswd "$create_user_script" "$manage_lease_script" "$apply_settings_script")
 full_paths=$(for cmd in "${cmds[@]}"; do command -v "$cmd"; done | paste -sd ',' -)
 sudoers_tmp="/etc/sudoers.d/avdadmin.tmp"
 echo "avdadmin ALL=(ALL) NOPASSWD: $full_paths" | sudo tee "$sudoers_tmp" >/dev/null
@@ -304,49 +312,22 @@ else
 fi
 echo "avdadmin user is created and permissioned"
 
-# Disable screen lock on Gnome desktop
+# Seed the Linux Broker host settings profile. This writes the dconf screen lock policy,
+# the dconf profile that makes it take effect, the release agent's settings file, and the
+# systemd drop-ins, then compiles the dconf database. LINUXBROKER_DISABLE_SCREEN_LOCK still
+# chooses the screen lock posture; from here on the values are managed from the portal and
+# the release agent converges the host to the configured profile on its next run.
 if [ "$disableScreenLock" = "true" ]; then
-    echo "Disabling the Gnome Desktop screen saver and screen lock..."
-
-    sudo mkdir -p "$dconf_local_directory/locks"
-
-    echo "Downloading Gnome Desktop screen lock settings..."
-    if ! sudo wget -O "$dconf_local_directory/00-screensaver" "$screensaver_settings_url"; then
-        echo "ERROR: Failed to download screen lock settings from $screensaver_settings_url"
-        exit 1
-    fi
-
-    if ! sudo wget -O "$dconf_local_directory/locks/screensaver" "$screensaver_locks_url"; then
-        echo "ERROR: Failed to download screen lock overrides from $screensaver_locks_url"
-        exit 1
-    fi
-
-    sudo chmod 644 "$dconf_local_directory/00-screensaver" "$dconf_local_directory/locks/screensaver"
-
-    # A system dconf database is only consulted when a profile references it. RHEL does not
-    # ship /etc/dconf/profile/user, so without this the settings above are silently ignored.
-    sudo mkdir -p "$(dirname "$dconf_profile_file")"
-    if [ ! -s "$dconf_profile_file" ]; then
-        printf 'user-db:user\nsystem-db:local\n' | sudo tee "$dconf_profile_file" >/dev/null
-        echo "Created dconf profile $dconf_profile_file."
-    elif ! grep -qx 'system-db:local' "$dconf_profile_file"; then
-        # Guarantee a trailing newline before appending to an existing profile.
-        sudo sed -i -e '$a\' "$dconf_profile_file"
-        echo 'system-db:local' | sudo tee -a "$dconf_profile_file" >/dev/null
-        echo "Added system-db:local to existing dconf profile $dconf_profile_file."
-    else
-        echo "dconf profile $dconf_profile_file already references system-db:local."
-    fi
-    sudo chmod 644 "$dconf_profile_file"
-
-    if ! sudo dconf update; then
-        echo "ERROR: 'dconf update' failed; the screen lock settings were not applied."
-        exit 1
-    fi
-
-    echo "Gnome Desktop screen lock is disabled."
+    echo "Seeding host settings with the Gnome Desktop screen saver and screen lock disabled..."
+    settings_seed='{"ScreenLockEnabled":false,"DisableLockScreen":true}'
 else
-    echo "Skipping Gnome Desktop screen lock configuration (LINUXBROKER_DISABLE_SCREEN_LOCK=false)."
+    echo "Seeding host settings with the Gnome Desktop screen lock left enabled (LINUXBROKER_DISABLE_SCREEN_LOCK=false)."
+    settings_seed='{"ScreenLockEnabled":true,"DisableLockScreen":false}'
+fi
+
+if ! printf '%s' "$settings_seed" | sudo "$apply_settings_script"; then
+    echo "ERROR: Failed to apply the initial Linux Broker host settings."
+    exit 1
 fi
 
 echo "System configuration complete."

@@ -49,6 +49,14 @@ LOG_ENTRY = {"ActivityID": 1, "CheckTimestamp": "2026-08-19 10:00:00", "CurrentR
              "VMsPoweredOff": 0, "NewTotalVMs": 7, "Outcome": "Scaled up by 2 VMs",
              "Notes": "Utilization above threshold"}
 
+# Mirrors the seeded profile in sql_queries/028_create_table-linux_host_settings.sql.
+HOST_SETTINGS = {"GracePeriodSeconds": 1200, "ReconcileIntervalSeconds": 60,
+                 "WatcherDebounceSeconds": 10, "WatcherSettleSeconds": 2,
+                 "IdleTimeoutSeconds": 0, "IdleWarningSeconds": 120,
+                 "ScreenLockEnabled": False, "DisableLockScreen": True,
+                 "ScreenIdleDelaySeconds": 0, "ScreenLockDelaySeconds": 0,
+                 "ScreenLockSettingsLocked": True, "SettingsVersion": 3}
+
 
 class FakeResponse:
     def __init__(self, payload, status_code=200):
@@ -69,6 +77,11 @@ class FakeBrokerApi:
     def __init__(self):
         self.posts = []
         self.scaling_log_payload = [dict(LOG_ENTRY, ActivityID=i) for i in range(1, 6)]
+        self.host_settings = dict(HOST_SETTINGS)
+        self.apply_result = {"SettingsVersion": HOST_SETTINGS["SettingsVersion"],
+                             "TargetCount": 2, "SucceededCount": 2,
+                             "Results": [{"Hostname": "linux-host-01", "Applied": True, "Message": "Applied."},
+                                         {"Hostname": "linux-host-02", "Applied": True, "Message": "Applied."}]}
         self.raise_get_paths = set()
         self.raise_post_paths = set()
 
@@ -76,6 +89,8 @@ class FakeBrokerApi:
         import requests
         if any(url.endswith(path) for path in self.raise_get_paths):
             raise requests.exceptions.RequestException("broker unavailable")
+        if url.endswith("/hosts/settings"):
+            return FakeResponse(self.host_settings)
         if re.search(r"/vms/\d+$", url):
             vmid = int(url.rsplit("/", 1)[1])
             return FakeResponse(next((vm for vm in VMS if vm["VMID"] == vmid), VMS[0]))
@@ -92,6 +107,10 @@ class FakeBrokerApi:
         self.posts.append({"url": url, "json": kwargs.get("json")})
         if any(url.endswith(path) for path in self.raise_post_paths):
             raise requests.exceptions.RequestException("broker unavailable")
+        if url.endswith("/hosts/settings/update"):
+            return FakeResponse(self.host_settings)
+        if url.endswith("/hosts/settings/apply"):
+            return FakeResponse(self.apply_result)
         if url.endswith("/scaling/log"):
             return FakeResponse(self.scaling_log_payload)
         if url.endswith("/scaling/rules/history"):
