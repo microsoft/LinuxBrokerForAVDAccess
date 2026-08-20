@@ -658,6 +658,10 @@ def apply_host_settings_to_host(hostname: str, settings: dict):
     The document is written to the remote script's stdin rather than passed on the command
     line, mirroring how the password is delivered to chpasswd. That keeps the values out of
     the remote process list and leaves no shell-injection surface.
+
+    Returns (applied, message) where message is a fixed, non-sensitive summary. Remote stderr
+    and exception detail are logged rather than returned, because this value is surfaced in
+    an API response.
     """
     try:
         result, host_fqdn = run_remote_command(
@@ -667,15 +671,15 @@ def apply_host_settings_to_host(hostname: str, settings: dict):
         )
 
         if result.returncode != 0:
-            message = (result.stderr or result.stdout or '').strip()
-            logger.error("Failed to apply host settings on '%s': %s", host_fqdn, message)
-            return False, message or 'The remote apply script reported a failure.'
+            detail = (result.stderr or result.stdout or '').strip()
+            logger.error("Failed to apply host settings on '%s': %s", host_fqdn, detail)
+            return False, 'The host could not be updated. See the API logs for detail.'
 
         record_settings_applied(hostname, settings['SettingsVersion'])
-        return True, (result.stdout or '').strip()
-    except Exception as e:
-        logger.error("Error applying host settings on '%s': %s", hostname, e)
-        return False, str(e)
+        return True, 'Applied.'
+    except Exception:
+        logger.exception("Error applying host settings on '%s'.", hostname)
+        return False, 'The host could not be reached. See the API logs for detail.'
 
 # ===============================
 # App Management APIs
@@ -1369,8 +1373,11 @@ def get_host_settings():
 
         return jsonify(settings), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except Exception:
+        # Detail goes to Application Insights rather than the response body; returning the
+        # exception text would expose internal state to the caller.
+        logger.exception("Failed to read Linux host settings.")
+        return jsonify({'error': 'Unable to read Linux host settings.'}), 500
 
 @app.route('/api/hosts/settings/update', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
@@ -1440,8 +1447,9 @@ def update_host_settings():
 
         return jsonify(normalize_host_settings(row)), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except Exception:
+        logger.exception("Failed to update Linux host settings.")
+        return jsonify({'error': 'Unable to update Linux host settings.'}), 500
 
 @app.route('/api/hosts/settings/apply', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess', 'ScheduledTask'])
@@ -1510,8 +1518,9 @@ def apply_host_settings():
             'Results': results
         }), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except Exception:
+        logger.exception("Failed to push Linux host settings.")
+        return jsonify({'error': 'Unable to push Linux host settings.'}), 500
 
 @app.route('/api/hosts/<hostname>/settings/ack', methods=['POST'])
 @token_required(['LinuxHost', 'access_as_user', 'FullAccess'], required_group_ids=[LINUX_HOST_GROUP_ID])
@@ -1534,8 +1543,9 @@ def acknowledge_host_settings(hostname):
 
         return jsonify({'Hostname': hostname, 'SettingsVersion': settings_version}), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except Exception:
+        logger.exception("Failed to record the applied settings version for %s.", hostname)
+        return jsonify({'error': 'Unable to record the applied settings version.'}), 500
 
 # ===============================
 # Main
