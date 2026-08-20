@@ -3,8 +3,8 @@ gunicorn
 Werkzeug==2.2.2
 azure-monitor-opentelemetry==1.8.7
 requests==2.26.0
-msal==1.31.0
+msal==1.37.0
 Flask-Session==0.8.0
 Flask-WTF==1.2.1
-pyjwt==2.9.0
-cryptography==44.0.1
+pyjwt==2.13.0
+cryptography==50.0.0

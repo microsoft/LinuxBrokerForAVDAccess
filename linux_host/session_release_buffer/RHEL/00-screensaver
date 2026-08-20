@@ -1,7 +1,18 @@
-# Disable screen saver
+# Disable the GNOME screen saver and screen lock on brokered Linux hosts.
+#
+# A locked GNOME greeter inside an xrdp/xpra session frequently cannot be unlocked
+# after a reconnect, which strands the host's lease until it is released manually.
+
+# Never treat the session as idle, so the screen saver never activates.
 [org/gnome/desktop/session]
 idle-delay=uint32 0
 
+# Do not lock when the screen saver or a blank screen does activate.
 [org/gnome/desktop/screensaver]
-lock-enabled=true
+lock-enabled=false
 lock-delay=uint32 0
+
+# Remove the lock screen entirely, including the Super+L shortcut and the
+# "Lock" entry in the system menu. Without this, a user can still lock manually.
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true

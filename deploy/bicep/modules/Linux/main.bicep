@@ -34,9 +34,12 @@ param OSVersion string
 @description('Root URL the host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds.')
 param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
 
+@description('Disable the GNOME screen saver and screen lock on RHEL hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control. Has no effect on the Ubuntu server image, which has no desktop.')
+param disableScreenLock bool = true
+
 var normalizedScriptSourceRoot = endsWith(scriptSourceRoot, '/') ? take(scriptSourceRoot, length(scriptSourceRoot) - 1) : scriptSourceRoot
 var bootstrapArgs = '"${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
-var bootstrapEnv = 'LINUXBROKER_SCRIPT_SOURCE_ROOT="${normalizedScriptSourceRoot}"'
+var bootstrapEnv = 'LINUXBROKER_SCRIPT_SOURCE_ROOT="${normalizedScriptSourceRoot}" LINUXBROKER_DISABLE_SCREEN_LOCK="${disableScreenLock ? 'true' : 'false'}"'
 
 var vmNames = [for i in range(1, numberOfVMs): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
 var adminCredentials = authType == 'Password' ? {
