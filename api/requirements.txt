@@ -1,6 +1,6 @@
 Flask==2.2.2
 gunicorn
-Werkzeug==2.2.2
+Werkzeug==3.1.6
 azure-monitor-opentelemetry==1.8.7
 azure-identity==1.17.1
 azure-mgmt-compute==33.0.0
