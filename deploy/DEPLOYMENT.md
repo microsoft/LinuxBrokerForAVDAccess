@@ -92,6 +92,7 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `linuxHostVmSize`: Linux host VM size.
 - `avdVmSize`: AVD host VM size.
 - `linuxHostOsVersion`: Linux image SKU.
+- `linuxHostDisableScreenLock`: `true` or `false`. Disables the GNOME screen saver and screen lock on RHEL hosts. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - `azureCloudName`: `AzurePublic`, `AzureUSGovernment`, or `AzureCustom`. See [Choosing The Target Azure Cloud](#choosing-the-target-azure-cloud).
 - `scriptSourceRoot`: root URL the Linux host bootstrap scripts are downloaded from.
 - `domainName`: domain suffix used by the broker when connecting to Linux hosts.
@@ -210,6 +211,72 @@ azd env set linuxHostSshPrivateKey $privateKey
 
 If you prefer to be prompted locally, leave both values unset and run `azd up` from an interactive terminal.
 
+## Linux Host Screen Lock
+
+RHEL hosts install the `Server with GUI` group, so they run a GNOME desktop. By default the
+bootstrap script disables the GNOME screen saver and screen lock on those hosts.
+
+This is on by default because a locked GNOME greeter inside an xrdp or xpra session frequently
+cannot be unlocked after a reconnect. When that happens the user cannot get back into the
+desktop, and the host stays leased until the lease is released manually.
+
+The configuration is applied through a dconf system database:
+
+| File on the host | Written by |
+| --- | --- |
+| `/etc/dconf/db/local.d/00-screensaver` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
+| `/etc/dconf/db/local.d/locks/screensaver` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
+| `/etc/dconf/profile/user` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
+
+These files were previously static and downloaded during bootstrap. They are now generated from
+the fleet-wide host settings profile, which is what makes the values editable in the portal after
+deployment. The bootstrap seeds that profile once, and the release agent keeps each host converged
+to it from then on. See [Linux Host Settings](../README.md#linux-host-settings).
+
+It sets `idle-delay` to `0` so the session never goes idle, sets `lock-enabled` to `false` so
+the screen saver never locks, and sets `disable-lock-screen` to `true` so the lock screen is
+removed entirely, including the `Super+L` shortcut and the `Lock` entry in the system menu. The
+lock list prevents users from changing any of those keys back.
+
+RHEL does not ship `/etc/dconf/profile/user`, and a system dconf database is only read when a
+profile references it, so the bootstrap creates that file with `system-db:local`. An existing
+profile is preserved and only appended to.
+
+### Keeping the lock screen
+
+Set the parameter to `false` if you need to satisfy an idle screen lock control such as a DISA
+STIG or CIS benchmark:
+
+```powershell
+azd env set linuxHostDisableScreenLock false
+```
+
+The bootstrap then seeds the profile with the lock screen left enabled. You can also set
+`LINUXBROKER_DISABLE_SCREEN_LOCK=false` in the environment if you run `Configure-RHEL7-Host.sh`,
+`Configure-RHEL8-Host.sh`, or `Configure-RHEL9-Host.sh` by hand.
+
+Because the values are part of the host settings profile, this posture can also be changed after
+deployment from **Host Settings** in the portal, without redeploying anything.
+
+This setting has no effect on the Ubuntu 24.04 image. That target uses the `server` SKU and does
+not install a desktop environment, so there is no GNOME screen lock to disable.
+
+### Verifying on a host
+
+```bash
+# The system database was built and is referenced by the profile.
+ls -l /etc/dconf/db/local
+grep system-db /etc/dconf/profile/user
+
+# The effective values, from inside a desktop session.
+gsettings get org.gnome.desktop.session idle-delay
+gsettings get org.gnome.desktop.screensaver lock-enabled
+gsettings get org.gnome.desktop.lockdown disable-lock-screen
+```
+
+Expect `uint32 0`, `false`, and `true`. If `gsettings` still reports the distribution defaults,
+check that `/etc/dconf/profile/user` contains `system-db:local` and rerun `sudo dconf update`.
+
 ## Quick Start
 
 From the repository root:
@@ -270,6 +337,7 @@ Important deployment characteristics:
 - The frontend and API App Services enable App Service health checks on `/health`.
 - The frontend and API apps are instrumented with Azure Monitor OpenTelemetry and receive `APPLICATIONINSIGHTS_CONNECTION_STRING` and `OTEL_SERVICE_NAME` through app settings.
 - Linux host auth defaults to `SSH`.
+- RHEL hosts have the GNOME screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - Key Vault stores `db-password` and `linux-host`.
 - The API app receives Key Vault Secrets User access so it can read those secrets at runtime.
 
@@ -485,6 +553,14 @@ Admin consent was likely not granted yet for the frontend delegated permissions 
 ### Linux hosts were provisioned but do not appear in SQL
 
 Rerun [Post-Provision.ps1](Post-Provision.ps1) after confirming SQL connectivity. Linux host SQL registration is intentionally limited to Linux hosts only.
+
+### A RHEL session is stuck on a lock screen that will not accept the password
+
+The GNOME lock screen inside an xrdp or xpra session often cannot be unlocked after a reconnect. Confirm the screen lock configuration actually applied on the host using the commands in [Linux Host Screen Lock](#linux-host-screen-lock). The most common cause is a missing `system-db:local` line in `/etc/dconf/profile/user`, which makes GNOME ignore the settings even though the files under `/etc/dconf/db/local.d/` are present.
+
+### The Custom Script Extension failed on the screen lock step
+
+The bootstrap fails deliberately if the host settings cannot be applied, so the problem is visible instead of silently leaving the lock screen enabled. Check that `scriptSourceRoot` is reachable from the host so `apply-host-settings.sh` can be downloaded, or set `linuxHostDisableScreenLock` to `false` to seed the profile with the lock screen left enabled.
 
 ## Related Files
 

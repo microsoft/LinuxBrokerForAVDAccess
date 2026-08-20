@@ -1,22 +1,38 @@
-<!-- templates/profile.html -->
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
 {% block title %}Profile - Linux Broker Management Portal{% endblock %}
 
 {% block content %}
-<h2>User Profile</h2>
-<table class="table">
-    <tr>
-        <th>Name:</th>
-        <td>{{ user.get('name', 'N/A') }}</td>
-    </tr>
-    <tr>
-        <th>Email:</th>
-        <td>{{ user.get('preferred_username', 'N/A') }}</td>
-    </tr>
-    <tr>
-        <th>Object ID:</th>
-        <td>{{ user.get('oid', 'N/A') }}</td>
-    </tr>
-</table>
+
+<div class="lb-page-header">
+  <div>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      {{ ui.icon('person', 22, 'text-body-secondary') }} Your profile
+    </h1>
+    <p class="text-body-secondary mb-0">Details from your signed-in Microsoft Entra ID account.</p>
+  </div>
+  <div class="lb-page-header-actions">
+    <a href="{{ url_for('logout') }}" class="btn btn-outline-secondary btn-sm">
+      {{ ui.icon('box-arrow-right', 15) }}<span class="ms-1">Sign out</span>
+    </a>
+  </div>
+</div>
+
+<div class="lb-card lb-form-card p-4">
+  <dl class="lb-detail-list row mb-0">
+    <dt class="col-sm-4">Name</dt>
+    <dd class="col-sm-8">{{ ui.value_or_dash(user.get('name')) }}</dd>
+
+    <dt class="col-sm-4">Email</dt>
+    <dd class="col-sm-8">{{ ui.value_or_dash(user.get('preferred_username')) }}</dd>
+
+    <dt class="col-sm-4">Object ID</dt>
+    <dd class="col-sm-8 lb-mono">{{ ui.value_or_dash(user.get('oid')) }}</dd>
+
+    <dt class="col-sm-4 mb-0">Tenant ID</dt>
+    <dd class="col-sm-8 lb-mono mb-0">{{ ui.value_or_dash(user.get('tid')) }}</dd>
+  </dl>
+</div>
+
 {% endblock %}

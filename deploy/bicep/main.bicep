@@ -135,6 +135,9 @@ param linuxHostSshPublicKey string = ''
 @description('Linux host OS image SKU.')
 param linuxHostOsVersion string = '24_04-lts'
 
+@description('Disable the GNOME screen saver and screen lock on RHEL hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control. Has no effect on the Ubuntu server image, which has no desktop.')
+param linuxHostDisableScreenLock bool = true
+
 @description('AVD host pool name.')
 param avdHostPoolName string = ''
 
@@ -211,6 +214,7 @@ module resources 'main.resources.bicep' = {
     linuxHostAuthType: linuxHostAuthType
     linuxHostSshPublicKey: linuxHostSshPublicKey
     linuxHostOsVersion: linuxHostOsVersion
+    linuxHostDisableScreenLock: linuxHostDisableScreenLock
     avdHostPoolName: avdHostPoolName
     avdSessionHostCount: avdSessionHostCount
     avdMaxSessionLimit: avdMaxSessionLimit

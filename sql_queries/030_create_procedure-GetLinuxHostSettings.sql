@@ -12,6 +12,7 @@ BEGIN
         IdleTimeoutSeconds,
         IdleWarningSeconds,
         ScreenLockEnabled,
+        DisableLockScreen,
         ScreenIdleDelaySeconds,
         ScreenLockDelaySeconds,
         ScreenLockSettingsLocked,

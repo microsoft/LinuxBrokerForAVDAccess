@@ -11,6 +11,7 @@ CREATE PROCEDURE [dbo].[UpdateLinuxHostSettings]
     @IdleTimeoutSeconds INT = NULL,
     @IdleWarningSeconds INT = NULL,
     @ScreenLockEnabled BIT = NULL,
+    @DisableLockScreen BIT = NULL,
     @ScreenIdleDelaySeconds INT = NULL,
     @ScreenLockDelaySeconds INT = NULL,
     @ScreenLockSettingsLocked BIT = NULL,
@@ -27,6 +28,7 @@ BEGIN
         IdleTimeoutSeconds = COALESCE(@IdleTimeoutSeconds, IdleTimeoutSeconds),
         IdleWarningSeconds = COALESCE(@IdleWarningSeconds, IdleWarningSeconds),
         ScreenLockEnabled = COALESCE(@ScreenLockEnabled, ScreenLockEnabled),
+        DisableLockScreen = COALESCE(@DisableLockScreen, DisableLockScreen),
         ScreenIdleDelaySeconds = COALESCE(@ScreenIdleDelaySeconds, ScreenIdleDelaySeconds),
         ScreenLockDelaySeconds = COALESCE(@ScreenLockDelaySeconds, ScreenLockDelaySeconds),
         ScreenLockSettingsLocked = COALESCE(@ScreenLockSettingsLocked, ScreenLockSettingsLocked),
@@ -42,6 +44,7 @@ BEGIN
          OR COALESCE(@IdleTimeoutSeconds, IdleTimeoutSeconds) <> IdleTimeoutSeconds
          OR COALESCE(@IdleWarningSeconds, IdleWarningSeconds) <> IdleWarningSeconds
          OR COALESCE(@ScreenLockEnabled, ScreenLockEnabled) <> ScreenLockEnabled
+         OR COALESCE(@DisableLockScreen, DisableLockScreen) <> DisableLockScreen
          OR COALESCE(@ScreenIdleDelaySeconds, ScreenIdleDelaySeconds) <> ScreenIdleDelaySeconds
          OR COALESCE(@ScreenLockDelaySeconds, ScreenLockDelaySeconds) <> ScreenLockDelaySeconds
          OR COALESCE(@ScreenLockSettingsLocked, ScreenLockSettingsLocked) <> ScreenLockSettingsLocked

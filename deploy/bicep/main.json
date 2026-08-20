@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "10340234432767658268"
+      "templateHash": "18215410845754632442"
     }
   },
   "parameters": {
@@ -287,6 +287,13 @@
         "description": "Linux host OS image SKU."
       }
     },
+    "linuxHostDisableScreenLock": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Disable the GNOME screen saver and screen lock on RHEL hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control. Has no effect on the Ubuntu server image, which has no desktop."
+      }
+    },
     "avdHostPoolName": {
       "type": "string",
       "defaultValue": "",
@@ -467,6 +474,9 @@
           "linuxHostOsVersion": {
             "value": "[parameters('linuxHostOsVersion')]"
           },
+          "linuxHostDisableScreenLock": {
+            "value": "[parameters('linuxHostDisableScreenLock')]"
+          },
           "avdHostPoolName": {
             "value": "[parameters('avdHostPoolName')]"
           },
@@ -490,7 +500,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "8084574638949372807"
+              "templateHash": "8583720927426092955"
             }
           },
           "parameters": {
@@ -666,6 +676,13 @@
                 "9-LVM",
                 "24_04-lts"
               ]
+            },
+            "linuxHostDisableScreenLock": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Disable the GNOME screen saver and screen lock on RHEL hosts. Set to false to keep the lock screen."
+              }
             },
             "avdHostPoolName": {
               "type": "string",
@@ -2308,6 +2325,9 @@
                   },
                   "scriptSourceRoot": {
                     "value": "[parameters('scriptSourceRoot')]"
+                  },
+                  "disableScreenLock": {
+                    "value": "[parameters('linuxHostDisableScreenLock')]"
                   }
                 },
                 "template": {
@@ -2317,7 +2337,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "2539702079136955532"
+                      "templateHash": "17206168761019900085"
                     }
                   },
                   "parameters": {
@@ -2387,6 +2407,13 @@
                       "metadata": {
                         "description": "Root URL the host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds."
                       }
+                    },
+                    "disableScreenLock": {
+                      "type": "bool",
+                      "defaultValue": true,
+                      "metadata": {
+                        "description": "Disable the GNOME screen saver and screen lock on RHEL hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control. Has no effect on the Ubuntu server image, which has no desktop."
+                      }
                     }
                   },
                   "variables": {
@@ -2399,7 +2426,7 @@
                     ],
                     "normalizedScriptSourceRoot": "[if(endsWith(parameters('scriptSourceRoot'), '/'), take(parameters('scriptSourceRoot'), sub(length(parameters('scriptSourceRoot')), 1)), parameters('scriptSourceRoot'))]",
                     "bootstrapArgs": "[format('\"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]",
-                    "bootstrapEnv": "[format('LINUXBROKER_SCRIPT_SOURCE_ROOT=\"{0}\"', variables('normalizedScriptSourceRoot'))]",
+                    "bootstrapEnv": "[format('LINUXBROKER_SCRIPT_SOURCE_ROOT=\"{0}\" LINUXBROKER_DISABLE_SCREEN_LOCK=\"{1}\"', variables('normalizedScriptSourceRoot'), if(parameters('disableScreenLock'), 'true', 'false'))]",
                     "adminCredentials": "[if(equals(parameters('authType'), 'Password'), createObject('adminPassword', parameters('adminPassword')), createObject())]",
                     "linuxConfiguration": "[if(equals(parameters('authType'), 'SSH'), createObject('disablePasswordAuthentication', true(), 'ssh', createObject('publicKeys', createArray(createObject('path', format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername')), 'keyData', parameters('sshPublicKey'))))), createObject('disablePasswordAuthentication', false()))]",
                     "imageConfigs": {

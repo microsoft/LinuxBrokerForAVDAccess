@@ -195,6 +195,18 @@ def register_route_vm_management(app):
                 ignore_dates = request.form.get('ignore_dates')
                 ignore_limit = request.form.get('ignore_limit')
 
+                # Preserve exactly what the operator typed. The values below are
+                # rewritten into the API's MM/DD/YYYY (or "null") form, and the
+                # route then redirects, so without this the filter bar would come
+                # back blank on the following GET.
+                session['vm_history_filters'] = {
+                    "startdate": startdate or "",
+                    "enddate": enddate or "",
+                    "limit": limit if limit and limit != "null" else "",
+                    "ignore_dates": bool(ignore_dates),
+                    "ignore_limit": bool(ignore_limit),
+                }
+
                 if ignore_limit:
                     limit = "null"
 
@@ -257,6 +269,13 @@ def register_route_vm_management(app):
         else:
             try:
                 vm_history = session.get('vm_history', [])
+                filters = session.get('vm_history_filters') or {
+                    "startdate": "",
+                    "enddate": "",
+                    "limit": 20,
+                    "ignore_dates": False,
+                    "ignore_limit": False,
+                }
                 page = max(1, int(request.args.get('page', 1)))
                 per_page = max(1, int(request.args.get('per_page', 10)))
 
@@ -273,7 +292,9 @@ def register_route_vm_management(app):
                                        vm_history=vm_history_paginated, 
                                        page=page, 
                                        total_pages=total_pages,
-                                       per_page=per_page)
+                                       per_page=per_page,
+                                       total_items=total_items,
+                                       filters=filters)
             except Exception as e:
                 flash("An unexpected error occurred while displaying VM history.", "danger")
                 logger.error(f"Unexpected error in vm_history GET: {e}")

@@ -1419,7 +1419,8 @@ def update_host_settings():
                     "@GracePeriodSeconds = %s, @ReconcileIntervalSeconds = %s, "
                     "@WatcherDebounceSeconds = %s, @WatcherSettleSeconds = %s, "
                     "@IdleTimeoutSeconds = %s, @IdleWarningSeconds = %s, "
-                    "@ScreenLockEnabled = %s, @ScreenIdleDelaySeconds = %s, "
+                    "@ScreenLockEnabled = %s, @DisableLockScreen = %s, "
+                    "@ScreenIdleDelaySeconds = %s, "
                     "@ScreenLockDelaySeconds = %s, @ScreenLockSettingsLocked = %s, "
                     "@UpdatedBy = %s",
                     (
@@ -1430,6 +1431,7 @@ def update_host_settings():
                         settings.get('IdleTimeoutSeconds'),
                         settings.get('IdleWarningSeconds'),
                         settings.get('ScreenLockEnabled'),
+                        settings.get('DisableLockScreen'),
                         settings.get('ScreenIdleDelaySeconds'),
                         settings.get('ScreenLockDelaySeconds'),
                         settings.get('ScreenLockSettingsLocked'),

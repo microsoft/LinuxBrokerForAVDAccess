@@ -81,8 +81,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 3. **Manage Scaling Rules**:
    - **Create/Update/Delete Scaling Rules**: Adjust scaling rules to control the minimum and maximum number of VMs, scale-up/down ratios, and increments.
 4. **Manage Linux Host Settings**:
-   - **Edit the fleet-wide profile**: Change the reconnect grace period, reconcile interval, watcher timings, idle session timeout, and screen lock policy without editing or redeploying any script.
-   - **Apply Now**: Optionally push the profile to hosts immediately instead of waiting for them to pick it up.
+   - **Edit the fleet-wide profile**: Change the reconnect grace period, reconcile interval, watcher timings, idle session timeout, and screen lock policy without editing or redeploying any script.   - **Apply Now**: Optionally push the profile to hosts immediately instead of waiting for them to pick it up.
    - **Review drift**: See which hosts have applied the current settings version.
 5. **Monitor System**:
    - **View VM Details**: Access detailed information about VMs.
@@ -143,7 +142,7 @@ These scripts:
 - **Install XRDP and xpra**: Set up XRDP for full desktop access (RDP) and xpra for application virtualization, enabling users to connect via AVD.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the timer-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.
-- **Install the Host Settings Agent**: Installs `apply-host-settings.sh` and seeds the default settings profile, so screen lock policy and session timings are applied consistently on every supported distribution rather than only on RHEL 8.
+- **Install the Host Settings Agent**: Installs `apply-host-settings.sh` and seeds the settings profile, so screen lock policy and session timings are applied consistently on every supported distribution rather than only on RHEL 8. `LINUXBROKER_DISABLE_SCREEN_LOCK` still chooses the screen lock posture that is seeded; from then on the values are managed from the portal.
 
 ## Additional Details
 
@@ -175,12 +174,15 @@ Administrators manage host behavior from the **Host Settings** page in the Servi
 | Watcher settle | 2 s | 0–60 | Pause after a `logind` signal before reconciling |
 | Idle timeout | 0 (disabled) | 0, or 300–86400 | Inactivity before a connected user is disconnected |
 | Idle warning lead time | 120 s | 0–900 | On-screen warning before the idle timeout, must be less than the timeout |
-| Screen lock enabled | true | boolean | Whether the screen locks when the screensaver activates |
+| Remove the lock screen | true | boolean | Disables the Super+L shortcut and the Lock menu entry |
+| Screen lock enabled | false | boolean | Whether the screen locks when the screensaver activates |
 | Screen blank delay | 0 (never) | 0–86400 | Inactivity before the screen blanks |
 | Screen lock delay | 0 (immediate) | 0–86400 | Delay between blanking and locking |
 | Lock screen settings | true | boolean | Applies dconf locks so users cannot override the screen lock values |
 
-The defaults match the values that were previously hardcoded, so adopting this feature changes no behavior until an administrator edits the profile.
+The session lifecycle defaults match the values that were previously hardcoded, so adopting this feature changes no behavior until an administrator edits the profile.
+
+The screen lock defaults preserve the posture set by `LINUXBROKER_DISABLE_SCREEN_LOCK`: the lock screen is removed, because a locked GNOME greeter inside an xrdp session frequently cannot be unlocked after a reconnect, which strands the host's lease. That environment variable still chooses the posture seeded at provisioning time; from then on the values are managed from the portal. Set **Screen lock enabled** on and **Remove the lock screen** off to satisfy a STIG or CIS idle-lock control.
 
 #### How settings reach the hosts
 
@@ -256,6 +258,8 @@ azd up
 For existing environments that need in-place rollout instead of new-environment provisioning, use [deploy/Migrate-ExistingEnvironment.ps1](deploy/Migrate-ExistingEnvironment.ps1) from the `deploy/` directory. `azd up` remains the supported greenfield path.
 
 The deployment targets Azure commercial by default. Set `azureCloudName` to `AzureUSGovernment` or `AzureCustom` to deploy elsewhere; commercial and Government resolve their endpoints automatically, while custom and sovereign clouds require their own authority, Graph, STS, and App Service FQDNs. Air-gapped environments should also set `scriptSourceRoot` to a reachable mirror of this repository, because the Linux hosts download their agent scripts from it during bootstrap.
+
+The Service Management Portal serves all of its front-end assets (Bootstrap, stylesheet, scripts and icons) from its own container under `front_end/static/`. It makes no requests to a public CDN, so the portal renders correctly in Government, sovereign and air-gapped environments where outbound internet access is blocked.
 
 The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps.
 

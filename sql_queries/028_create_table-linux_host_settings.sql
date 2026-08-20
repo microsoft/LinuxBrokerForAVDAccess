@@ -25,8 +25,15 @@ BEGIN
         IdleTimeoutSeconds INT NOT NULL CONSTRAINT DF_LinuxHostSettings_IdleTimeout DEFAULT (0),
         IdleWarningSeconds INT NOT NULL CONSTRAINT DF_LinuxHostSettings_IdleWarning DEFAULT (120),
 
-        -- Screen lock / screensaver policy pushed to dconf
-        ScreenLockEnabled BIT NOT NULL CONSTRAINT DF_LinuxHostSettings_ScreenLockEnabled DEFAULT (1),
+        -- Screen lock / screensaver policy pushed to dconf.
+        --
+        -- The defaults deliberately disable the lock screen. A locked GNOME greeter inside an
+        -- xrdp/xpra session frequently cannot be unlocked after a reconnect, which strands the
+        -- host's lease. DisableLockScreen additionally removes the Super+L shortcut and the
+        -- Lock entry in the system menu, so a user cannot lock manually either. Set both to
+        -- the opposite values to satisfy a STIG or CIS idle-lock control.
+        ScreenLockEnabled BIT NOT NULL CONSTRAINT DF_LinuxHostSettings_ScreenLockEnabled DEFAULT (0),
+        DisableLockScreen BIT NOT NULL CONSTRAINT DF_LinuxHostSettings_DisableLockScreen DEFAULT (1),
         ScreenIdleDelaySeconds INT NOT NULL CONSTRAINT DF_LinuxHostSettings_ScreenIdleDelay DEFAULT (0),
         ScreenLockDelaySeconds INT NOT NULL CONSTRAINT DF_LinuxHostSettings_ScreenLockDelay DEFAULT (0),
         ScreenLockSettingsLocked BIT NOT NULL CONSTRAINT DF_LinuxHostSettings_ScreenLockLocked DEFAULT (1),
@@ -71,11 +78,12 @@ BEGIN
         IdleTimeoutSeconds,
         IdleWarningSeconds,
         ScreenLockEnabled,
+        DisableLockScreen,
         ScreenIdleDelaySeconds,
         ScreenLockDelaySeconds,
         ScreenLockSettingsLocked,
         SettingsVersion
     )
-    VALUES ('Global', 1200, 60, 10, 2, 0, 120, 1, 0, 0, 1, 1);
+    VALUES ('Global', 1200, 60, 10, 2, 0, 120, 0, 1, 0, 0, 1, 1);
 END;
 GO

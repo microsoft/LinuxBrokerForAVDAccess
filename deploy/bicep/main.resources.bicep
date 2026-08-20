@@ -71,6 +71,10 @@ param linuxHostSshPublicKey string = ''
   '24_04-lts'
 ])
 param linuxHostOsVersion string = '24_04-lts'
+
+@description('Disable the GNOME screen saver and screen lock on RHEL hosts. Set to false to keep the lock screen.')
+param linuxHostDisableScreenLock bool = true
+
 param avdHostPoolName string = ''
 param avdSessionHostCount int = 0
 param avdMaxSessionLimit int = 5
@@ -478,6 +482,7 @@ module linuxHosts 'modules/Linux/main.bicep' = if (deployLinuxHosts && linuxHost
     linuxBrokerApiBaseUrl: frontendApiBaseUrl
     linuxBrokerApiClientId: apiClientId
     scriptSourceRoot: scriptSourceRoot
+    disableScreenLock: linuxHostDisableScreenLock
   }
 }
 

@@ -77,7 +77,12 @@ LINUX_HOST_SETTING_BOUNDS = {
 }
 
 LINUX_HOST_SETTING_BOOLEANS = {
-    'ScreenLockEnabled': True,
+    # Defaults disable the lock screen. A locked GNOME greeter inside an xrdp/xpra session
+    # frequently cannot be unlocked after a reconnect, which strands the host's lease.
+    # DisableLockScreen also removes the Super+L shortcut and the Lock menu entry, so a user
+    # cannot lock manually either.
+    'ScreenLockEnabled': False,
+    'DisableLockScreen': True,
     'ScreenLockSettingsLocked': True,
 }
 

@@ -74,7 +74,8 @@ INTEGER_SETTINGS=(
 )
 
 BOOLEAN_SETTINGS=(
-    "ScreenLockEnabled|true"
+    "ScreenLockEnabled|false"
+    "DisableLockScreen|true"
     "ScreenLockSettingsLocked|true"
 )
 
@@ -286,33 +287,55 @@ apply_dconf_settings() {
     fi
 
     # Without a profile that references the local system database, the keyfile below is
-    # never consulted. Earlier revisions installed the keyfile but not the profile.
-    content="user-db:user"$'\n'"system-db:local"
+    # never consulted, and RHEL does not ship /etc/dconf/profile/user at all. An existing
+    # profile is appended to rather than replaced, so a host with its own dconf policy keeps
+    # it.
     mkdir -p "$DCONF_PROFILE_DIRECTORY"
-    if write_if_changed "$DCONF_PROFILE_FILE" "$content" 644; then
-        log "Wrote dconf profile $DCONF_PROFILE_FILE."
+    if [ ! -s "$DCONF_PROFILE_FILE" ]; then
+        printf 'user-db:user\nsystem-db:local\n' > "$DCONF_PROFILE_FILE"
+        chmod 644 "$DCONF_PROFILE_FILE"
+        log "Created dconf profile $DCONF_PROFILE_FILE."
+        dconf_changed=0
+    elif ! grep -qx 'system-db:local' "$DCONF_PROFILE_FILE"; then
+        # Guarantee a trailing newline before appending to an existing profile.
+        sed -i -e '$a\' "$DCONF_PROFILE_FILE"
+        printf 'system-db:local\n' >> "$DCONF_PROFILE_FILE"
+        chmod 644 "$DCONF_PROFILE_FILE"
+        log "Added system-db:local to existing dconf profile $DCONF_PROFILE_FILE."
         dconf_changed=0
     fi
 
     mkdir -p "$DCONF_LOCAL_DIRECTORY" "$DCONF_LOCKS_DIRECTORY"
 
     content="# Managed by apply-host-settings.sh. Manual edits are overwritten."$'\n'
+    content+="#"$'\n'
+    content+="# A locked GNOME greeter inside an xrdp/xpra session frequently cannot be unlocked"$'\n'
+    content+="# after a reconnect, which strands the host's lease. That is why the shipped defaults"$'\n'
+    content+="# disable the lock screen entirely rather than merely deferring it."$'\n'
+    content+=$'\n'
     content+="[org/gnome/desktop/session]"$'\n'
     content+="idle-delay=uint32 ${SETTING_VALUES[ScreenIdleDelaySeconds]}"$'\n'
     content+=$'\n'
     content+="[org/gnome/desktop/screensaver]"$'\n'
     content+="lock-enabled=${SETTING_VALUES[ScreenLockEnabled]}"$'\n'
-    content+="lock-delay=uint32 ${SETTING_VALUES[ScreenLockDelaySeconds]}"
+    content+="lock-delay=uint32 ${SETTING_VALUES[ScreenLockDelaySeconds]}"$'\n'
+    content+=$'\n'
+    # Removes the lock screen entirely, including the Super+L shortcut and the Lock entry in
+    # the system menu. Without this a user can still lock manually.
+    content+="[org/gnome/desktop/lockdown]"$'\n'
+    content+="disable-lock-screen=${SETTING_VALUES[DisableLockScreen]}"
     if write_if_changed "$DCONF_SCREENSAVER_FILE" "$content" 644; then
         log "Updated screen lock policy in $DCONF_SCREENSAVER_FILE."
         dconf_changed=0
     fi
 
     if [ "${SETTING_VALUES[ScreenLockSettingsLocked]}" = "true" ]; then
+        # Every key written above is listed, so users cannot override any of them.
         locks_content="# Managed by apply-host-settings.sh. Manual edits are overwritten."$'\n'
         locks_content+="/org/gnome/desktop/session/idle-delay"$'\n'
         locks_content+="/org/gnome/desktop/screensaver/lock-enabled"$'\n'
-        locks_content+="/org/gnome/desktop/screensaver/lock-delay"
+        locks_content+="/org/gnome/desktop/screensaver/lock-delay"$'\n'
+        locks_content+="/org/gnome/desktop/lockdown/disable-lock-screen"
         if write_if_changed "$DCONF_SCREENSAVER_LOCKS_FILE" "$locks_content" 644; then
             log "Locked screen lock keys so users cannot override them."
             dconf_changed=0
