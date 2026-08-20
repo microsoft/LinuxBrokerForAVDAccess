@@ -1,40 +1,244 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 
-{% block title %}Home - Linux Broker Management Portal{% endblock %}
+{% block title %}Dashboard - Linux Broker Management Portal{% endblock %}
 
 {% block content %}
-<div class="jumbotron text-center">
-    <h1 class="display-4">Welcome to the Linux Broker Management Portal</h1>
-    <p class="lead">Manage your virtual machines and scaling rules efficiently.</p>
-    <hr class="my-4">
-    
-    {% if session.get('user') %}
-        <p>Get started by selecting one of the management sections below.</p>
+
+{% if not authenticated %}
+
+  {# ---------------------------------------------------------- signed out #}
+  <div class="lb-card p-5 text-center mx-auto" style="max-width: 640px;">
+    {{ ui.icon('server', 44, 'text-body-secondary opacity-50') }}
+    <h1 class="h3 fw-semibold mt-3 mb-2">Linux Broker Management Portal</h1>
+    <p class="text-body-secondary mb-4">
+      Broker Linux hosts to Azure Virtual Desktop sessions, and manage the pool's
+      autoscaling rules. Sign in with your organizational account to continue.
+    </p>
+    <a href="{{ url_for('login') }}" class="btn btn-primary btn-lg">
+      {{ ui.icon('box-arrow-right', 18) }}<span class="ms-2">Sign in</span>
+    </a>
+  </div>
+
+{% else %}
+
+  <div class="lb-page-header">
+    <div>
+      <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+        {{ ui.icon('gauge', 22, 'text-body-secondary') }} Pool overview
+      </h1>
+      <p class="text-body-secondary mb-0">
+        Current state of the brokered Linux host pool.
+      </p>
+    </div>
+    <div class="lb-page-header-actions align-items-center">
+      <div class="form-check form-switch mb-0 me-2">
+        <input class="form-check-input" type="checkbox" role="switch"
+               id="autorefresh" data-lb-autorefresh="30">
+        <label class="form-check-label small text-body-secondary" for="autorefresh">
+          Auto refresh <span data-lb-autorefresh-status>Off</span>
+        </label>
+      </div>
+      <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">
+        {{ ui.icon('refresh', 15) }}<span class="ms-1">Refresh</span>
+      </a>
+      <a href="{{ url_for('checkout_vm') }}" class="btn btn-primary btn-sm">
+        {{ ui.icon('person', 15) }}<span class="ms-1">Checkout VM</span>
+      </a>
+    </div>
+  </div>
+
+  {% if api_error or stats is none %}
+
+    <div class="alert alert-warning d-flex align-items-start gap-2" role="alert">
+      {{ ui.icon('alert-triangle', 18) }}
+      <div>
+        <strong>Pool data unavailable.</strong>
+        The broker API could not be reached, so the counters below cannot be shown.
+        Scaling rules and VM management may still work.
+      </div>
     </div>
 
-    <div class="row">
-        <div class="col-md-6">
-            <div class="card">
-                <div class="card-body text-center">
-                    <h5 class="card-title">VM Management</h5>
-                    <p class="card-text">View, add, update, and manage your virtual machines.</p>
-                    <a href="{{ url_for('view_all_vms') }}" class="btn btn-primary">Go to VM Management</a>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-6">
-            <div class="card">
-                <div class="card-body text-center">
-                    <h5 class="card-title">Scaling Management</h5>
-                    <p class="card-text">View, create, and manage your scaling rules and activity logs.</p>
-                    <a href="{{ url_for('view_all_rules') }}" class="btn btn-primary">Go to Scaling Management</a>
-                </div>
-            </div>
-        </div>
+  {% else %}
+
+    {# ------------------------------------------------------- stat cards #}
+    <div class="row g-3 mb-4">
+      <div class="col-6 col-lg-3">
+        <a class="lb-stat lb-stat-total" href="{{ url_for('view_all_vms') }}">
+          <span class="lb-stat-label">{{ ui.icon('server', 13) }} Total VMs</span>
+          <span class="lb-stat-value">{{ stats.total }}</span>
+          <span class="lb-stat-hint">{{ stats.powered_on }} powered on &middot; {{ stats.powered_off }} off</span>
+        </a>
+      </div>
+      <div class="col-6 col-lg-3">
+        <a class="lb-stat lb-stat-available" href="{{ url_for('view_all_vms') }}">
+          <span class="lb-stat-label">{{ ui.icon('check-circle', 13) }} Ready</span>
+          <span class="lb-stat-value">{{ stats.ready }}</span>
+          <span class="lb-stat-hint">On, reachable and unassigned</span>
+        </a>
+      </div>
+      <div class="col-6 col-lg-3">
+        <a class="lb-stat lb-stat-inuse" href="{{ url_for('view_all_vms') }}">
+          <span class="lb-stat-label">{{ ui.icon('person', 13) }} Checked out</span>
+          <span class="lb-stat-value">{{ stats.checked_out }}</span>
+          <span class="lb-stat-hint">{{ stats.utilization }}% of the pool in use</span>
+        </a>
+      </div>
+      <div class="col-6 col-lg-3">
+        <a class="lb-stat {{ 'lb-stat-attention' if stats.attention else 'lb-stat-muted' }}"
+           href="{{ url_for('view_all_vms') }}">
+          <span class="lb-stat-label">{{ ui.icon('alert-triangle', 13) }} Needs attention</span>
+          <span class="lb-stat-value">{{ stats.attention }}</span>
+          <span class="lb-stat-hint">{{ stats.unreachable }} unreachable &middot; {{ stats.maintenance }} maintenance</span>
+        </a>
+      </div>
     </div>
-    {% else %}
-        <p>Please log in to access all features of the Linux Broker Management Portal.</p>
-        <a href="{{ url_for('login') }}" class="btn btn-primary">Login</a>
+
+    <div class="row g-3">
+
+      {# ---------------------------------------------------- composition #}
+      <div class="col-12 col-xl-6">
+        <div class="lb-card h-100">
+          <div class="lb-toolbar">
+            <strong class="d-flex align-items-center gap-2">
+              {{ ui.icon('activity', 16, 'text-body-secondary') }} Pool composition
+            </strong>
+            <span class="text-body-secondary small">{{ stats.total }} VMs</span>
+          </div>
+          <div class="p-3">
+            {% if stats.total %}
+              <div class="lb-util-bar mb-3" role="img"
+                   aria-label="{{ stats.checked_out }} checked out, {{ stats.available }} available, {{ stats.released }} released, {{ stats.maintenance }} in maintenance out of {{ stats.total }} VMs">
+                {% if stats.checked_out %}
+                  <div class="lb-util-seg" style="width: {{ stats.pct.checked_out }}%; background: var(--bs-primary);"></div>
+                {% endif %}
+                {% if stats.available %}
+                  <div class="lb-util-seg" style="width: {{ stats.pct.available }}%; background: var(--bs-success);"></div>
+                {% endif %}
+                {% if stats.released %}
+                  <div class="lb-util-seg" style="width: {{ stats.pct.released }}%; background: var(--bs-info);"></div>
+                {% endif %}
+                {% if stats.maintenance %}
+                  <div class="lb-util-seg" style="width: {{ stats.pct.maintenance }}%; background: var(--bs-warning);"></div>
+                {% endif %}
+                {% if stats.other %}
+                  <div class="lb-util-seg" style="width: {{ stats.pct.other }}%; background: var(--bs-secondary);"></div>
+                {% endif %}
+              </div>
+
+              <div class="lb-util-legend">
+                <span><i class="lb-dot" style="background: var(--bs-primary);"></i> Checked out ({{ stats.checked_out }})</span>
+                <span><i class="lb-dot" style="background: var(--bs-success);"></i> Available ({{ stats.available }})</span>
+                <span><i class="lb-dot" style="background: var(--bs-info);"></i> Released ({{ stats.released }})</span>
+                <span><i class="lb-dot" style="background: var(--bs-warning);"></i> Maintenance ({{ stats.maintenance }})</span>
+                {% if stats.other %}
+                  <span><i class="lb-dot" style="background: var(--bs-secondary);"></i> Other ({{ stats.other }})</span>
+                {% endif %}
+              </div>
+
+              <dl class="row row-cols-2 g-3 mt-3 mb-0 small">
+                <div class="col">
+                  <dt class="text-body-secondary fw-normal">Powered on</dt>
+                  <dd class="fs-5 fw-semibold mb-0">{{ stats.powered_on }} <span class="fs-6 fw-normal text-body-secondary">/ {{ stats.total }}</span></dd>
+                </div>
+                <div class="col">
+                  <dt class="text-body-secondary fw-normal">Unreachable</dt>
+                  <dd class="fs-5 fw-semibold mb-0 {{ 'text-danger' if stats.unreachable }}">{{ stats.unreachable }}</dd>
+                </div>
+                <div class="col">
+                  <dt class="text-body-secondary fw-normal">Ready for checkout</dt>
+                  <dd class="fs-5 fw-semibold mb-0 {{ 'text-success' if stats.ready else 'text-danger' }}">{{ stats.ready }}</dd>
+                </div>
+                <div class="col">
+                  <dt class="text-body-secondary fw-normal">Utilization</dt>
+                  <dd class="fs-5 fw-semibold mb-0">{{ stats.utilization }}%</dd>
+                </div>
+              </dl>
+            {% else %}
+              {{ ui.empty_state('No virtual machines registered',
+                                'Add a VM to start brokering sessions.', 'server') }}
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      {# ------------------------------------------------ recent activity #}
+      <div class="col-12 col-xl-6">
+        <div class="lb-card h-100">
+          <div class="lb-toolbar">
+            <strong class="d-flex align-items-center gap-2">
+              {{ ui.icon('clock', 16, 'text-body-secondary') }} Recent scaling activity
+            </strong>
+            <a href="{{ url_for('scaling_activity_log') }}" class="small text-decoration-none">View full log</a>
+          </div>
+
+          {% if recent_activity %}
+            <div class="lb-table-wrap">
+              <table class="table lb-table table-hover align-middle">
+                <thead>
+                  <tr>
+                    <th scope="col">When</th>
+                    <th scope="col">Action</th>
+                    <th scope="col">Outcome</th>
+                    <th scope="col" class="text-end">Total VMs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for entry in recent_activity %}
+                    <tr>
+                      <td class="lb-mono text-nowrap">{{ ui.value_or_dash(entry.get('CheckTimestamp')) }}</td>
+                      <td>{{ ui.action_badge(entry.get('ActionTaken')) }}</td>
+                      <td class="small">{{ ui.value_or_dash(entry.get('Outcome')) }}</td>
+                      <td class="text-end">{{ ui.value_or_dash(entry.get('NewTotalVMs')) }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            {{ ui.empty_state('No recent scaling activity',
+                              'Runs will appear here once the scaling task has executed.', 'clock') }}
+          {% endif %}
+        </div>
+      </div>
     </div>
+
+    {# ------------------------------------------------------ quick links #}
+    <div class="row g-3 mt-1">
+      <div class="col-12 col-md-6">
+        <div class="lb-card p-3 h-100">
+          <h2 class="h6 fw-semibold d-flex align-items-center gap-2 mb-2">
+            {{ ui.icon('server', 16, 'text-body-secondary') }} VM management
+          </h2>
+          <p class="text-body-secondary small mb-3">
+            View, add, update and release the Linux hosts in the pool.
+          </p>
+          <div class="d-flex flex-wrap gap-2">
+            <a href="{{ url_for('view_all_vms') }}" class="btn btn-sm btn-primary">All VMs</a>
+            <a href="{{ url_for('add_vm') }}" class="btn btn-sm btn-outline-secondary">Add VM</a>
+            <a href="{{ url_for('vm_history') }}" class="btn btn-sm btn-outline-secondary">History</a>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-md-6">
+        <div class="lb-card p-3 h-100">
+          <h2 class="h6 fw-semibold d-flex align-items-center gap-2 mb-2">
+            {{ ui.icon('sliders', 16, 'text-body-secondary') }} Scaling management
+          </h2>
+          <p class="text-body-secondary small mb-3">
+            Tune the autoscaling thresholds and review scaling decisions.
+          </p>
+          <div class="d-flex flex-wrap gap-2">
+            <a href="{{ url_for('view_all_rules') }}" class="btn btn-sm btn-primary">Scaling rules</a>
+            <a href="{{ url_for('create_rule') }}" class="btn btn-sm btn-outline-secondary">New rule</a>
+            <a href="{{ url_for('scaling_activity_log') }}" class="btn btn-sm btn-outline-secondary">Activity log</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  {% endif %}
+
 {% endif %}
+
 {% endblock %}

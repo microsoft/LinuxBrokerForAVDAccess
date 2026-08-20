@@ -1,0 +1,42 @@
+name: Front end tests
+
+on:
+  pull_request:
+    paths:
+      - 'front_end/**'
+      - '.github/workflows/front-end-tests.yml'
+  push:
+    paths:
+      - 'front_end/**'
+      - '.github/workflows/front-end-tests.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python version
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: front_end
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: front_end
+        env:
+          FLASK_KEY: test-secret-key
+          CLIENT_ID: client-id
+          TENANT_ID: tenant-id
+          API_CLIENT_ID: api-client-id
+          API_URL: https://api.example.invalid
+          MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: secret
+        run: pytest

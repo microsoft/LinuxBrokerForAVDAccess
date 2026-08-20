@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+
+{% block title %}{{ title | default('Error') }} - Linux Broker Management Portal{% endblock %}
+
+{% block content %}
+<div class="lb-empty">
+  {{ ui.icon('alert-triangle', 48, 'text-body-secondary opacity-50') }}
+
+  {% if code %}
+    <p class="display-6 fw-semibold mt-3 mb-1">{{ code }}</p>
+  {% endif %}
+
+  <h1 class="h4 mb-2">{{ title | default('Something went wrong') }}</h1>
+
+  <p class="text-body-secondary mb-4">
+    {{ message | default('An unexpected error occurred. Please try again.') }}
+  </p>
+
+  <div class="d-flex flex-wrap gap-2 justify-content-center">
+    <a href="{{ url_for('index') }}" class="btn btn-primary">
+      {{ ui.icon('home', 15) }}<span class="ms-1">Back to dashboard</span>
+    </a>
+    {% if session.get('user') %}
+      <a href="{{ url_for('view_all_vms') }}" class="btn btn-outline-secondary">
+        {{ ui.icon('server', 15) }}<span class="ms-1">VM management</span>
+      </a>
+    {% else %}
+      <a href="{{ url_for('login') }}" class="btn btn-outline-secondary">
+        {{ ui.icon('box-arrow-right', 15) }}<span class="ms-1">Sign in</span>
+      </a>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
