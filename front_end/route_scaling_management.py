@@ -4,6 +4,7 @@ import logging
 from flask import request, redirect, url_for, session, render_template, flash
 from datetime import datetime
 from function_authentication import login_required
+from function_api import NotAuthenticated, fetch_history_page
 from config import API_URL
 
 logger = logging.getLogger(__name__)
@@ -144,233 +145,146 @@ def register_route_scaling_management(app):
     @login_required
     def scaling_activity_log():
         if request.method == 'POST':
-            try:
-                startdate = request.form.get('startdate')
-                enddate = request.form.get('enddate')
-                limit = request.form.get('limit', 'null')
+            startdate = request.form.get('startdate')
+            enddate = request.form.get('enddate')
+            limit = request.form.get('limit', '')
 
-                ignore_dates = request.form.get('ignore_dates')
-                ignore_limit = request.form.get('ignore_limit')
-                filters = {
-                    "startdate": startdate or "",
-                    "enddate": enddate or "",
-                    "limit": limit or "",
-                    "ignore_dates": bool(ignore_dates),
-                    "ignore_limit": bool(ignore_limit)
-                }
+            ignore_dates = request.form.get('ignore_dates')
+            ignore_limit = request.form.get('ignore_limit')
 
-                logger.debug("Form data - StartDate: %s, EndDate: %s, Limit: %s", startdate, enddate, limit)
-                logger.debug("Flags - Ignore Dates: %s, Ignore Limit: %s", ignore_dates, ignore_limit)
+            # Validate up front so a bad date is reported against the form the operator
+            # is looking at rather than failing later inside the query.
+            if not ignore_dates:
+                for label, value in (("start", startdate), ("end", enddate)):
+                    if not value:
+                        continue
+                    try:
+                        datetime.strptime(value, '%Y-%m-%d')
+                    except ValueError:
+                        flash(f"Invalid {label} date format. Please use 'YYYY-MM-DD'.", "danger")
+                        return redirect(url_for('scaling_activity_log'))
 
-                if ignore_limit:
-                    limit = "null"
+            # Only the criteria live in the session now; each page is fetched from the
+            # API on the GET, so the session cannot grow without bound and two tabs
+            # cannot overwrite each other's results.
+            session['scaling_activity_log_filters'] = {
+                "startdate": startdate or "",
+                "enddate": enddate or "",
+                "limit": limit if limit and limit != "null" else "",
+                "ignore_dates": bool(ignore_dates),
+                "ignore_limit": bool(ignore_limit),
+            }
+            session.pop('scaling_activity_log', None)
+            session.pop('scaling_activity_log_data', None)
 
-                if ignore_dates:
-                    startdate = "null"
-                    enddate = "null"
-                else:
-                    if startdate:
-                        try:
-                            startdate = datetime.strptime(startdate, '%Y-%m-%d').strftime('%m/%d/%Y')
-                        except ValueError:
-                            flash("Invalid start date format. Please use 'YYYY-MM-DD'.", "danger")
-                            return redirect(url_for('scaling_activity_log'))
-                    else:
-                        startdate = "null"
+            return redirect(url_for('scaling_activity_log'))
 
-                    if enddate:
-                        try:
-                            enddate = datetime.strptime(enddate, '%Y-%m-%d').strftime('%m/%d/%Y')
-                        except ValueError:
-                            flash("Invalid end date format. Please use 'YYYY-MM-DD'.", "danger")
-                            return redirect(url_for('scaling_activity_log'))
-                    else:
-                        enddate = "null"
+        filters = session.get('scaling_activity_log_filters') or {
+            "startdate": "",
+            "enddate": "",
+            "limit": "",
+            "ignore_dates": False,
+            "ignore_limit": False,
+        }
 
-                data = {
-                    "startdate": startdate,
-                    "enddate": enddate,
-                    "limit": limit if limit else "null"
-                }
+        try:
+            page = max(1, int(request.args.get('page', 1)))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            per_page = min(200, max(1, int(request.args.get('per_page', 10))))
+        except (TypeError, ValueError):
+            per_page = 10
 
-                logger.debug("Data for API request: %s", data)
+        try:
+            rows, total_items, total_pages = fetch_history_page(
+                '/scaling/log', filters, page, per_page
+            )
+        except NotAuthenticated:
+            return redirect(url_for('login'))
+        except (requests.exceptions.RequestException, ValueError) as e:
+            flash("Unable to retrieve the scaling activity log. Please try again later.", "danger")
+            logger.error("Error retrieving scaling activity log: %s", e)
+            return redirect(url_for('view_all_rules'))
 
-                session['scaling_activity_log_data'] = data
-                session['scaling_activity_log_filters'] = filters
-
-                access_token = session.get("access_token")
-                if not access_token:
-                    return redirect(url_for('login'))
-                headers = {'Authorization': f'Bearer {access_token}'}
-
-                response = requests.post(f"{API_URL}/scaling/log", headers=headers, json=data)
-                response.raise_for_status()
-
-                log = response.json()
-
-                if not log:
-                    flash("No scaling activities found for the specified criteria.", "info")
-                else:
-                    flash("Scaling activity log retrieved successfully!", "success")
-
-                session['scaling_activity_log'] = log
-
-                return redirect(url_for('scaling_activity_log'))
-            except requests.exceptions.RequestException as e:
-                flash("Unable to retrieve scaling activity log. Please try again later.", "danger")
-                logger.error("Failed to retrieve scaling activity log: %s", e)
-                return redirect(url_for('view_all_rules'))
-            except Exception as e:
-                flash("An unexpected error occurred. Please try again later.", "danger")
-                logger.error("Unexpected error in scaling_activity_log POST: %s", e)
-                return redirect(url_for('view_all_rules'))
-        else:
-            try:
-                log = session.get('scaling_activity_log', [])
-                filters = session.get('scaling_activity_log_filters')
-                if not filters:
-                    stored_data = session.get('scaling_activity_log_data', {})
-                    filters = {
-                        "startdate": "",
-                        "enddate": "",
-                        "limit": stored_data.get("limit", 100),
-                        "ignore_dates": stored_data.get("startdate") == "null" and stored_data.get("enddate") == "null",
-                        "ignore_limit": stored_data.get("limit") == "null"
-                    }
-                page = max(1, int(request.args.get('page', 1)))
-                per_page = max(1, int(request.args.get('per_page', 10)))
-                total_items = len(log)
-                total_pages = (total_items + per_page - 1) // per_page
-
-                start = (page - 1) * per_page
-                end = start + per_page
-                log_paginated = log[start:end]
-
-                logger.debug("Page: %s, Per Page: %s, Total Pages: %s", page, per_page, total_pages)
-                logger.debug("Log items displayed: %s", len(log_paginated))
-
-                return render_template('scaling/scaling_activity_log.html',
-                                       log=log_paginated,
-                                       page=page,
-                                       total_pages=total_pages,
-                                       per_page=per_page,
-                                       filters=filters)
-            except Exception as e:
-                flash("An unexpected error occurred while displaying scaling activity log.", "danger")
-                logger.error("Unexpected error in scaling_activity_log GET: %s", e)
-                return redirect(url_for('view_all_rules'))
+        return render_template('scaling/scaling_activity_log.html',
+                               log=rows,
+                               page=page,
+                               total_pages=total_pages,
+                               per_page=per_page,
+                               total_items=total_items,
+                               filters=filters)
 
     @app.route('/scaling/rules/history', methods=['GET', 'POST'])
     @login_required
     def scaling_rules_history():
         if request.method == 'POST':
-            try:
-                startdate = request.form.get('startdate')
-                enddate = request.form.get('enddate')
-                limit = request.form.get('limit', 'null')
+            startdate = request.form.get('startdate')
+            enddate = request.form.get('enddate')
+            limit = request.form.get('limit', '')
 
-                ignore_dates = request.form.get('ignore_dates')
-                ignore_limit = request.form.get('ignore_limit')
-                filters = {
-                    "startdate": startdate or "",
-                    "enddate": enddate or "",
-                    "limit": limit or "",
-                    "ignore_dates": bool(ignore_dates),
-                    "ignore_limit": bool(ignore_limit)
-                }
+            ignore_dates = request.form.get('ignore_dates')
+            ignore_limit = request.form.get('ignore_limit')
 
-                if ignore_limit:
-                    limit = "null"
+            # Validate up front so a bad date is reported against the form the operator
+            # is looking at rather than failing later inside the query.
+            if not ignore_dates:
+                for label, value in (("start", startdate), ("end", enddate)):
+                    if not value:
+                        continue
+                    try:
+                        datetime.strptime(value, '%Y-%m-%d')
+                    except ValueError:
+                        flash(f"Invalid {label} date format. Please use 'YYYY-MM-DD'.", "danger")
+                        return redirect(url_for('scaling_rules_history'))
 
-                if ignore_dates:
-                    startdate = "null"
-                    enddate = "null"
-                else:
-                    if startdate:
-                        try:
-                            startdate = datetime.strptime(startdate, '%Y-%m-%d').strftime('%m/%d/%Y')
-                        except ValueError:
-                            flash("Invalid start date format. Please use 'YYYY-MM-DD'.", "danger")
-                            return redirect(url_for('scaling_rules_history'))
-                    else:
-                        startdate = "null"
+            # Only the criteria live in the session now; each page is fetched from the
+            # API on the GET, so the session cannot grow without bound and two tabs
+            # cannot overwrite each other's results.
+            session['scaling_rules_history_filters'] = {
+                "startdate": startdate or "",
+                "enddate": enddate or "",
+                "limit": limit if limit and limit != "null" else "",
+                "ignore_dates": bool(ignore_dates),
+                "ignore_limit": bool(ignore_limit),
+            }
+            session.pop('scaling_rules_history', None)
+            session.pop('scaling_rules_history_data', None)
 
-                    if enddate:
-                        try:
-                            enddate = datetime.strptime(enddate, '%Y-%m-%d').strftime('%m/%d/%Y')
-                        except ValueError:
-                            flash("Invalid end date format. Please use 'YYYY-MM-DD'.", "danger")
-                            return redirect(url_for('scaling_rules_history'))
-                    else:
-                        enddate = "null"
+            return redirect(url_for('scaling_rules_history'))
 
-                data = {
-                    "startdate": startdate,
-                    "enddate": enddate,
-                    "limit": limit if limit else "null"
-                }
+        filters = session.get('scaling_rules_history_filters') or {
+            "startdate": "",
+            "enddate": "",
+            "limit": "",
+            "ignore_dates": False,
+            "ignore_limit": False,
+        }
 
-                session['scaling_rules_history_data'] = data
-                session['scaling_rules_history_filters'] = filters
+        try:
+            page = max(1, int(request.args.get('page', 1)))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            per_page = min(200, max(1, int(request.args.get('per_page', 10))))
+        except (TypeError, ValueError):
+            per_page = 10
 
-                access_token = session.get("access_token")
-                if not access_token:
-                    return redirect(url_for('login'))
-                headers = {'Authorization': f'Bearer {access_token}'}
+        try:
+            rows, total_items, total_pages = fetch_history_page(
+                '/scaling/rules/history', filters, page, per_page
+            )
+        except NotAuthenticated:
+            return redirect(url_for('login'))
+        except (requests.exceptions.RequestException, ValueError) as e:
+            flash("Unable to retrieve the scaling rules history. Please try again later.", "danger")
+            logger.error("Error retrieving scaling rules history: %s", e)
+            return redirect(url_for('view_all_rules'))
 
-                response = requests.post(f"{API_URL}/scaling/rules/history", headers=headers, json=data)
-                response.raise_for_status()
-
-                history = response.json()
-
-                if not history:
-                    flash("No scaling rules history found for the specified criteria.", "info")
-                else:
-                    flash("Scaling rules history retrieved successfully!", "success")
-
-                session['scaling_rules_history'] = history
-
-                return redirect(url_for('scaling_rules_history'))
-            except requests.exceptions.RequestException as e:
-                flash("Unable to retrieve scaling rules history. Please try again later.", "danger")
-                logger.error("Failed to retrieve scaling rules history: %s", e)
-                return redirect(url_for('view_all_rules'))
-            except Exception as e:
-                flash("An unexpected error occurred. Please try again later.", "danger")
-                logger.error("Unexpected error in scaling_rules_history POST: %s", e)
-                return redirect(url_for('view_all_rules'))
-        else:
-            try:
-                history = session.get('scaling_rules_history', [])
-                filters = session.get('scaling_rules_history_filters')
-                if not filters:
-                    stored_data = session.get('scaling_rules_history_data', {})
-                    filters = {
-                        "startdate": "",
-                        "enddate": "",
-                        "limit": stored_data.get("limit", 100),
-                        "ignore_dates": stored_data.get("startdate") == "null" and stored_data.get("enddate") == "null",
-                        "ignore_limit": stored_data.get("limit") == "null"
-                    }
-                page = max(1, int(request.args.get('page', 1)))
-                per_page = max(1, int(request.args.get('per_page', 10)))
-                total_items = len(history)
-                total_pages = (total_items + per_page - 1) // per_page
-
-                start = (page - 1) * per_page
-                end = start + per_page
-                history_paginated = history[start:end]
-
-                logger.debug("Page: %s, Per Page: %s, Total Pages: %s", page, per_page, total_pages)
-                logger.debug("History items displayed: %s", len(history_paginated))
-
-                return render_template('scaling/scaling_rules_history.html',
-                                       history=history_paginated,
-                                       page=page,
-                                       total_pages=total_pages,
-                                       per_page=per_page,
-                                       filters=filters)
-            except Exception as e:
-                flash("An unexpected error occurred while displaying scaling rules history.", "danger")
-                logger.error("Unexpected error in scaling_rules_history GET: %s", e)
-                return redirect(url_for('view_all_rules'))
+        return render_template('scaling/scaling_rules_history.html',
+                               history=rows,
+                               page=page,
+                               total_pages=total_pages,
+                               per_page=per_page,
+                               total_items=total_items,
+                               filters=filters)

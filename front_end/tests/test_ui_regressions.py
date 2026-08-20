@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import VMS, assert_checkbox_checked, assert_form_value, csrf_token, row_for_host, seed_histories
+from conftest import VMS, assert_checkbox_checked, assert_form_value, csrf_token, row_for_host
 
 
 AUTHENTICATED_GET_ROUTES = [
@@ -105,8 +105,12 @@ def test_ignore_filter_checkboxes_survive_post_redirect_get(signed_in_client, br
     assert_form_value(body, "limit", "42")
     assert_checkbox_checked(body, "ignore_dates")
     assert_checkbox_checked(body, "ignore_limit")
-    # Whatever was typed, the API must still be told to ignore both.
-    assert broker_api.posts[-1]["json"] == {"startdate": "null", "enddate": "null", "limit": "null"}
+    # The ignore flags now mean "omit the filter" rather than sending the
+    # stringly-typed "null" sentinel that the API had to special-case.
+    sent = broker_api.posts[-1]["json"]
+    assert "startdate" not in sent
+    assert "enddate" not in sent
+    assert "limit" not in sent
 
 
 @pytest.mark.parametrize("path", ["/vms/history", "/scaling/log", "/scaling/rules/history"])
@@ -123,12 +127,58 @@ def test_ignore_flags_without_values_do_not_break(signed_in_client, broker_api, 
     body = response.get_data(as_text=True)
     assert_checkbox_checked(body, "ignore_dates")
     assert_checkbox_checked(body, "ignore_limit")
-    assert broker_api.posts[-1]["json"] == {"startdate": "null", "enddate": "null", "limit": "null"}
+    sent = broker_api.posts[-1]["json"]
+    assert "startdate" not in sent
+    assert "enddate" not in sent
+    assert "limit" not in sent
 
 
 @pytest.mark.parametrize("path", ["/vms/history", "/scaling/log", "/scaling/rules/history"])
-def test_pagination_is_windowed_for_many_pages(signed_in_client, path):
-    seed_histories(signed_in_client, count=120)
+def test_filters_are_sent_to_the_api_in_the_expected_format(signed_in_client, broker_api, path):
+    """The operator types YYYY-MM-DD; the stored procedures expect MM/DD/YYYY."""
+    html = signed_in_client.get(path).get_data(as_text=True)
+    signed_in_client.post(path, data={
+        "csrf_token": csrf_token(html),
+        "startdate": "2026-01-15",
+        "enddate": "2026-02-20",
+        "limit": "37",
+    }, follow_redirects=True)
+
+    sent = broker_api.posts[-1]["json"]
+    assert sent["startdate"] == "01/15/2026"
+    assert sent["enddate"] == "02/20/2026"
+    assert sent["limit"] == 37          # a real int, not the string "37"
+
+
+@pytest.mark.parametrize("path", ["/vms/history", "/scaling/log", "/scaling/rules/history"])
+def test_history_uses_server_side_pagination(signed_in_client, broker_api, path):
+    """Pages come from the API rather than a whole result set cached in the session."""
+    response = signed_in_client.get(f"{path}?page=3&per_page=10")
+    assert response.status_code == 200
+
+    params = broker_api.posts[-1]["params"]
+    assert params["page"] == 3
+    assert params["per_page"] == 10
+
+    with signed_in_client.session_transaction() as session:
+        # The old implementation stashed every row in the session.
+        assert "vm_history" not in session
+        assert "scaling_activity_log" not in session
+        assert "scaling_rules_history" not in session
+
+
+@pytest.mark.parametrize("path", ["/vms/history", "/scaling/log", "/scaling/rules/history"])
+def test_history_falls_back_when_api_predates_pagination(signed_in_client, broker_api, path):
+    """During a rolling deploy the API may still answer with a bare list."""
+    broker_api.legacy_history = True
+    response = signed_in_client.get(f"{path}?page=1&per_page=10")
+    assert response.status_code == 200
+    assert "Unable to retrieve" not in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize("path", ["/vms/history", "/scaling/log", "/scaling/rules/history"])
+def test_pagination_is_windowed_for_many_pages(signed_in_client, broker_api, path):
+    broker_api.history_total = 120
     response = signed_in_client.get(f"{path}?page=6&per_page=10")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
@@ -140,7 +190,6 @@ def test_pagination_is_windowed_for_many_pages(signed_in_client, path):
 @pytest.mark.parametrize("path", ["/vms/history", "/scaling/log", "/scaling/rules/history"])
 @pytest.mark.parametrize("query", ["page=abc", "page=0", "page=999999", "per_page=-3"])
 def test_hostile_pagination_query_strings_do_not_500(signed_in_client, path, query):
-    seed_histories(signed_in_client, count=20)
     response = signed_in_client.get(f"{path}?{query}", follow_redirects=True)
     assert response.status_code < 500
 
@@ -186,6 +235,51 @@ def test_dashboard_handles_non_list_activity_log(signed_in_client, broker_api):
 
 
 def test_dashboard_degrades_when_vm_api_is_unavailable(signed_in_client, broker_api):
+    broker_api.raise_get_paths.add("/vms/summary")
+    broker_api.raise_get_paths.add("/vms")
+    response = signed_in_client.get("/")
+    assert response.status_code == 200
+    assert "Pool data unavailable" in response.get_data(as_text=True)
+
+
+def test_dashboard_uses_the_summary_endpoint(signed_in_client, broker_api):
+    """The dashboard must not pull the whole VM list just to count it."""
+    broker_api.vm_summary = {
+        "TotalVMs": 9, "Available": 4, "CheckedOut": 3, "Maintenance": 1,
+        "Released": 1, "PoweredOn": 7, "PoweredOff": 2, "Unreachable": 2,
+        "Ready": 3,
+    }
+    response = signed_in_client.get("/")
+    assert response.status_code == 200
+
+    html = response.get_data(as_text=True)
+    assert ">9<" in html.replace(" ", "").replace("\n", "")   # total
+    assert "Pool overview" in html
+    # 3 of 9 checked out
+    assert "33% of the pool in use" in html
+
+
+def test_dashboard_falls_back_when_api_predates_the_summary_endpoint(signed_in_client, broker_api):
+    """During a rolling deploy the portal can be newer than the API.
+
+    An older API does not 404 on /api/vms/summary -- Werkzeug matches it against the
+    older /api/vms/<vmid> rule, which fails converting 'summary' to an int and
+    returns 500. The fallback must handle that, not just a clean 404.
+    """
+    broker_api.summary_status = 500
+    response = signed_in_client.get("/")
+    assert response.status_code == 200
+
+    html = response.get_data(as_text=True)
+    assert "Pool data unavailable" not in html
+    assert "Pool overview" in html
+    # Counted client-side from the four seeded VMs.
+    assert ">4<" in html.replace(" ", "").replace("\n", "")
+
+
+def test_dashboard_still_reports_an_outage_when_both_paths_fail(signed_in_client, broker_api):
+    """The fallback must not mask a genuine broker outage."""
+    broker_api.summary_status = 500
     broker_api.raise_get_paths.add("/vms")
     response = signed_in_client.get("/")
     assert response.status_code == 200

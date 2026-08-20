@@ -12,7 +12,7 @@ from flask import Flask, jsonify, render_template, send_from_directory, session
 from flask_session import Session
 from flask_wtf.csrf import CSRFProtect, CSRFError
 
-from function_api import NotAuthenticated, api_get, api_post, summarize_vms
+from function_api import NotAuthenticated, api_get, api_post, fetch_vm_summary, summarize_vms
 from route_authentication import register_route_authentication
 from route_user import register_route_user
 from route_vm_management import register_route_vm_management
@@ -54,7 +54,7 @@ def index():
     api_error = False
 
     try:
-        stats = summarize_vms(api_get('/vms'))
+        stats = fetch_vm_summary()
     except NotAuthenticated:
         return render_template('index.html', authenticated=False)
     except (requests.exceptions.RequestException, ValueError) as e:
@@ -63,7 +63,7 @@ def index():
 
     # Secondary panel: never let a scaling-log failure break the dashboard.
     try:
-        activity = api_post('/scaling/log', {"startdate": "null", "enddate": "null", "limit": "5"})
+        activity = api_post('/scaling/log', {"limit": 5})
         recent_activity = activity[:5] if isinstance(activity, list) else []
     except (NotAuthenticated, requests.exceptions.RequestException, ValueError) as e:
         logger.warning("Unable to load recent scaling activity for dashboard: %s", e)

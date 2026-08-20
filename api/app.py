@@ -23,6 +23,7 @@ from flask import Flask, jsonify, request
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
 from functools import wraps
+from contextlib import contextmanager
 from flask_caching import Cache
 from azure.keyvault.secrets import SecretClient
 from config import *
@@ -31,8 +32,10 @@ from config import *
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.158'
+app.config['VERSION'] = '0.159'
 
+# Backs is_member_of_group_cached, which keeps token validation off the Graph API on
+# every request.
 cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 
 REMOTE_CREATE_USER_SCRIPT = '/usr/local/bin/create-user.sh'
@@ -48,20 +51,18 @@ logger = logging.getLogger('linuxbroker.api')
 
 @app.route('/health', methods=['GET'])
 def health():
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({'status': 'unhealthy'}), 503
-
     try:
-        cursor = conn.cursor()
-        cursor.execute('SELECT 1')
-        cursor.fetchone()
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT 1')
+            cursor.fetchone()
         return jsonify({'status': 'healthy', 'version': app.config['VERSION']}), 200
-    except Exception as e:
-        logger.error("Health check failed: %s", e)
+    except DatabaseUnavailable:
+        logger.error("Database connection failed during health check.")
         return jsonify({'status': 'unhealthy'}), 503
-    finally:
-        conn.close()
+    except Exception:
+        logger.exception("Health check failed.")
+        return jsonify({'status': 'unhealthy'}), 503
 
 # ===============================
 # Functions
@@ -74,7 +75,7 @@ def retrieve_db_password_from_key_vault():
         secret = secret_client.get_secret(DB_PASSWORD_NAME)
         db_password = secret.value
     except Exception as e:
-        print("Error retrieving password from Key Vault: %s", e)
+        logger.error("Error retrieving password from Key Vault: %s", e)
         db_password = None
 
 def get_db_connection():
@@ -82,7 +83,7 @@ def get_db_connection():
     if db_password is None:
         retrieve_db_password_from_key_vault()
         if db_password is None:
-            print("Cannot connect to database without a password.")
+            logger.error("Cannot connect to database without a password.")
             return None
     try:
         conn = pymssql.connect(
@@ -93,7 +94,7 @@ def get_db_connection():
         )
         return conn
     except pymssql.Error as e:
-        print("Error connecting to database: %s", e)
+        logger.error("Error connecting to database: %s", e)
         return None
 
 def refresh_db_password(interval=3600):
@@ -115,7 +116,7 @@ def retrieve_pem_key_from_key_vault(vault_url, key_name):
                 pem_file.write(pem_key)
             os.chmod(pem_file_path, required_permissions)
         except Exception as e:
-            print("Failed to write PEM key to file: %s", e)
+            logger.error("Failed to write PEM key to file: %s", e)
             raise
     else:
         current_permissions = oct(os.stat(pem_file_path).st_mode & 0o777)
@@ -123,7 +124,7 @@ def retrieve_pem_key_from_key_vault(vault_url, key_name):
             try:
                 os.chmod(pem_file_path, required_permissions)
             except Exception as e:
-                print("Failed to update permissions for %s: %s", pem_file_path, e)
+                logger.error("Failed to update permissions for %s: %s", pem_file_path, e)
                 raise
 
     return pem_file_path
@@ -148,33 +149,30 @@ def get_access_token(tenant_id, client_id, client_secret):
 
 def get_or_create_uid(username):
     try:
-        conn = get_db_connection()
-        if not conn:
-            logger.error("Database connection failed while resolving uid for %s", username)
-            return None
+        with db_connection() as conn:
+            cursor = conn.cursor(as_dict=True)
 
-        cursor = conn.cursor(as_dict=True)
+            # Check if user already exists
+            cursor.execute("SELECT uid FROM VmUsers WHERE username = %s", (username,))
+            result = cursor.fetchone()
+            if result:
+                return result['uid']
 
-        # Check if user already exists
-        cursor.execute("SELECT uid FROM VmUsers WHERE username = %s", (username,))
-        result = cursor.fetchone()
-        if result:
-            conn.close()
-            return result['uid']
+            # Assign a new UID starting from 2000
+            cursor.execute("SELECT MAX(uid) AS max_uid FROM VmUsers")
+            max_uid = cursor.fetchone()['max_uid'] or 1999
+            new_uid = max_uid + 1
 
-        # Assign a new UID starting from 2000
-        cursor.execute("SELECT MAX(uid) AS max_uid FROM VmUsers")
-        max_uid = cursor.fetchone()['max_uid'] or 1999
-        new_uid = max_uid + 1
-
-        # Insert new user
-        cursor.execute("INSERT INTO VmUsers (username, uid) VALUES (%s, %s)", (username, new_uid))
-        conn.commit()
-        conn.close()
+            # Insert new user
+            cursor.execute("INSERT INTO VmUsers (username, uid) VALUES (%s, %s)", (username, new_uid))
+            conn.commit()
 
         return new_uid
-    except Exception as e:
-        logger.error("Failed to resolve uid for %s: %s", username, e)
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while resolving uid for %s", username)
+        return None
+    except Exception:
+        logger.exception("Failed to resolve uid for %s.", username)
         return None
 
 def normalize_lease_id(value):
@@ -197,6 +195,199 @@ def serialize_for_json(value):
         return [serialize_for_json(item) for item in value]
 
     return value
+
+
+# ===============================
+# Request plumbing
+
+
+class DatabaseUnavailable(Exception):
+    """The API could not obtain a database connection."""
+
+
+class GroupCheckUnavailable(Exception):
+    """Group membership could not be determined (Graph unreachable, throttled, or
+    no token).
+
+    Distinct from "the principal is not a member" so a transient Graph failure is
+    never cached as an authorization denial.
+    """
+
+
+@contextmanager
+def db_connection():
+    """Yield a database connection that is always closed.
+
+    Most handlers previously called get_db_connection() and then conn.close() on the
+    success path only, so any exception in between leaked the connection until the
+    pool was exhausted. Using this as a context manager makes the close unconditional.
+
+    Raises DatabaseUnavailable when a connection cannot be established, so callers do
+    not have to repeat the `if not conn` check.
+    """
+    conn = get_db_connection()
+    if not conn:
+        raise DatabaseUnavailable("Could not establish a database connection.")
+    try:
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            logger.exception("Failed to close database connection.")
+
+
+def error_response(message, status=500):
+    """Return a consistent JSON error envelope.
+
+    Handlers used to return the raw str(e), which exposed driver errors, server names
+    and schema details to the caller. The detail belongs in Application Insights, not
+    in the response body.
+    """
+    return jsonify({'error': message}), status
+
+
+def coerce_optional_int(value, default=None, minimum=None, maximum=None):
+    """Parse an optional integer that may arrive as the string 'null'.
+
+    The portal sends the literal string "null" for an unset limit. The stored
+    procedures declare @Limit as INT, so passing that string through made SQL Server
+    fail converting 'null' to int and the request 500'd -- which is why the portal's
+    "No Limit" option never worked. Anything unparseable is treated as unset rather
+    than as an error, so an old portal build keeps working during a rolling upgrade.
+    """
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return default
+
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate == '' or candidate.lower() in ('null', 'none', 'undefined'):
+            return default
+    else:
+        candidate = value
+
+    try:
+        parsed = int(candidate)
+    except (TypeError, ValueError):
+        return default
+
+    if minimum is not None and parsed < minimum:
+        return minimum
+    if maximum is not None and parsed > maximum:
+        return maximum
+    return parsed
+
+
+def normalize_date_filter(value):
+    """Treat the portal's 'null' sentinel and blank strings as 'no filter'."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate == '' or candidate.lower() in ('null', 'none'):
+            return None
+        return candidate
+    return value
+
+
+# Matches the clamp inside the paged stored procedures.
+MAX_PAGE_SIZE = 200
+DEFAULT_PAGE_SIZE = 50
+
+
+def run_history_query(proc, paged_proc, label):
+    """Shared implementation for the three date-filtered history endpoints.
+
+    Pagination is opt-in: when neither `page` nor `per_page` is supplied the response
+    stays a bare JSON array, because the scheduled task and older portal builds consume
+    these endpoints as plain lists.
+    """
+    try:
+        req_body = request.get_json(silent=True) or {}
+
+        startdate = normalize_date_filter(req_body.get('startdate'))
+        enddate = normalize_date_filter(req_body.get('enddate'))
+
+        raw_page = request.args.get('page', req_body.get('page'))
+        raw_per_page = request.args.get('per_page', req_body.get('per_page'))
+        wants_pagination = raw_page is not None or raw_per_page is not None
+
+        if wants_pagination:
+            page = coerce_optional_int(raw_page, default=1, minimum=1)
+            per_page = coerce_optional_int(
+                raw_per_page, default=DEFAULT_PAGE_SIZE, minimum=1, maximum=MAX_PAGE_SIZE
+            )
+            offset = (page - 1) * per_page
+
+            # The paged procedures have no @Limit, so an operator-supplied limit is
+            # applied here as a cap on the overall result set. Without this the limit
+            # box in the portal would silently do nothing once paging was enabled.
+            limit = coerce_optional_int(req_body.get('limit'), default=None, minimum=1)
+
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute(
+                        f"EXEC {paged_proc} @StartDate = %s, @EndDate = %s, @Offset = %s, @PageSize = %s",
+                        (startdate, enddate, offset, per_page),
+                    )
+                    rows = cursor.fetchall() or []
+
+                    # TotalCount rides along on each row, so an out-of-range page
+                    # returns nothing and the total would otherwise read as 0 --
+                    # making "page 40 of 4" indistinguishable from "no matches" and
+                    # collapsing the pager so the operator cannot navigate back.
+                    if not rows and offset > 0:
+                        cursor.execute(
+                            f"EXEC {paged_proc} @StartDate = %s, @EndDate = %s, @Offset = %s, @PageSize = %s",
+                            (startdate, enddate, 0, 1),
+                        )
+                        probe = cursor.fetchall() or []
+                        total = int(probe[0].get('TotalCount') or 0) if probe else 0
+                    else:
+                        total = int(rows[0].get('TotalCount') or 0) if rows else 0
+
+            items = [
+                {key: value for key, value in row.items() if key != 'TotalCount'}
+                for row in rows
+            ]
+
+            if limit is not None:
+                total = min(total, limit)
+                remaining = max(0, limit - offset)
+                items = items[:remaining]
+
+            total_pages = (total + per_page - 1) // per_page if per_page else 0
+
+            return jsonify(serialize_for_json({
+                'items': items,
+                'page': page,
+                'per_page': per_page,
+                'total': total,
+                'total_pages': total_pages,
+            })), 200
+
+        # Unpaged path. `limit` may arrive as the string "null" from the portal.
+        limit = coerce_optional_int(req_body.get('limit'), default=None, minimum=1)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    f"EXEC {proc} @StartDate = %s, @EndDate = %s, @Limit = %s",
+                    (startdate, enddate, limit),
+                )
+                rows = cursor.fetchall() or []
+
+        return jsonify(serialize_for_json(rows)), 200
+
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while reading %s.", label)
+        return error_response("Database connection failed.", 500)
+    except Exception:
+        logger.exception("Failed to read %s.", label)
+        return error_response(f"Unable to retrieve the {label}.", 500)
 
 def get_remote_host_fqdn(hostname: str) -> str:
     linux_host_admin_login_name = LINUX_HOST_ADMIN_LOGIN_NAME or 'avdadmin'
@@ -267,21 +458,16 @@ def release_vm_assignment(vmid, lease_id) -> bool:
     if not vmid or not normalized_lease_id:
         return False
 
-    conn = None
     try:
-        conn = get_db_connection()
-        if not conn:
-            logger.error("Database connection failed while releasing VMID %s after a failed checkout.", vmid)
-            return False
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC ReturnVm @VMID = %s, @ExpectedLeaseId = %s",
+                    (vmid, normalized_lease_id)
+                )
+                row = cursor.fetchone()
 
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute(
-                "EXEC ReturnVm @VMID = %s, @ExpectedLeaseId = %s",
-                (vmid, normalized_lease_id)
-            )
-            row = cursor.fetchone()
-
-        conn.commit()
+            conn.commit()
 
         if not row:
             logger.error("Could not release VMID %s after a failed checkout; the lease no longer matches.", vmid)
@@ -289,12 +475,12 @@ def release_vm_assignment(vmid, lease_id) -> bool:
 
         logger.info("Released VMID %s after a failed checkout.", vmid)
         return True
-    except Exception as e:
-        logger.error("Error releasing VMID %s after a failed checkout: %s", vmid, e)
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while releasing VMID %s after a failed checkout.", vmid)
         return False
-    finally:
-        if conn:
-            conn.close()
+    except Exception:
+        logger.exception("Error releasing VMID %s after a failed checkout.", vmid)
+        return False
 
 def generate_secure_password(length=25) -> str:
     characters = string.ascii_letters + string.digits + string.punctuation
@@ -304,8 +490,8 @@ def generate_secure_password(length=25) -> str:
 def is_member_of_group(service_principal_id, group_ids):
     access_token = get_access_token(TENANT_ID, CLIENT_ID, MICROSOFT_PROVIDER_AUTHENTICATION_SECRET)
     if not access_token:
-        print("Cannot acquire access token for Graph API.")
-        return False
+        logger.error("Cannot acquire access token for Graph API.")
+        raise GroupCheckUnavailable("Could not acquire a Graph API token.")
 
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -327,8 +513,11 @@ def is_member_of_group(service_principal_id, group_ids):
         else:
             return False
     else:
-        print("Graph API error: %s - %s", response.status_code, response.text)
-        return False
+        # Raise rather than return False: a throttled or failing Graph call is not
+        # evidence that the principal lacks membership, and returning False here
+        # would be memoized as a denial for the whole cache window.
+        logger.error("Graph API error: %s - %s", response.status_code, response.text)
+        raise GroupCheckUnavailable(f"Graph API returned {response.status_code}.")
 
 def delete_remote_user(hostname: str, username: str, lease_id: str = None) -> bool:
     normalized_lease_id = normalize_lease_id(lease_id)
@@ -373,7 +562,8 @@ def delete_remote_user(hostname: str, username: str, lease_id: str = None) -> bo
 
 @cache.memoize(timeout=300)
 def is_member_of_group_cached(user_oid, group_ids):
-    return is_member_of_group(user_oid, group_ids)
+    # memoize needs hashable arguments, so the caller passes a tuple.
+    return is_member_of_group(user_oid, list(group_ids))
      
 def token_required(required_permissions=None, required_group_ids=None):
     def decorator(f):
@@ -388,10 +578,10 @@ def token_required(required_permissions=None, required_group_ids=None):
                 if len(parts) == 2 and parts[0] == 'Bearer':
                     token = parts[1]
                 else:
-                    print("Authorization header is malformed. Expected 'Bearer <token>'.")
+                    logger.error("Authorization header is malformed. Expected 'Bearer <token>'.")
 
             if not token:
-                print("Token is missing in the request.")
+                logger.error("Token is missing in the request.")
                 return jsonify({'message': 'Token is missing!'}), 401
 
             try:
@@ -456,23 +646,33 @@ def token_required(required_permissions=None, required_group_ids=None):
                 
                 is_in_group = False
                 if required_group_ids:
-                    is_in_group = is_member_of_group(user_oid, required_group_ids)
+                    # Use the memoized wrapper: this runs on every authenticated
+                    # request from the AVD and Linux hosts, and the uncached path was
+                    # calling Microsoft Graph each time.
+                    try:
+                        is_in_group = is_member_of_group_cached(user_oid, tuple(required_group_ids))
+                    except GroupCheckUnavailable:
+                        # Not cached, and reported as a dependency failure rather than
+                        # a denial, so a Graph blip does not look like a permissions
+                        # problem to the AVD and Linux host agents.
+                        logger.exception("Could not verify group membership for %s.", user_oid)
+                        return jsonify({'error': 'Unable to verify group membership. Please retry.'}), 503
                 
                 if not (has_scope_permission or has_role_permission or is_in_group):
-                    print("Access denied: insufficient scope or role permissions or group membership.")
+                    logger.error("Access denied: insufficient scope or role permissions or group membership.")
                     return jsonify({'message': 'Access denied: insufficient scope or role permissions or group membership.'}), 403
 
             except jwt.ExpiredSignatureError:
-                print("Token has expired.")
+                logger.error("Token has expired.")
                 return jsonify({'message': 'Token has expired.'}), 401
             except jwt.InvalidAudienceError as e:
-                print("Invalid audience: %s", e)
+                logger.error("Invalid audience: %s", e)
                 return jsonify({'message': 'Invalid audience.'}), 401
             except jwt.InvalidIssuerError as e:
-                print("Invalid issuer: %s", e)
+                logger.error("Invalid issuer: %s", e)
                 return jsonify({'message': 'Invalid issuer.'}), 401
             except Exception as e:
-                print("Token validation error: %s", e)
+                logger.error("Token validation error: %s", e)
                 return jsonify({'message': 'Token is invalid.'}), 401
             
             return f(*args, **kwargs)
@@ -604,53 +804,47 @@ def validate_host_settings(payload: dict):
 
 def fetch_host_settings():
     """Read the single global settings profile."""
-    conn = get_db_connection()
-    if not conn:
-        logger.error("Database connection failed while reading Linux host settings.")
-        return None
-
     try:
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC GetLinuxHostSettings")
-            row = cursor.fetchone()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetLinuxHostSettings")
+                row = cursor.fetchone()
 
         if not row:
             logger.error("No Linux host settings profile exists.")
             return None
 
         return normalize_host_settings(row)
-    except Exception as e:
-        logger.error("Error reading Linux host settings: %s", e)
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while reading Linux host settings.")
         return None
-    finally:
-        conn.close()
+    except Exception:
+        logger.exception("Error reading Linux host settings.")
+        return None
 
 def record_settings_applied(hostname: str, settings_version: int) -> bool:
-    conn = get_db_connection()
-    if not conn:
-        logger.error("Database connection failed while recording applied settings for %s.", hostname)
-        return False
-
     try:
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute(
-                "EXEC RecordHostSettingsApplied @Hostname = %s, @SettingsVersion = %s",
-                (hostname, settings_version)
-            )
-            row = cursor.fetchone()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC RecordHostSettingsApplied @Hostname = %s, @SettingsVersion = %s",
+                    (hostname, settings_version)
+                )
+                row = cursor.fetchone()
 
-        conn.commit()
+            conn.commit()
 
         if not row:
             logger.warning("No VM record matched hostname %s while recording applied settings.", hostname)
             return False
 
         return True
-    except Exception as e:
-        logger.error("Error recording applied settings for %s: %s", hostname, e)
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while recording applied settings for %s.", hostname)
         return False
-    finally:
-        conn.close()
+    except Exception:
+        logger.exception("Error recording applied settings for %s.", hostname)
+        return False
 
 def apply_host_settings_to_host(hostname: str, settings: dict):
     """Push settings to one host over SSH.
@@ -695,56 +889,50 @@ def get_version():
 @token_required(['access_as_user', 'FullAccess', 'ScheduledTask'])
 def get_all_vms():
     try:
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetVms")
+                rows = cursor.fetchall()
 
-        cursor = conn.cursor(as_dict=True)
-        cursor.execute("EXEC GetVms")
-        rows = cursor.fetchall()
-        conn.close()
+        return jsonify(serialize_for_json(rows or [])), 200
 
-        if not rows:
-            return jsonify([]), 200
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while listing VMs.")
+        return error_response("Database connection failed.", 500)
+    except Exception:
+        logger.exception("Failed to list VMs.")
+        return error_response("Unable to retrieve virtual machines.", 500)
 
-        return jsonify(serialize_for_json(rows)), 200
+@app.route('/api/vms/summary', methods=['GET'])
+@token_required(['access_as_user', 'FullAccess', 'ScheduledTask'])
+def get_vm_summary():
+    """Aggregate pool counters for the portal dashboard.
 
-    except Exception as e:
-        return f"An unexpected error occurred: {str(e)}", 500
-
-@app.route('/api/vms/available', methods=['GET'])
-@token_required(['access_as_user', 'FullAccess'])
-def get_available_vm():
+    The dashboard previously fetched every VM row over HTTP just to count them, so the
+    payload grew with the pool. This returns a fixed-size object computed in SQL.
+    """
     try:
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetVmSummary")
+                row = cursor.fetchone()
 
-        cursor = conn.cursor(as_dict=True)
-        query = """
-        SELECT TOP 1 * FROM dbo.VirtualMachines
-        WHERE PowerState = 'On' AND NetworkStatus = 'Reachable' AND VmStatus = 'Available'
-        """
-        cursor.execute(query)
-        row = cursor.fetchone()
-        conn.close()
+        summary = serialize_for_json(row) if row else {}
 
-        if not row:
-            return "No available VM found.", 404
+        # The procedure always returns a row, but never let the dashboard 500 or render
+        # blanks if that ever changes.
+        fields = ('TotalVMs', 'Available', 'CheckedOut', 'Maintenance', 'Released',
+                  'PoweredOn', 'PoweredOff', 'Unreachable', 'Ready')
+        normalized = {field: int(summary.get(field) or 0) for field in fields}
 
-        available_vm = {
-            "VMID": row["VMID"],
-            "Hostname": row["Hostname"],
-            "IPAddress": row["IPAddress"],
-            "VmStatus": row["VmStatus"],
-            "NetworkStatus": row["NetworkStatus"],
-            "PowerState": row["PowerState"]
-        }
+        return jsonify(normalized), 200
 
-        return jsonify(available_vm), 200
-
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while building the VM summary.")
+        return error_response("Database connection failed.", 500)
+    except Exception:
+        logger.exception("Failed to build the VM summary.")
+        return error_response("Unable to retrieve the virtual machine summary.", 500)
 
 @app.route('/api/vms/checkout', methods=['POST'])
 @token_required(['AvdHost', 'access_as_user', 'FullAccess'], required_group_ids=[AVD_HOST_GROUP_ID])
@@ -756,43 +944,40 @@ def checkout_vm():
         avdhost = req_body.get('avdhost')
 
         if not username or not avdhost:
-            return "Please provide 'username' and 'avdhost' in the request body.", 400
+            return error_response("Please provide 'username' and 'avdhost' in the request body.", 400)
 
         username = re.sub(r'[^a-zA-Z0-9_]', '', username)
         user_password = generate_secure_password()
 
-        conn = get_db_connection()
-        try:
+        with db_connection() as conn:
             with conn.cursor(as_dict=True) as cursor:
                 cursor.callproc('CheckoutVm', (username, avdhost))
                 rows = cursor.fetchall()
                 conn.commit()
-        finally:
-            conn.close()
 
         if not rows or 'Message' in rows[0]:
-            return "No available VM found. Please try again.", 409
+            return error_response("No available VM found. Please try again.", 409)
 
         checked_out_vm = rows[0]
         vm_hostname = checked_out_vm.get('Hostname')
         lease_id = normalize_lease_id(checked_out_vm.get('LeaseId'))
 
         if not vm_hostname or not lease_id:
-            return "No hostname or LeaseId found for the checked-out VM.", 500
+            return error_response("No hostname or LeaseId found for the checked-out VM.", 500)
 
         if not create_or_update_remote_user(vm_hostname, username, user_password, lease_id):
             release_vm_assignment(checked_out_vm.get("VMID"), lease_id)
-            return f"Failed to create or update user '{username}' on VM '{vm_hostname}'.", 500
+            return error_response(f"Failed to create or update user '{username}' on VM '{vm_hostname}'.", 500)
         
         groups_to_add = ["tsusers", "appusers"]
 
         if not remote_group_exists(vm_hostname, "tsusers"):
             if not create_remote_group(vm_hostname, "tsusers"):
-                return f"Failed to create group 'tsusers' on VM '{vm_hostname}'.", 500
+                return error_response(f"Failed to create group 'tsusers' on VM '{vm_hostname}'.", 500)
 
         if not remote_group_exists(vm_hostname, "appusers"):
             if not create_remote_group(vm_hostname, "appusers"):
-                return f"Failed to create group 'appusers' on VM '{vm_hostname}'.", 500
+                return error_response(f"Failed to create group 'appusers' on VM '{vm_hostname}'.", 500)
 
         for group in groups_to_add:
             if not is_user_in_remote_group(vm_hostname, username, group):
@@ -811,10 +996,15 @@ def checkout_vm():
         return jsonify(serialize_for_json(response_data)), 200
 
     except json.JSONDecodeError:
-        return "Invalid JSON data", 400
+        return error_response("Invalid JSON data", 400)
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while checking out a VM.")
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to check out a VM.")
+        return error_response("Unable to check out a virtual machine.", 500)
 
 @app.route('/api/vms/<vmid>/update-attributes', methods=['POST'])
 @token_required(['ScheduledTask', 'access_as_user', 'FullAccess'])
@@ -829,52 +1019,54 @@ def update_vm_attributes(vmid):
         if not any([powerstate, networkstatus, vmstatus]):
             return jsonify({'error': "Please provide at least one attribute to update."}), 400
 
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({'error': "Database connection failed."}), 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute(
-                "EXEC UpdateVmAttributes @VMID = %s, @PowerState = %s, @NetworkStatus = %s, @VmStatus = %s",
-                (vmid, powerstate, networkstatus, vmstatus)
-            )
-            row = cursor.fetchone()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC UpdateVmAttributes @VMID = %s, @PowerState = %s, @NetworkStatus = %s, @VmStatus = %s",
+                    (vmid, powerstate, networkstatus, vmstatus)
+                )
+                row = cursor.fetchone()
             conn.commit()
-            if not row:
-                return jsonify({'error': "VM not found or no attributes updated. Please try again."}), 404
-        
-        conn.close()
+
+        if not row:
+            return jsonify({'error': "VM not found or no attributes updated. Please try again."}), 404
 
         return jsonify(row), 200
 
     except json.JSONDecodeError:
         return jsonify({'error': "Invalid JSON data"}), 400
 
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while updating VM %s attributes.", vmid)
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to update VM %s attributes.", vmid)
+        return error_response("Unable to update virtual machine attributes.", 500)
 
 @app.route('/api/vms/<vmid>/delete', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
 def delete_vm(vmid):
     try:
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC DeleteVm @VMID = %s", (vmid,))
+                row = cursor.fetchone()
 
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC DeleteVm @VMID = %s", (vmid,))
-            row = cursor.fetchone()
-
-        conn.commit()
-        conn.close()
+            conn.commit()
 
         if not row:
-            return f"VM with VMID {vmid} could not be deleted or was not found.", 404
+            return error_response(f"VM with VMID {vmid} could not be deleted or was not found.", 404)
 
         return f"VM with VMID {vmid} has been successfully deleted.", 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while deleting VM %s.", vmid)
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to delete VM %s.", vmid)
+        return error_response("Unable to delete the virtual machine.", 500)
 
 @app.route('/api/vms/add', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
@@ -892,71 +1084,69 @@ def add_new_vm():
         description = req_body.get('description', None)
 
         if not (hostname and ipaddress and powerstate and networkstatus and vmstatus):
-            return "Please provide 'hostname', 'ipaddress', 'powerstate', 'networkstatus', and 'vmstatus' in the request body.", 400
+            return error_response("Please provide 'hostname', 'ipaddress', 'powerstate', 'networkstatus', and 'vmstatus' in the request body.", 400)
 
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("""
+                    EXEC AddVm @Hostname = %s, @IPAddress = %s, @PowerState = %s, @NetworkStatus = %s, @VmStatus = %s,
+                                @Username = %s, @AvdHost = %s, @Description = %s
+                """, (hostname, ipaddress, powerstate, networkstatus, vmstatus, username, avdhost, description))
 
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("""
-                EXEC AddVm @Hostname = %s, @IPAddress = %s, @PowerState = %s, @NetworkStatus = %s, @VmStatus = %s,
-                            @Username = %s, @AvdHost = %s, @Description = %s
-            """, (hostname, ipaddress, powerstate, networkstatus, vmstatus, username, avdhost, description))
+                row = cursor.fetchone()
 
-            row = cursor.fetchone()
-
-        conn.commit()
-        conn.close()
+            conn.commit()
 
         if not row:
-            return "Failed to add new VM. Please try again.", 500
+            return error_response("Failed to add new VM. Please try again.", 500)
 
         return jsonify({"NewVMID": row['NewVMID']}), 201
 
     except json.JSONDecodeError:
-        return "Invalid JSON data", 400
+        return error_response("Invalid JSON data", 400)
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while adding a VM.")
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to add a VM.")
+        return error_response("Unable to add the virtual machine.", 500)
 
 @app.route('/api/vms/<vmid>', methods=['GET'])
 @token_required(['access_as_user', 'FullAccess'])
 def get_vm_details(vmid):
     try:
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC GetVmDetails @VMID = %s", (vmid,))
-            row = cursor.fetchone()
-        conn.close()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetVmDetails @VMID = %s", (vmid,))
+                row = cursor.fetchone()
 
         if not row:
-            return f"VM with VMID {vmid} was not found.", 404
+            return error_response(f"VM with VMID {vmid} was not found.", 404)
 
         return jsonify(serialize_for_json(row)), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while reading VM %s.", vmid)
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to read VM %s.", vmid)
+        return error_response("Unable to retrieve the virtual machine.", 500)
 
 @app.route('/api/vms/<vmid>/return', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
 def return_vm(vmid):
     try:
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC ReturnVm @VMID = %s", (vmid,))
-            row = cursor.fetchone()
-        conn.commit()
-        conn.close()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC ReturnVm @VMID = %s", (vmid,))
+                row = cursor.fetchone()
+            conn.commit()
 
         if not row:
-            return f"VM with VMID {vmid} was not found or is not currently checked out.", 404
+            return error_response(f"VM with VMID {vmid} was not found or is not currently checked out.", 404)
 
         hostname = row.get('Hostname')
         username = row.get('ReturnedUsername')
@@ -971,8 +1161,13 @@ def return_vm(vmid):
 
         return jsonify(serialize_for_json(row)), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while returning VM %s.", vmid)
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to return VM %s.", vmid)
+        return error_response("Unable to return the virtual machine.", 500)
 
 @app.route('/api/vms/<hostname>/release', methods=['POST'])
 @token_required(['LinuxHost', 'access_as_user', 'FullAccess'], required_group_ids=[LINUX_HOST_GROUP_ID])
@@ -989,22 +1184,18 @@ def release_vm(hostname):
         if username:
             username = re.sub(r'[^a-zA-Z0-9_]', '', username)
 
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC ReleaseVm @Hostname = %s, @LeaseId = %s, @Username = %s",
+                    (hostname, lease_id, username)
+                )
+                row = cursor.fetchone()
 
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute(
-                "EXEC ReleaseVm @Hostname = %s, @LeaseId = %s, @Username = %s",
-                (hostname, lease_id, username)
-            )
-            row = cursor.fetchone()
-        
-        conn.commit()
-        conn.close()
+            conn.commit()
 
         if not row:
-            return f"Failed to release VM with Hostname {hostname}. Please try again.", 500
+            return error_response(f"Failed to release VM with Hostname {hostname}. Please try again.", 500)
 
         release_status = (row.get('ReleaseStatus') or '').strip()
 
@@ -1020,22 +1211,23 @@ def release_vm(hostname):
         # NoActiveAssignment means the VM is already released, so the agent should stop retrying.
         return jsonify(serialize_for_json(row)), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while releasing VM with Hostname %s.", hostname)
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to release VM with Hostname %s.", hostname)
+        return error_response("Unable to release the virtual machine.", 500)
 
 @app.route('/api/vms/released', methods=['POST'])
 @token_required(['ScheduledTask', 'access_as_user', 'FullAccess'])
 def return_released_vm_api():
     try:
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC ReturnReleasedVms")
-            rows = cursor.fetchall()
-        conn.commit()
-        conn.close()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC ReturnReleasedVms")
+                rows = cursor.fetchall()
+            conn.commit()
 
         if not rows:
             return "No VMs to return at this time.", 200
@@ -1054,39 +1246,23 @@ def return_released_vm_api():
 
         return jsonify(serialize_for_json(rows)), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while returning released VMs.")
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to return released VMs.")
+        return error_response("Unable to return released virtual machines.", 500)
 
 
 @app.route('/api/vms/history', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
 def get_vm_history():
-    try:
-        req_body = request.get_json()
-
-        startdate = req_body.get('startdate', None)
-        enddate = req_body.get('enddate', None)
-        limit = req_body.get('limit', 100)
-
-        startdate = None if startdate == 'null' else startdate
-        enddate = None if enddate == 'null' else enddate
-
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC GetVmHistory @StartDate = %s, @EndDate = %s, @Limit = %s", (startdate, enddate, limit))
-            rows = cursor.fetchall()
-        conn.close()
-
-        return jsonify(serialize_for_json(rows)), 200
-
-    except json.JSONDecodeError:
-        return "Invalid JSON data", 400
-
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    return run_history_query(
+        proc='GetVmHistory',
+        paged_proc='GetVmHistoryPaged',
+        label='VM history',
+    )
 
 # ===============================
 # Scaling APIs
@@ -1094,57 +1270,32 @@ def get_vm_history():
 @app.route('/api/scaling/log', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
 def get_scaling_activity_log():
-    try:
-        req_body = request.get_json()
-
-        startdate = req_body.get('startdate', None)
-        enddate = req_body.get('enddate', None)
-        limit = req_body.get('limit', 100)
-
-        startdate = None if startdate == 'null' else startdate
-        enddate = None if enddate == 'null' else enddate
-
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC GetScalingActivityLog @StartDate = %s, @EndDate = %s, @Limit = %s", (startdate, enddate, limit))
-            rows = cursor.fetchall()
-
-        conn.close()
-
-        if not rows:
-            return jsonify({"message": "No scaling activities found for the specified criteria."}), 200
-
-        return jsonify(rows), 200
-
-    except json.JSONDecodeError:
-        return "Invalid JSON data", 400
-
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    return run_history_query(
+        proc='GetScalingActivityLog',
+        paged_proc='GetScalingActivityLogPaged',
+        label='scaling activity log',
+    )
 
 @app.route('/api/scaling/trigger', methods=['POST'])
 @token_required(['ScheduledTask', 'access_as_user', 'FullAccess'])
 def trigger_scaling_logic():
     try:
         if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
-            return "Configuration error: missing Azure subscription or resource group.", 500
+            return error_response("Configuration error: missing Azure subscription or resource group.", 500)
 
         credential = DefaultAzureCredential()
         compute_client = ComputeManagementClient(credential=credential, subscription_id=VM_SUBSCRIPTION_ID)
 
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC TriggerScalingLogic")
-            rows = cursor.fetchall()
-        
-        conn.close()
-
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC TriggerScalingLogic")
+                rows = cursor.fetchall()
+            # TriggerScalingLogic updates PowerState on the selected VMs and inserts
+            # the activity-log row. pymssql does not autocommit, so without this the
+            # database rolled all of it back while the Azure power operations below
+            # still went ahead -- leaving Azure and the broker out of step and the
+            # scaling activity log permanently empty.
+            conn.commit()
         powered_on_vms = []
         powered_off_vms = []
 
@@ -1164,8 +1315,13 @@ def trigger_scaling_logic():
 
         return jsonify(response_payload), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while triggering scaling logic.")
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to trigger scaling logic.")
+        return error_response("Unable to trigger scaling logic.", 500)
 
 # ===============================
 # Scaling Rules APIs
@@ -1174,43 +1330,43 @@ def trigger_scaling_logic():
 @token_required(['access_as_user', 'FullAccess'])
 def get_scaling_rules():
     try:
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetScalingRules")
+                rows = cursor.fetchall()
 
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC GetScalingRules")
-            rows = cursor.fetchall()
-        conn.close()
+        # An empty rule set is a valid state, not an error. Returning 404 here made the
+        # portal raise_for_status(), flash a failure and redirect, so its "no rules"
+        # empty state could never render.
+        return jsonify(serialize_for_json(rows or [])), 200
 
-        if not rows:
-            return "No scaling rules found.", 404
-
-        return jsonify(rows), 200
-
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while listing scaling rules.")
+        return error_response("Database connection failed.", 500)
+    except Exception:
+        logger.exception("Failed to list scaling rules.")
+        return error_response("Unable to retrieve scaling rules.", 500)
 
 @app.route('/api/scaling/rules/<int:ruleid>', methods=['GET'])
 @token_required(['access_as_user', 'FullAccess'])
 def get_scaling_rule_details(ruleid):
     try:
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC GetScalingRuleDetails @RuleID = %s", (ruleid,))
-            row = cursor.fetchone()
-        conn.close()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetScalingRuleDetails @RuleID = %s", (ruleid,))
+                row = cursor.fetchone()
 
         if not row:
-            return f"Scaling rule with RuleID {ruleid} was not found.", 404
+            return error_response(f"Scaling rule with RuleID {ruleid} was not found.", 404)
 
-        return jsonify(row), 200
+        return jsonify(serialize_for_json(row)), 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while reading scaling rule %s.", ruleid)
+        return error_response("Database connection failed.", 500)
+    except Exception:
+        logger.exception("Failed to read scaling rule %s.", ruleid)
+        return error_response("Unable to retrieve the scaling rule.", 500)
 
 @app.route('/api/scaling/rules/create', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
@@ -1226,40 +1382,41 @@ def create_scaling_rule():
         scaledownincrement = req_body.get('scaledownincrement')
 
         if not all([minvms is not None, maxvms is not None, scaleupratio is not None, scaleupincrement is not None, scaledownratio is not None, scaledownincrement is not None]):
-            return (
+            return error_response(
                 "Please provide all required fields: 'minvms', 'maxvms', 'scaleupratio', "
                 "'scaleupincrement', 'scaledownratio', 'scaledownincrement'.",
-                400,
+                400
             )
 
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute(
-                """
-                EXEC CreateScalingRule @MinVMs = %s, @MaxVMs = %s, @ScaleUpRatio = %s, 
-                                    @ScaleUpIncrement = %s, @ScaleDownRatio = %s, @ScaleDownIncrement = %s
-                """,
-                (minvms, maxvms, scaleupratio, scaleupincrement, scaledownratio, scaledownincrement),
-            )
-            row = cursor.fetchone()
-        conn.commit()
-        conn.close()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    """
+                    EXEC CreateScalingRule @MinVMs = %s, @MaxVMs = %s, @ScaleUpRatio = %s, 
+                                        @ScaleUpIncrement = %s, @ScaleDownRatio = %s, @ScaleDownIncrement = %s
+                    """,
+                    (minvms, maxvms, scaleupratio, scaleupincrement, scaledownratio, scaledownincrement),
+                )
+                row = cursor.fetchone()
+            conn.commit()
 
         if not row:
-            return "Failed to create the scaling rule. Please try again.", 500
+            return error_response("Failed to create the scaling rule. Please try again.", 500)
 
         new_rule_id = row.get('NewRuleID')
 
         return jsonify({"NewRuleID": new_rule_id}), 201
 
     except json.JSONDecodeError:
-        return "Invalid JSON data", 400
+        return error_response("Invalid JSON data", 400)
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while creating a scaling rule.")
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to create a scaling rule.")
+        return error_response("Unable to create the scaling rule.", 500)
 
 @app.route('/api/scaling/rules/<int:ruleid>/update', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
@@ -1275,85 +1432,63 @@ def update_scaling_rule(ruleid):
         scaledownincrement = req_body.get('scaledownincrement')
 
         if not any([minvms is not None, maxvms is not None, scaleupratio is not None, scaleupincrement is not None, scaledownratio is not None, scaledownincrement is not None]):
-            return "Please provide at least one field to update.", 400
+            return error_response("Please provide at least one field to update.", 400)
 
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                EXEC UpdateScalingRule @RuleID = %s, @MinVMs = %s, @MaxVMs = %s, @ScaleUpRatio = %s, 
-                                    @ScaleUpIncrement = %s, @ScaleDownRatio = %s, @ScaleDownIncrement = %s
-                """,
-                (ruleid, minvms, maxvms, scaleupratio, scaleupincrement, scaledownratio, scaledownincrement),
-            )
-        conn.commit()
-        conn.close()
+        with db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    EXEC UpdateScalingRule @RuleID = %s, @MinVMs = %s, @MaxVMs = %s, @ScaleUpRatio = %s, 
+                                        @ScaleUpIncrement = %s, @ScaleDownRatio = %s, @ScaleDownIncrement = %s
+                    """,
+                    (ruleid, minvms, maxvms, scaleupratio, scaleupincrement, scaledownratio, scaledownincrement),
+                )
+            conn.commit()
 
         return f"Scaling rule with RuleID {ruleid} updated successfully.", 200
 
     except json.JSONDecodeError:
-        return "Invalid JSON data", 400
+        return error_response("Invalid JSON data", 400)
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while updating scaling rule %s.", ruleid)
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to update scaling rule %s.", ruleid)
+        return error_response("Unable to update the scaling rule.", 500)
 
 @app.route('/api/scaling/rules/<int:ruleid>/delete', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
 def delete_scaling_rule(ruleid):
     try:
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC DeleteScalingRule @RuleID = %s", (ruleid,))
-            row = cursor.fetchone()
-        conn.commit()
-        conn.close()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC DeleteScalingRule @RuleID = %s", (ruleid,))
+                row = cursor.fetchone()
+            conn.commit()
 
         if not row:
-            return f"Scaling rule with RuleID {ruleid} could not be deleted or was not found.", 404
+            return error_response(f"Scaling rule with RuleID {ruleid} could not be deleted or was not found.", 404)
 
         return f"Scaling rule with RuleID {ruleid} has been successfully deleted.", 200
 
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while deleting scaling rule %s.", ruleid)
+        return error_response("Database connection failed.", 500)
+
+    except Exception:
+        logger.exception("Failed to delete scaling rule %s.", ruleid)
+        return error_response("Unable to delete the scaling rule.", 500)
 
 @app.route('/api/scaling/rules/history', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
 def get_scaling_rules_history():
-    try:
-        req_body = request.get_json()
-
-        startdate = req_body.get('startdate', None)
-        enddate = req_body.get('enddate', None)
-        limit = req_body.get('limit', 100)
-
-        startdate = None if startdate == 'null' else startdate
-        enddate = None if enddate == 'null' else enddate
-
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        with conn.cursor(as_dict=True) as cursor:
-            cursor.execute("EXEC GetVMScalingRulesHistory @StartDate = %s, @EndDate = %s, @Limit = %s", (startdate, enddate, limit))
-            rows = cursor.fetchall()
-        conn.close()
-
-        if not rows:
-            return jsonify({"message": "No scaling activities found for the specified criteria."}), 200
-
-        return jsonify(rows), 200
-
-    except json.JSONDecodeError:
-        return "Invalid JSON data", 400
-
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+    return run_history_query(
+        proc='GetVMScalingRulesHistory',
+        paged_proc='GetVmScalingRulesHistoryPaged',
+        label='scaling rules history',
+    )
 
 # ===============================
 # Linux Host Settings APIs
@@ -1408,11 +1543,7 @@ def update_host_settings():
                 )
             }), 400
 
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        try:
+        with db_connection() as conn:
             with conn.cursor(as_dict=True) as cursor:
                 cursor.execute(
                     "EXEC UpdateLinuxHostSettings "
@@ -1441,13 +1572,15 @@ def update_host_settings():
                 row = cursor.fetchone()
 
             conn.commit()
-        finally:
-            conn.close()
 
         if not row:
             return jsonify({'error': 'Unable to update Linux host settings.'}), 500
 
         return jsonify(normalize_host_settings(row)), 200
+
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while updating Linux host settings.")
+        return error_response("Database connection failed.", 500)
 
     except Exception:
         logger.exception("Failed to update Linux host settings.")
@@ -1473,16 +1606,10 @@ def apply_host_settings():
         if settings is None:
             return jsonify({'error': 'Unable to read Linux host settings.'}), 500
 
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed.", 500
-
-        try:
+        with db_connection() as conn:
             with conn.cursor(as_dict=True) as cursor:
                 cursor.execute("EXEC GetVms")
                 vms = cursor.fetchall()
-        finally:
-            conn.close()
 
         if requested_hostnames:
             wanted = {str(name).strip().lower() for name in requested_hostnames if str(name).strip()}
@@ -1519,6 +1646,10 @@ def apply_host_settings():
             'SucceededCount': succeeded,
             'Results': results
         }), 200
+
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while pushing Linux host settings.")
+        return error_response("Database connection failed.", 500)
 
     except Exception:
         logger.exception("Failed to push Linux host settings.")

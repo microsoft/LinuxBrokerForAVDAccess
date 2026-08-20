@@ -86,8 +86,16 @@ The scripts do not contain `USE <database>` statements. The target database come
 - `031_create_procedure-UpdateLinuxHostSettings.sql`: updates the profile, bumping `SettingsVersion` only when a value actually changed
 - `032_create_procedure-RecordHostSettingsApplied.sql`: records the settings version a host has applied
 - `033_alter_procedure-GetVms.sql`: redefines `dbo.GetVms` to also return `SettingsVersion` and `SettingsAppliedDate`
+- `034_create_procedure-GetVmSummary.sql`: returns one aggregate row for dashboard VM counters
+- `035_alter_procedure-GetScalingActivityLog.sql`: redefines `dbo.GetScalingActivityLog` to parse optional `MM/DD/YYYY` date strings explicitly
+- `036_alter_procedure-GetVmScalingRulesHistory.sql`: redefines `dbo.GetVmScalingRulesHistory` to parse optional `MM/DD/YYYY` date strings explicitly
+- `037_create_procedure-GetVmHistoryPaged.sql`: returns paged VM history rows with `TotalCount`
+- `038_create_procedure-GetScalingActivityLogPaged.sql`: returns paged scaling activity rows with `TotalCount`
+- `039_create_procedure-GetVmScalingRulesHistoryPaged.sql`: returns paged scaling rule history rows with `TotalCount`
 
 `033` exists as its own file rather than being folded into `014` because `014` runs before `029` adds those columns, and SQL Server validates column references against existing tables when a procedure is created.
+
+`034` through `039` are also additive/redefinition files so fresh deployments keep procedure validation in numeric schema order. The paged history procedures intentionally omit the legacy `@Limit` parameter: `@Offset` and `@PageSize` are the only result-size controls, and `NULL`/empty/malformed date strings are treated as no date filter.
 
 ## Current Runtime Expectations
 
@@ -216,7 +224,11 @@ WHERE name IN (
     'RegisterLinuxHostVm',
     'GetLinuxHostSettings',
     'UpdateLinuxHostSettings',
-    'RecordHostSettingsApplied'
+    'RecordHostSettingsApplied',
+    'GetVmSummary',
+    'GetVmHistoryPaged',
+    'GetScalingActivityLogPaged',
+    'GetVmScalingRulesHistoryPaged'
 )
 ORDER BY name;
 ```

@@ -1,17 +1,19 @@
-name: Front end tests
+name: App tests
 
 on:
   pull_request:
     paths:
       - 'front_end/**'
+      - 'api/**'
       - '.github/workflows/front-end-tests.yml'
   push:
     paths:
       - 'front_end/**'
+      - 'api/**'
       - '.github/workflows/front-end-tests.yml'
 
 jobs:
-  test:
+  front-end-test:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -39,4 +41,43 @@ jobs:
           API_CLIENT_ID: api-client-id
           API_URL: https://api.example.invalid
           MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: secret
+        run: pytest
+
+  api-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python version
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: api
+        env:
+          TENANT_ID: tenant-id
+          CLIENT_ID: client-id
+          VM_SUBSCRIPTION_ID: subscription-id
+          VM_RESOURCE_GROUP: resource-group
+          AVD_HOST_GROUP_ID: avd-group-id
+          LINUX_HOST_GROUP_ID: linux-group-id
+          DOMAIN_NAME: example.invalid
+          VAULT_URL: https://vault.example.invalid
+          KEY_NAME: ssh-key
+          DB_SERVER: db.example.invalid
+          DB_DATABASE: LinuxBrokerTest
+          DB_USERNAME: api-user
+          DB_PASSWORD_NAME: db-password
+          MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: provider-secret
+          NFS_SHARE: /mnt/test
         run: pytest

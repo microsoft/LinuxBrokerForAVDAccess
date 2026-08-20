@@ -70,13 +70,19 @@ class FakeResponse:
     def raise_for_status(self):
         if self.status_code >= 400:
             import requests
-            raise requests.exceptions.HTTPError(f"status {self.status_code}")
+            # Real requests attaches the response to the error; code that inspects
+            # e.response.status_code depends on it, so the stub must match.
+            raise requests.exceptions.HTTPError(f"status {self.status_code}", response=self)
 
 
 class FakeBrokerApi:
     def __init__(self):
         self.posts = []
-        self.scaling_log_payload = [dict(LOG_ENTRY, ActivityID=i) for i in range(1, 6)]
+        # Number of rows the history endpoints report.
+        self.history_total = 120
+        self.scaling_log_payload = [
+            dict(LOG_ENTRY, ActivityID=i) for i in range(1, self.history_total + 1)
+        ]
         self.host_settings = dict(HOST_SETTINGS)
         self.apply_result = {"SettingsVersion": HOST_SETTINGS["SettingsVersion"],
                              "TargetCount": 2, "SucceededCount": 2,
@@ -85,10 +91,29 @@ class FakeBrokerApi:
         self.raise_get_paths = set()
         self.raise_post_paths = set()
 
+        # Mirrors GetVmSummary for the four seeded VMs in VMS: one Available (on,
+        # reachable -> ready), one CheckedOut, one Maintenance (off, unreachable),
+        # one Released.
+        self.vm_summary = {
+            "TotalVMs": 4, "Available": 1, "CheckedOut": 1, "Maintenance": 1,
+            "Released": 1, "PoweredOn": 3, "PoweredOff": 1, "Unreachable": 1,
+            "Ready": 1,
+        }
+        # Set to 404/405 to simulate an API that predates /vms/summary.
+        self.summary_status = None
+
+        # Set True to simulate an API that predates pagination and answers with a
+        # bare list regardless of page/per_page.
+        self.legacy_history = False
+
     def get(self, url, **kwargs):
         import requests
         if any(url.endswith(path) for path in self.raise_get_paths):
             raise requests.exceptions.RequestException("broker unavailable")
+        if url.endswith("/vms/summary"):
+            if self.summary_status is not None:
+                return FakeResponse({"error": "not found"}, status_code=self.summary_status)
+            return FakeResponse(self.vm_summary)
         if url.endswith("/hosts/settings"):
             return FakeResponse(self.host_settings)
         if re.search(r"/vms/\d+$", url):
@@ -104,7 +129,8 @@ class FakeBrokerApi:
 
     def post(self, url, **kwargs):
         import requests
-        self.posts.append({"url": url, "json": kwargs.get("json")})
+        params = kwargs.get("params") or {}
+        self.posts.append({"url": url, "json": kwargs.get("json"), "params": params})
         if any(url.endswith(path) for path in self.raise_post_paths):
             raise requests.exceptions.RequestException("broker unavailable")
         if url.endswith("/hosts/settings/update"):
@@ -112,16 +138,40 @@ class FakeBrokerApi:
         if url.endswith("/hosts/settings/apply"):
             return FakeResponse(self.apply_result)
         if url.endswith("/scaling/log"):
-            return FakeResponse(self.scaling_log_payload)
+            return self._history(self.scaling_log_payload, params)
         if url.endswith("/scaling/rules/history"):
-            return FakeResponse([dict(RULE, RuleID=i, SysStartTime="2026-08-01 10:00:00", SysEndTime=None) for i in range(1, 6)])
+            rows = [dict(RULE, RuleID=i, SysStartTime="2026-08-01 10:00:00", SysEndTime=None)
+                    for i in range(1, self.history_total + 1)]
+            return self._history(rows, params)
         if url.endswith("/vms/history"):
-            return FakeResponse(VMS)
+            rows = [dict(VMS[i % len(VMS)], VMID=i + 1) for i in range(self.history_total)]
+            return self._history(rows, params)
         if url.endswith("/scaling/rules/create"):
             return FakeResponse({"RuleID": 1}, status_code=201)
         if url.endswith("/vms/checkout"):
             return FakeResponse(VMS[0])
         return FakeResponse({})
+
+    def _history(self, rows, params):
+        """Mirror the API: a paged envelope when page/per_page are supplied, a bare
+        list otherwise."""
+        if not isinstance(rows, list):
+            return FakeResponse(rows)
+
+        if self.legacy_history or not params:
+            return FakeResponse(rows)
+
+        page = int(params.get("page", 1) or 1)
+        per_page = int(params.get("per_page", 50) or 50)
+        start = (page - 1) * per_page
+        total = len(rows)
+        return FakeResponse({
+            "items": rows[start:start + per_page],
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": (total + per_page - 1) // per_page if per_page else 0,
+        })
 
 
 @pytest.fixture(scope="session")
@@ -160,13 +210,6 @@ def sign_in(client):
                         "oid": "0000-1111", "tid": "2222-3333"}
         sess["access_token"] = "fake-token"
         sess["token_expiry"] = expiry
-
-
-def seed_histories(client, count=120):
-    with client.session_transaction() as sess:
-        sess["vm_history"] = [dict(VMS[i % 4], VMID=i + 1) for i in range(count)]
-        sess["scaling_activity_log"] = [dict(LOG_ENTRY, ActivityID=i + 1) for i in range(count)]
-        sess["scaling_rules_history"] = [dict(RULE, RuleID=i + 1) for i in range(count)]
 
 
 def csrf_token(html):
