@@ -11,7 +11,7 @@ The front end is a small Flask app with server-rendered Jinja templates and loca
 | `app.py` | Creates the Flask app, enables global CSRF protection, registers route modules, and defines shared error handlers. |
 | `config.py` | Reads cloud, Entra ID, and Broker API settings from environment variables. |
 | `function_authentication.py` | Provides the `@login_required` decorator used by authenticated pages. |
-| `function_api.py` | Centralises authenticated Broker API helpers, request timeouts, JSON decoding, and VM summary aggregation. |
+| `function_api.py` | Centralises authenticated Broker API helpers, request timeouts, JSON decoding, dashboard VM summary retrieval, and paged history calls. |
 | `route_authentication.py` | Implements sign in, token callback, and sign out. |
 | `route_user.py` | Implements the profile page. |
 | `route_vm_management.py` | Registers VM management routes with `register_route_vm_management(app)`. |
@@ -24,6 +24,12 @@ The front end is a small Flask app with server-rendered Jinja templates and loca
 | `static\bootstrap\` | Vendored Bootstrap 5.3.8 CSS and JavaScript. |
 
 Routes are registered from `app.py` by calling `register_route_*(app)` functions. Add new VM pages to the VM route module and new scaling pages to the scaling route module unless the page is genuinely cross-cutting.
+
+Current Broker API data flow:
+
+- The dashboard calls `GET /api/vms/summary` for aggregate counters. If that endpoint returns `404` or `405`, the portal falls back to `GET /api/vms` and counts client-side so rolling deployments keep working.
+- VM history, scaling activity, and scaling rule history request one server-side page at a time with `page` and `per_page`. The Flask session stores only filter criteria, not full result sets, so result size is bounded and two browser tabs do not overwrite each other's data.
+- The portal omits unset filters instead of sending the legacy `"null"` sentinel.
 
 ## Shared Macro Library
 

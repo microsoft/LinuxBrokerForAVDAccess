@@ -4,6 +4,7 @@ import logging
 from flask import request, redirect, url_for, session, render_template, flash
 from datetime import datetime
 from function_authentication import login_required
+from function_api import NotAuthenticated, fetch_history_page
 from config import API_URL
 
 logger = logging.getLogger(__name__)
@@ -187,115 +188,72 @@ def register_route_vm_management(app):
     @login_required
     def vm_history():
         if request.method == 'POST':
-            try:
-                startdate = request.form.get('startdate')
-                enddate = request.form.get('enddate')
-                limit = request.form.get('limit', 'null')
+            startdate = request.form.get('startdate')
+            enddate = request.form.get('enddate')
+            limit = request.form.get('limit', '')
 
-                ignore_dates = request.form.get('ignore_dates')
-                ignore_limit = request.form.get('ignore_limit')
+            ignore_dates = request.form.get('ignore_dates')
+            ignore_limit = request.form.get('ignore_limit')
 
-                # Preserve exactly what the operator typed. The values below are
-                # rewritten into the API's MM/DD/YYYY (or "null") form, and the
-                # route then redirects, so without this the filter bar would come
-                # back blank on the following GET.
-                session['vm_history_filters'] = {
-                    "startdate": startdate or "",
-                    "enddate": enddate or "",
-                    "limit": limit if limit and limit != "null" else "",
-                    "ignore_dates": bool(ignore_dates),
-                    "ignore_limit": bool(ignore_limit),
-                }
+            # Validate before storing so a bad date is reported against the form the
+            # operator is looking at, rather than surfacing later as a query failure.
+            if not ignore_dates:
+                for label, value in (("start", startdate), ("end", enddate)):
+                    if not value:
+                        continue
+                    try:
+                        datetime.strptime(value, '%Y-%m-%d')
+                    except ValueError:
+                        flash(f"Invalid {label} date format. Please use 'YYYY-MM-DD'.", "danger")
+                        return redirect(url_for('vm_history'))
 
-                if ignore_limit:
-                    limit = "null"
+            # Only the criteria are stored. Results are fetched a page at a time on the
+            # GET, so the session no longer holds an unbounded result set and two
+            # browser tabs cannot clobber each other's results.
+            session['vm_history_filters'] = {
+                "startdate": startdate or "",
+                "enddate": enddate or "",
+                "limit": limit if limit and limit != "null" else "",
+                "ignore_dates": bool(ignore_dates),
+                "ignore_limit": bool(ignore_limit),
+            }
+            session.pop('vm_history', None)
+            session.pop('vm_history_data', None)
 
-                if ignore_dates:
-                    startdate = "null"
-                    enddate = "null"
-                else:
-                    if startdate:
-                        try:
-                            startdate = datetime.strptime(startdate, '%Y-%m-%d').strftime('%m/%d/%Y')
-                        except ValueError:
-                            flash("Invalid start date format. Please use 'YYYY-MM-DD'.", "danger")
-                            return redirect(url_for('vm_history'))
-                    else:
-                        startdate = "null"
+            return redirect(url_for('vm_history'))
 
-                    if enddate:
-                        try:
-                            enddate = datetime.strptime(enddate, '%Y-%m-%d').strftime('%m/%d/%Y')
-                        except ValueError:
-                            flash("Invalid end date format. Please use 'YYYY-MM-DD'.", "danger")
-                            return redirect(url_for('vm_history'))
-                    else:
-                        enddate = "null"
+        filters = session.get('vm_history_filters') or {
+            "startdate": "",
+            "enddate": "",
+            "limit": "",
+            "ignore_dates": False,
+            "ignore_limit": False,
+        }
 
-                data = {
-                    "startdate": startdate,
-                    "enddate": enddate,
-                    "limit": limit if limit else "null"
-                }
+        try:
+            page = max(1, int(request.args.get('page', 1)))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            per_page = min(200, max(1, int(request.args.get('per_page', 10))))
+        except (TypeError, ValueError):
+            per_page = 10
 
-                session['vm_history_data'] = data
+        try:
+            rows, total_items, total_pages = fetch_history_page(
+                '/vms/history', filters, page, per_page
+            )
+        except NotAuthenticated:
+            return redirect(url_for('login'))
+        except (requests.exceptions.RequestException, ValueError) as e:
+            flash("Unable to retrieve VM history. Please try again later.", "danger")
+            logger.error("Error retrieving VM history: %s", e)
+            return redirect(url_for('view_all_vms'))
 
-                access_token = session.get("access_token")
-                if not access_token:
-                    return redirect(url_for('login'))
-                headers = {'Authorization': f'Bearer {access_token}'}
-
-                response = requests.post(f"{API_URL}/vms/history", headers=headers, json=data)
-                response.raise_for_status()
-
-                vm_history = response.json()
-
-                if not vm_history:
-                    flash("No VM history records found for the specified criteria.", "info")
-                else:
-                    flash("VM history retrieved successfully!", "success")
-
-                session['vm_history'] = vm_history
-
-                return redirect(url_for('vm_history'))
-            except requests.exceptions.RequestException as e:
-                flash("Unable to retrieve VM history. Please try again later.", "danger")
-                logger.error(f"Error retrieving VM history: {e}")
-                return redirect(url_for('view_all_vms'))
-            except Exception as e:
-                flash("An unexpected error occurred. Please try again later.", "danger")
-                logger.error(f"Unexpected error in vm_history POST: {e}")
-                return redirect(url_for('view_all_vms'))
-        else:
-            try:
-                vm_history = session.get('vm_history', [])
-                filters = session.get('vm_history_filters') or {
-                    "startdate": "",
-                    "enddate": "",
-                    "limit": 20,
-                    "ignore_dates": False,
-                    "ignore_limit": False,
-                }
-                page = max(1, int(request.args.get('page', 1)))
-                per_page = max(1, int(request.args.get('per_page', 10)))
-
-                total_items = len(vm_history)
-                total_pages = (total_items + per_page - 1) // per_page
-
-                start = (page - 1) * per_page
-                end = start + per_page
-                vm_history_paginated = vm_history[start:end]
-
-                logger.debug(f"Displaying VM history page {page} of {total_pages}, items {start} to {end}")
-
-                return render_template('vm/vm_history.html', 
-                                       vm_history=vm_history_paginated, 
-                                       page=page, 
-                                       total_pages=total_pages,
-                                       per_page=per_page,
-                                       total_items=total_items,
-                                       filters=filters)
-            except Exception as e:
-                flash("An unexpected error occurred while displaying VM history.", "danger")
-                logger.error(f"Unexpected error in vm_history GET: {e}")
-                return redirect(url_for('view_all_vms'))
+        return render_template('vm/vm_history.html',
+                               vm_history=rows,
+                               page=page,
+                               total_pages=total_pages,
+                               per_page=per_page,
+                               total_items=total_items,
+                               filters=filters)
