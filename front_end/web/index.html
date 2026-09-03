@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Linux Broker Management Portal" />
+    <title>Linux Broker Management Portal</title>
+
+    <!--
+      Served by Flask from /favicon.ico. Every asset on this page is local: the
+      portal must never reach a public CDN, because it has to render in Azure
+      Government, sovereign and air-gapped environments.
+    -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+
+    <!-- Applied before first paint so the theme does not flash on load. -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem('lb-theme');
+          var theme =
+            stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+          document.documentElement.setAttribute('data-theme', theme);
+        } catch (e) {
+          /* storage unavailable */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

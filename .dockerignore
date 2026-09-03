@@ -1,17 +1,37 @@
 .git
 .github
 .azure
-.venv
-__pycache__
+.env
+local.settings.json
+artifacts
+example_code
+priv-folder
+bin
+obj
 *.pyc
 *.pyo
 *.pyd
 *.log
 *.db
-.env
-local.settings.json
-bin
-obj
-artifacts
-example_code
-priv-folder
+
+# These patterns are matched against the path relative to the build context, and a
+# bare name only matches at the root, so the `**/` prefix is what makes them apply
+# to front_end/ and api/ as well. Without it a local virtualenv or node_modules is
+# copied into the image.
+.venv
+**/.venv
+__pycache__
+**/__pycache__
+.pytest_cache
+**/.pytest_cache
+
+# Flask server-side session files hold live access tokens. They are runtime state
+# and must never be baked into an image.
+flask_session
+**/flask_session
+
+# Front end build artifacts. node_modules is restored inside the Node build stage,
+# and static/dist is produced there, so neither should come from the host.
+node_modules
+**/node_modules
+front_end/static/dist

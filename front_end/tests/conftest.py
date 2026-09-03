@@ -57,6 +57,13 @@ HOST_SETTINGS = {"GracePeriodSeconds": 1200, "ReconcileIntervalSeconds": 60,
                  "ScreenIdleDelaySeconds": 0, "ScreenLockDelaySeconds": 0,
                  "ScreenLockSettingsLocked": True, "SettingsVersion": 3}
 
+# Every JSON endpoint the React portal calls.
+API = "/api/ui"
+
+# The three history endpoints behave identically apart from the broker path they
+# read from, so they are parametrised together throughout the suite.
+HISTORY_PATHS = [f"{API}/vms/history", f"{API}/scaling/log", f"{API}/scaling/rules/history"]
+
 
 class FakeResponse:
     def __init__(self, payload, status_code=200):
@@ -99,7 +106,7 @@ class FakeBrokerApi:
             "Released": 1, "PoweredOn": 3, "PoweredOff": 1, "Unreachable": 1,
             "Ready": 1,
         }
-        # Set to 404/405 to simulate an API that predates /vms/summary.
+        # Set to 404/405/500 to simulate an API that predates /vms/summary.
         self.summary_status = None
 
         # Set True to simulate an API that predates pagination and answers with a
@@ -212,22 +219,24 @@ def sign_in(client):
         sess["token_expiry"] = expiry
 
 
-def csrf_token(html):
-    match = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', html)
-    assert match, "expected CSRF token in rendered form"
-    return match.group(1)
+def csrf_token(client):
+    """Fetch a CSRF token the way the React client does.
+
+    The portal reads it from the session bootstrap and returns it on every
+    state-changing request as an X-CSRFToken header.
+    """
+    response = client.get(f"{API}/session")
+    assert response.status_code == 200
+    token = response.get_json()["csrfToken"]
+    assert token
+    return token
 
 
-def assert_form_value(html, name, value):
-    assert re.search(rf'<input\b[^>]*name="{re.escape(name)}"[^>]*value="{re.escape(value)}"', html)
+def post(client, path, json=None):
+    """POST with a valid CSRF header, as the portal does."""
+    return client.post(path, json=json if json is not None else {},
+                       headers={"X-CSRFToken": csrf_token(client)})
 
 
-def assert_checkbox_checked(html, name):
-    assert re.search(rf'<input\b[^>]*name="{re.escape(name)}"[^>]*checked', html)
-
-
-def row_for_host(html, hostname):
-    rows = re.findall(r"<tr>.*?</tr>", html, flags=re.S)
-    row = next((candidate for candidate in rows if hostname in candidate), "")
-    assert row, f"expected row for {hostname}"
-    return row
+def vm_by_hostname(hostname):
+    return next(vm for vm in VMS if vm["Hostname"] == hostname)

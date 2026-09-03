@@ -31,7 +31,7 @@ The solution consists of the following components:
 
 - **Azure Function for Scaling Tasks**: An Azure Function that runs on a schedule to manage scaling of Linux hosts based on the scaling rules. It updates VM network statuses, turns VMs on or off, and performs health checks on the Linux hosts.
 
-- **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as adding/deleting VMs, checking out VMs, releasing/returning VMs, modifying VM statuses, and viewing logs.
+- **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as adding/deleting VMs, checking out VMs, releasing/returning VMs, modifying VM statuses, and viewing logs. It is a React 18 and TypeScript single-page app built with Vite and Tailwind CSS, served by a Flask backend-for-frontend that holds the Entra ID token server-side and calls the Broker API on the administrator's behalf.
 
 - **Azure Key Vault**: Stores sensitive information such as SSH keys and database passwords, accessed securely by the Broker API using managed identity.
 
@@ -50,7 +50,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 - **Broker API**: RESTful API for brokering connections and managing VMs.
 - **Broker Database**: Azure SQL Database for storing VM and scaling data.
 - **Azure Function for Scaling Tasks**: Manages scaling of Linux hosts.
-- **Service Management Portal**: Front-end application for administrators.
+- **Service Management Portal**: React and TypeScript front-end application for administrators, served by a Flask backend-for-frontend.
 - **Azure Key Vault**: Secure storage for SSH keys and passwords.
 - **Managed Identities**: Used for secure authentication between components.
 - **Security Groups**: Controls access permissions for managed identities.
@@ -259,7 +259,7 @@ For existing environments that need in-place rollout instead of new-environment 
 
 The deployment targets Azure commercial by default. Set `azureCloudName` to `AzureUSGovernment` or `AzureCustom` to deploy elsewhere; commercial and Government resolve their endpoints automatically, while custom and sovereign clouds require their own authority, Graph, STS, and App Service FQDNs. Air-gapped environments should also set `scriptSourceRoot` to a reachable mirror of this repository, because the Linux hosts download their agent scripts from it during bootstrap.
 
-The Service Management Portal serves all of its front-end assets (Bootstrap, stylesheet, scripts and icons) from its own container under `front_end/static/`. It makes no requests to a public CDN, so the portal renders correctly in Government, sovereign and air-gapped environments where outbound internet access is blocked.
+The Service Management Portal serves all of its front-end assets from its own container under `front_end/static/dist/`. The bundle is compiled during the container build, uses the system font stack, and draws its icons as inline SVG, so it makes no requests to a public CDN and renders correctly in Government, sovereign and air-gapped environments where outbound internet access is blocked. Note that building the portal image does require access to the npm registry, so a disconnected build host needs an internal npm mirror. See [front_end/README.md](front_end/README.md).
 
 The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps.
 
