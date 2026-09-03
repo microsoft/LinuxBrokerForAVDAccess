@@ -57,6 +57,13 @@ HOST_SETTINGS = {"GracePeriodSeconds": 1200, "ReconcileIntervalSeconds": 60,
                  "ScreenIdleDelaySeconds": 0, "ScreenLockDelaySeconds": 0,
                  "ScreenLockSettingsLocked": True, "SettingsVersion": 3}
 
+# Every JSON endpoint the React portal calls.
+API = "/api/ui"
+
+# The three history endpoints behave identically apart from the broker path they
+# read from, so they are parametrised together throughout the suite.
+HISTORY_PATHS = [f"{API}/vms/history", f"{API}/scaling/log", f"{API}/scaling/rules/history"]
+
 
 class FakeResponse:
     def __init__(self, payload, status_code=200):
@@ -99,7 +106,7 @@ class FakeBrokerApi:
             "Released": 1, "PoweredOn": 3, "PoweredOff": 1, "Unreachable": 1,
             "Ready": 1,
         }
-        # Set to 404/405 to simulate an API that predates /vms/summary.
+        # Set to 404/405/500 to simulate an API that predates /vms/summary.
         self.summary_status = None
 
         # Set True to simulate an API that predates pagination and answers with a
@@ -196,6 +203,61 @@ def client(app, broker_api):
     return app.test_client()
 
 
+# A minimal stand-in for the Vite output. It carries the same local-only asset
+# references as the real shell so the no-CDN assertion is still meaningful.
+STUB_SHELL = """<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Linux Broker Management Portal</title>
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <script type="module" crossorigin src="/static/dist/assets/index.js"></script>
+    <link rel="stylesheet" crossorigin href="/static/dist/assets/index.css" />
+  </head>
+  <body><div id="root"></div></body>
+</html>
+"""
+
+
+@pytest.fixture
+def spa_bundle():
+    """Guarantee a built SPA shell exists for the tests that serve it.
+
+    `static/dist` is a build artifact from `npm run build`, so it is absent on a
+    fresh checkout and in the Python CI job, which has no Node toolchain. These
+    tests are about Flask's routing and headers, not about the bundle's contents,
+    so they supply their own shell rather than depending on whether someone has
+    run a build. A real build is left untouched.
+    """
+    import app as app_module
+
+    entry = Path(app_module.SPA_DIST) / app_module.SPA_ENTRY
+    if entry.exists():
+        yield entry
+        return
+
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text(STUB_SHELL, encoding="utf-8")
+    try:
+        yield entry
+    finally:
+        entry.unlink(missing_ok=True)
+        # Only removes the directory when it is empty, so a partial real build
+        # is never deleted.
+        try:
+            entry.parent.rmdir()
+        except OSError:
+            pass
+
+
+@pytest.fixture
+def missing_spa_bundle(tmp_path, monkeypatch):
+    """Point the app at an empty dist folder to exercise the not-built branch."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "SPA_DIST", str(tmp_path / "dist"))
+
+
 @pytest.fixture
 def signed_in_client(client):
     sign_in(client)
@@ -212,22 +274,24 @@ def sign_in(client):
         sess["token_expiry"] = expiry
 
 
-def csrf_token(html):
-    match = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', html)
-    assert match, "expected CSRF token in rendered form"
-    return match.group(1)
+def csrf_token(client):
+    """Fetch a CSRF token the way the React client does.
+
+    The portal reads it from the session bootstrap and returns it on every
+    state-changing request as an X-CSRFToken header.
+    """
+    response = client.get(f"{API}/session")
+    assert response.status_code == 200
+    token = response.get_json()["csrfToken"]
+    assert token
+    return token
 
 
-def assert_form_value(html, name, value):
-    assert re.search(rf'<input\b[^>]*name="{re.escape(name)}"[^>]*value="{re.escape(value)}"', html)
+def post(client, path, json=None):
+    """POST with a valid CSRF header, as the portal does."""
+    return client.post(path, json=json if json is not None else {},
+                       headers={"X-CSRFToken": csrf_token(client)})
 
 
-def assert_checkbox_checked(html, name):
-    assert re.search(rf'<input\b[^>]*name="{re.escape(name)}"[^>]*checked', html)
-
-
-def row_for_host(html, hostname):
-    rows = re.findall(r"<tr>.*?</tr>", html, flags=re.S)
-    row = next((candidate for candidate in rows if hostname in candidate), "")
-    assert row, f"expected row for {hostname}"
-    return row
+def vm_by_hostname(hostname):
+    return next(vm for vm in VMS if vm["Hostname"] == hostname)

@@ -28,3 +28,7 @@ priv-*
 .vscode
 flask_session/
 .pytest_cache/
+
+# Front end build artifacts
+front_end/web/node_modules/
+front_end/static/dist/

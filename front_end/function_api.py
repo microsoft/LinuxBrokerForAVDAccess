@@ -44,8 +44,65 @@ def api_post(path, payload=None, params=None, timeout=DEFAULT_TIMEOUT):
     return response.json()
 
 
+TRUTHY = {"1", "true", "yes", "on"}
+
+
+def filters_from_args(args):
+    """Build the history filter dict from query-string arguments.
+
+    Filters live in the URL rather than the Flask session, so they are
+    bookmarkable and two browser tabs cannot overwrite each other's criteria.
+    """
+    def flag(name):
+        return str(args.get(name, "")).strip().lower() in TRUTHY
+
+    return {
+        "startdate": (args.get("startdate") or "").strip(),
+        "enddate": (args.get("enddate") or "").strip(),
+        "limit": (args.get("limit") or "").strip(),
+        "ignore_dates": flag("ignore_dates"),
+        "ignore_limit": flag("ignore_limit"),
+    }
+
+
+def validate_history_filters(filters):
+    """Return a human-readable error for an unusable filter set, else None.
+
+    Reported against the request that carried the bad value so the operator sees
+    it on the form they are looking at, rather than as a later query failure.
+    """
+    if filters.get("ignore_dates"):
+        return None
+
+    for label, key in (("start", "startdate"), ("end", "enddate")):
+        value = (filters.get(key) or "").strip()
+        if not value:
+            continue
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            return f"Invalid {label} date format. Please use 'YYYY-MM-DD'."
+
+    return None
+
+
+def pagination_from_args(args, default_per_page=10, max_per_page=200):
+    """Clamp page and per_page so a hand-edited query string cannot break a page."""
+    try:
+        page = max(1, int(args.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+
+    try:
+        per_page = min(max_per_page, max(1, int(args.get("per_page", default_per_page))))
+    except (TypeError, ValueError):
+        per_page = default_per_page
+
+    return page, per_page
+
+
 def build_history_payload(filters):
-    """Translate the stored filter bar values into the API's request body.
+    """Translate the filter bar values into the API's request body.
 
     The operator enters YYYY-MM-DD; the stored procedures expect MM/DD/YYYY. The
     ignore flags win over whatever is in the date and limit boxes.
