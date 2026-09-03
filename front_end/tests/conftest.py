@@ -203,6 +203,61 @@ def client(app, broker_api):
     return app.test_client()
 
 
+# A minimal stand-in for the Vite output. It carries the same local-only asset
+# references as the real shell so the no-CDN assertion is still meaningful.
+STUB_SHELL = """<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Linux Broker Management Portal</title>
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <script type="module" crossorigin src="/static/dist/assets/index.js"></script>
+    <link rel="stylesheet" crossorigin href="/static/dist/assets/index.css" />
+  </head>
+  <body><div id="root"></div></body>
+</html>
+"""
+
+
+@pytest.fixture
+def spa_bundle():
+    """Guarantee a built SPA shell exists for the tests that serve it.
+
+    `static/dist` is a build artifact from `npm run build`, so it is absent on a
+    fresh checkout and in the Python CI job, which has no Node toolchain. These
+    tests are about Flask's routing and headers, not about the bundle's contents,
+    so they supply their own shell rather than depending on whether someone has
+    run a build. A real build is left untouched.
+    """
+    import app as app_module
+
+    entry = Path(app_module.SPA_DIST) / app_module.SPA_ENTRY
+    if entry.exists():
+        yield entry
+        return
+
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text(STUB_SHELL, encoding="utf-8")
+    try:
+        yield entry
+    finally:
+        entry.unlink(missing_ok=True)
+        # Only removes the directory when it is empty, so a partial real build
+        # is never deleted.
+        try:
+            entry.parent.rmdir()
+        except OSError:
+            pass
+
+
+@pytest.fixture
+def missing_spa_bundle(tmp_path, monkeypatch):
+    """Point the app at an empty dist folder to exercise the not-built branch."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "SPA_DIST", str(tmp_path / "dist"))
+
+
 @pytest.fixture
 def signed_in_client(client):
     sign_in(client)

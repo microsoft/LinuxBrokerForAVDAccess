@@ -288,9 +288,11 @@ npm run typecheck
 npm test
 ```
 
-`tests/conftest.py` fakes the Broker API with `FakeBrokerApi` and exposes two helpers worth
-knowing: `csrf_token(client)` fetches a token the way the client does, and `post(client, path,
-json)` sends a `POST` with that header attached.
+`tests/conftest.py` fakes the Broker API with `FakeBrokerApi` and exposes three helpers worth
+knowing: `csrf_token(client)` fetches a token the way the client does, `post(client, path, json)`
+sends a `POST` with that header attached, and the `spa_bundle` fixture supplies a stand-in shell so
+the SPA-serving tests do not depend on whether anyone has run `npm run build`. The Python suite
+therefore needs no Node toolchain.
 
 Behaviour is tested on whichever side now owns it. Broadly: date conversion, ignore-filter
 semantics, pagination parameters, the legacy bare-list fallback, dashboard summary preference and

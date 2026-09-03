@@ -13,7 +13,7 @@ from conftest import API, HISTORY_PATHS, VMS, csrf_token, post
 # ============================================================== SPA shell
 
 
-def test_unknown_page_path_serves_the_spa_shell(signed_in_client):
+def test_unknown_page_path_serves_the_spa_shell(signed_in_client, spa_bundle):
     """A deep link or a hard refresh has to reach React, not a 404 from Flask."""
     for path in ["/", "/vms", "/vms/1/update", "/scaling/rules/history", "/settings/hosts"]:
         response = signed_in_client.get(path)
@@ -21,7 +21,7 @@ def test_unknown_page_path_serves_the_spa_shell(signed_in_client):
         assert response.headers["Content-Type"].startswith("text/html"), path
 
 
-def test_the_shell_is_never_cached(signed_in_client):
+def test_the_shell_is_never_cached(signed_in_client, spa_bundle):
     """The shell names hashed asset files, so caching it would leave browsers
     asking for assets a deploy has already replaced."""
     assert signed_in_client.get("/").headers["Cache-Control"] == "no-store"
@@ -34,12 +34,23 @@ def test_unknown_api_path_returns_json_not_the_shell(signed_in_client):
     assert response.get_json()["error"]
 
 
-def test_the_shell_references_no_external_assets(signed_in_client):
+def test_the_shell_references_no_external_assets(signed_in_client, spa_bundle):
     """The portal must render in sovereign and air-gapped clouds, so nothing may
     be fetched from a public CDN."""
     html = signed_in_client.get("/").get_data(as_text=True)
     for pattern in ("cdn.jsdelivr.net", "unpkg.com", "cdnjs.", "fonts.googleapis.com"):
         assert pattern not in html
+
+
+def test_a_missing_bundle_explains_itself(signed_in_client, missing_spa_bundle):
+    """Serving a blank page when nobody has run a build wastes an afternoon, so
+    the unbuilt case says exactly what to do."""
+    response = signed_in_client.get("/")
+
+    assert response.status_code == 500
+    body = response.get_data(as_text=True)
+    assert "npm run build" in body
+    assert "front_end/web" in body
 
 
 def test_health_reports_the_version(client):
