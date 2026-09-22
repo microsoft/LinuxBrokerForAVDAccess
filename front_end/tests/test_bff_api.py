@@ -480,6 +480,26 @@ def test_rules_history_route_is_not_shadowed_by_the_rule_detail_route(signed_in_
 # ============================================================ error mapping
 
 
+def test_bad_request_response_uses_the_curated_client_message(app):
+    """The response must not stringify the exception object, because exception
+    strings look like stack-trace data to static analysis."""
+    from function_bff import API_PREFIX, BadRequest, broker_endpoint
+
+    class NoisyBadRequest(BadRequest):
+        def __str__(self):
+            return "Traceback (most recent call last): secret detail"
+
+    @broker_endpoint("Fallback error.")
+    def route():
+        raise NoisyBadRequest("Only the curated message reaches the client.")
+
+    with app.test_request_context(f"{API_PREFIX}/probe"):
+        response, status = route()
+
+    assert status == 400
+    assert response.get_json()["error"] == "Only the curated message reaches the client."
+
+
 def test_a_broker_4xx_keeps_its_status_and_message(signed_in_client, monkeypatch):
     """The broker explains exactly what it rejected, which is far more useful to
     an admin than a generic failure."""

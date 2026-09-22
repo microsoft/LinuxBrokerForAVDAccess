@@ -178,7 +178,10 @@ def _wants_json():
 @app.errorhandler(400)
 def handle_bad_request(e):
     if _wants_json():
-        return json_error(getattr(e, 'description', None) or "The request could not be understood.", 400)
+        # Deliberately generic. Anything reaching this handler is a framework-level
+        # rejection whose description is not ours to forward; the endpoints that
+        # have something useful to say raise BadRequest and answer before this.
+        return json_error("The request could not be understood.", 400)
     return spa_shell(400)
 
 

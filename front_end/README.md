@@ -117,6 +117,11 @@ The client redirects to `/login` on a `401` and shows the `error` string as a to
 `fetch` cannot follow a `302` to Entra ID, which is exactly why the API answers `401` instead of
 redirecting.
 
+Every string in that envelope is one the portal composes: a literal, a field name, or the broker's
+own message. Exceptions are never stringified into a response body, because that is
+indistinguishable from leaking a stack trace to static analysis. Raise `BadRequest` with the exact
+text the operator should see, and keep the underlying exception in `logger.error` instead.
+
 ## Client Routing
 
 Routes mirror the URLs the Jinja portal served, so existing bookmarks and runbook links still

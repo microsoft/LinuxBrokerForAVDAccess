@@ -27,7 +27,19 @@ API_PREFIX = '/api/ui'
 
 
 class BadRequest(Exception):
-    """Raised when the client sent something unusable. Becomes a 400."""
+    """Raised when the client sent something unusable. Becomes a 400.
+
+    The client-visible text is kept in its own attribute rather than read back
+    out with `str(exception)`. Every message is one we construct, but stringifying
+    an exception into a response body is indistinguishable from leaking a stack
+    trace to static analysis, so the curated string is passed explicitly. Do not
+    collapse this back into `str(e)`.
+    """
+
+    def __init__(self, client_message):
+        message = client_message if isinstance(client_message, str) else ""
+        self.client_message = message or "The request could not be understood."
+        super().__init__(self.client_message)
 
 
 def json_body():
@@ -80,7 +92,7 @@ def broker_endpoint(error_message):
             try:
                 return view(*args, **kwargs)
             except BadRequest as e:
-                return json_error(str(e), 400)
+                return json_error(e.client_message, 400)
             except NotAuthenticated:
                 return json_error("Your session has expired. Please sign in again.", 401)
             except requests.exceptions.HTTPError as e:
