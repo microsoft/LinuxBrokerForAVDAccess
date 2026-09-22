@@ -1,0 +1,495 @@
+/* ==========================================================================
+   Linux Broker Management Portal - glassmorphism design system
+   --------------------------------------------------------------------------
+   Tailwind v4, CSS-first. Theme-dependent values are runtime custom properties
+   on :root and [data-theme="dark"], exposed to Tailwind through `@theme inline`
+   so a single utility works in both themes.
+
+   Accessibility rules this file must keep:
+     - Body and label text sits on a surface opaque enough for 4.5:1 contrast.
+       Blur is decoration; it is never the only separation from the backdrop.
+     - `prefers-reduced-transparency` and `prefers-reduced-motion` fall back to
+       solid surfaces with no blur and no motion.
+     - Browsers without `backdrop-filter` get the same solid fallback.
+   ========================================================================== */
+
+@import 'tailwindcss';
+
+/* The theme is switched by `data-theme` on <html>, set before first paint by the
+   inline script in index.html and toggled at runtime from lib/theme.ts. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* -------------------------------------------------------------- light theme */
+
+:root {
+  color-scheme: light;
+
+  --lb-brand: #0f6cbd;
+  --lb-brand-strong: #0a4c85;
+  --lb-brand-soft: rgb(15 108 189 / 0.12);
+  --lb-on-brand: #ffffff;
+
+  --lb-canvas: #e9eff8;
+  --lb-ink: #101f36;
+  --lb-ink-muted: #46587a;
+  --lb-ink-subtle: #61748f;
+
+  --lb-glass-bg: rgb(255 255 255 / 0.68);
+  --lb-glass-bg-strong: rgb(255 255 255 / 0.88);
+  --lb-glass-bg-soft: rgb(255 255 255 / 0.44);
+  --lb-glass-border: rgb(255 255 255 / 0.9);
+  --lb-glass-highlight: rgb(255 255 255 / 0.75);
+  --lb-glass-shadow: 0 14px 40px -16px rgb(16 32 58 / 0.34);
+  --lb-glass-blur: 16px;
+
+  --lb-hairline: rgb(16 32 58 / 0.1);
+  --lb-hover: rgb(15 108 189 / 0.08);
+  --lb-focus: #0f6cbd;
+
+  --lb-ok-bg: rgb(16 122 76 / 0.14);
+  --lb-ok-fg: #0b5c39;
+  --lb-ok-bd: rgb(16 122 76 / 0.3);
+
+  --lb-accent-bg: rgb(15 108 189 / 0.14);
+  --lb-accent-fg: #0a4c85;
+  --lb-accent-bd: rgb(15 108 189 / 0.3);
+
+  --lb-info-bg: rgb(11 118 143 / 0.14);
+  --lb-info-fg: #0a5567;
+  --lb-info-bd: rgb(11 118 143 / 0.3);
+
+  --lb-warn-bg: rgb(163 100 5 / 0.16);
+  --lb-warn-fg: #7c4a02;
+  --lb-warn-bd: rgb(163 100 5 / 0.32);
+
+  --lb-danger-bg: rgb(176 42 42 / 0.14);
+  --lb-danger-fg: #8f2020;
+  --lb-danger-bd: rgb(176 42 42 / 0.3);
+
+  --lb-neutral-bg: rgb(16 32 58 / 0.08);
+  --lb-neutral-fg: #46587a;
+  --lb-neutral-bd: rgb(16 32 58 / 0.18);
+}
+
+/* --------------------------------------------------------------- dark theme */
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --lb-brand: #4aa3e8;
+  --lb-brand-strong: #7cc0f4;
+  --lb-brand-soft: rgb(74 163 232 / 0.18);
+  --lb-on-brand: #07182a;
+
+  --lb-canvas: #0a1422;
+  --lb-ink: #e9eff8;
+  --lb-ink-muted: #a8b8cf;
+  --lb-ink-subtle: #8b9cb5;
+
+  --lb-glass-bg: rgb(20 33 52 / 0.72);
+  --lb-glass-bg-strong: rgb(20 33 52 / 0.9);
+  --lb-glass-bg-soft: rgb(20 33 52 / 0.5);
+  --lb-glass-border: rgb(255 255 255 / 0.14);
+  --lb-glass-highlight: rgb(255 255 255 / 0.14);
+  --lb-glass-shadow: 0 16px 44px -18px rgb(0 0 0 / 0.72);
+  --lb-glass-blur: 18px;
+
+  --lb-hairline: rgb(255 255 255 / 0.1);
+  --lb-hover: rgb(255 255 255 / 0.07);
+  --lb-focus: #7cc0f4;
+
+  --lb-ok-bg: rgb(52 199 136 / 0.18);
+  --lb-ok-fg: #7fe3b4;
+  --lb-ok-bd: rgb(52 199 136 / 0.36);
+
+  --lb-accent-bg: rgb(74 163 232 / 0.2);
+  --lb-accent-fg: #9ccffa;
+  --lb-accent-bd: rgb(74 163 232 / 0.38);
+
+  --lb-info-bg: rgb(56 189 220 / 0.18);
+  --lb-info-fg: #8fddef;
+  --lb-info-bd: rgb(56 189 220 / 0.36);
+
+  --lb-warn-bg: rgb(245 173 66 / 0.2);
+  --lb-warn-fg: #f7cd8b;
+  --lb-warn-bd: rgb(245 173 66 / 0.38);
+
+  --lb-danger-bg: rgb(248 113 113 / 0.2);
+  --lb-danger-fg: #fca9a9;
+  --lb-danger-bd: rgb(248 113 113 / 0.38);
+
+  --lb-neutral-bg: rgb(255 255 255 / 0.08);
+  --lb-neutral-fg: #a8b8cf;
+  --lb-neutral-bd: rgb(255 255 255 / 0.18);
+}
+
+/* ------------------------------------------------------- Tailwind theme map */
+
+@theme inline {
+  /* System stack only. No webfont is downloaded, so the portal stays usable in
+     air-gapped environments and there is no font-loading flash. */
+  --font-sans:
+    system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono: ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, 'Liberation Mono', monospace;
+
+  --color-brand: var(--lb-brand);
+  --color-brand-strong: var(--lb-brand-strong);
+  --color-brand-soft: var(--lb-brand-soft);
+  --color-on-brand: var(--lb-on-brand);
+
+  --color-canvas: var(--lb-canvas);
+  --color-ink: var(--lb-ink);
+  --color-muted: var(--lb-ink-muted);
+  --color-subtle: var(--lb-ink-subtle);
+
+  --color-hairline: var(--lb-hairline);
+  --color-glass-border: var(--lb-glass-border);
+
+  --radius-glass: 1rem;
+  --radius-glass-sm: 0.65rem;
+}
+
+/* ---------------------------------------------------------------- base */
+
+@layer base {
+  html {
+    min-height: 100%;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    min-height: 100vh;
+    margin: 0;
+    background-color: var(--lb-canvas);
+    color: var(--lb-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* The aurora backdrop the glass surfaces refract. It is fixed and inert so it
+     never affects layout or hit testing. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      radial-gradient(52rem 34rem at 12% -8%, rgb(15 108 189 / 0.28), transparent 62%),
+      radial-gradient(44rem 30rem at 92% 4%, rgb(88 86 214 / 0.22), transparent 60%),
+      radial-gradient(46rem 32rem at 74% 92%, rgb(11 160 178 / 0.2), transparent 62%),
+      radial-gradient(38rem 26rem at 22% 88%, rgb(15 108 189 / 0.14), transparent 62%);
+  }
+
+  [data-theme='dark'] body::before {
+    background-image:
+      radial-gradient(52rem 34rem at 12% -8%, rgb(30 96 168 / 0.4), transparent 62%),
+      radial-gradient(44rem 30rem at 92% 4%, rgb(72 62 168 / 0.34), transparent 60%),
+      radial-gradient(46rem 32rem at 74% 92%, rgb(11 118 143 / 0.32), transparent 62%),
+      radial-gradient(38rem 26rem at 22% 88%, rgb(30 96 168 / 0.22), transparent 62%);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    color: var(--lb-ink);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  a {
+    color: var(--lb-brand);
+    text-underline-offset: 0.2em;
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--lb-focus);
+    outline-offset: 2px;
+    border-radius: 0.35rem;
+  }
+
+  /* Keeps the placeholder from washing out against a translucent input. */
+  ::placeholder {
+    color: var(--lb-ink-subtle);
+    opacity: 1;
+  }
+
+  th {
+    text-align: left;
+  }
+}
+
+/* ---------------------------------------------------------- glass surfaces */
+
+@layer components {
+  .lb-glass {
+    position: relative;
+    background: var(--lb-glass-bg);
+    border: 1px solid var(--lb-glass-border);
+    border-radius: var(--radius-glass);
+    box-shadow: var(--lb-glass-shadow);
+    backdrop-filter: blur(var(--lb-glass-blur)) saturate(150%);
+    -webkit-backdrop-filter: blur(var(--lb-glass-blur)) saturate(150%);
+  }
+
+  /* The specular hairline along the top edge that reads as a glass bevel. */
+  .lb-glass::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding-top: 1px;
+    background: linear-gradient(to bottom, var(--lb-glass-highlight), transparent 42%);
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  .lb-glass-strong {
+    background: var(--lb-glass-bg-strong);
+  }
+
+  .lb-glass-soft {
+    background: var(--lb-glass-bg-soft);
+  }
+
+  /* Flat inner panel: shares the palette but does not stack another blur, which
+     would otherwise compound into mush when nested inside .lb-glass. */
+  .lb-inset {
+    background: var(--lb-glass-bg-soft);
+    border: 1px solid var(--lb-hairline);
+    border-radius: var(--radius-glass-sm);
+  }
+
+  .lb-interactive {
+    transition:
+      transform 160ms ease,
+      box-shadow 160ms ease,
+      background-color 160ms ease;
+  }
+
+  .lb-interactive:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 18px 44px -16px rgb(16 32 58 / 0.4);
+  }
+
+  [data-theme='dark'] .lb-interactive:hover {
+    box-shadow: 0 20px 48px -18px rgb(0 0 0 / 0.8);
+  }
+
+  /* ------------------------------------------------------------- badges */
+
+  /* Every badge pairs colour with an icon and text, so status is never conveyed
+     by colour alone (WCAG 1.4.1). */
+  .lb-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    border: 1px solid var(--tone-bd);
+    background: var(--tone-bg);
+    color: var(--tone-fg);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+
+  .lb-tone-ok {
+    --tone-bg: var(--lb-ok-bg);
+    --tone-fg: var(--lb-ok-fg);
+    --tone-bd: var(--lb-ok-bd);
+  }
+  .lb-tone-accent {
+    --tone-bg: var(--lb-accent-bg);
+    --tone-fg: var(--lb-accent-fg);
+    --tone-bd: var(--lb-accent-bd);
+  }
+  .lb-tone-info {
+    --tone-bg: var(--lb-info-bg);
+    --tone-fg: var(--lb-info-fg);
+    --tone-bd: var(--lb-info-bd);
+  }
+  .lb-tone-warn {
+    --tone-bg: var(--lb-warn-bg);
+    --tone-fg: var(--lb-warn-fg);
+    --tone-bd: var(--lb-warn-bd);
+  }
+  .lb-tone-danger {
+    --tone-bg: var(--lb-danger-bg);
+    --tone-fg: var(--lb-danger-fg);
+    --tone-bd: var(--lb-danger-bd);
+  }
+  .lb-tone-neutral {
+    --tone-bg: var(--lb-neutral-bg);
+    --tone-fg: var(--lb-neutral-fg);
+    --tone-bd: var(--lb-neutral-bd);
+  }
+
+  /* ------------------------------------------------------------ controls */
+
+  .lb-field {
+    width: 100%;
+    padding: 0.5rem 0.7rem;
+    border-radius: var(--radius-glass-sm);
+    border: 1px solid var(--lb-hairline);
+    background: var(--lb-glass-bg-strong);
+    color: var(--lb-ink);
+    font: inherit;
+    line-height: 1.4;
+  }
+
+  .lb-field:hover:not(:disabled):not([readonly]) {
+    border-color: var(--lb-brand);
+  }
+
+  .lb-field:disabled,
+  .lb-field[readonly] {
+    opacity: 0.62;
+    cursor: not-allowed;
+  }
+
+  /* Native chevron for selects; inline SVG data URI, so still no external asset. */
+  select.lb-field {
+    appearance: none;
+    padding-right: 2rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%2361748f' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+  }
+
+  [data-theme='dark'] select.lb-field {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%238b9cb5' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  }
+
+  .lb-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    border-radius: var(--radius-glass-sm);
+    border: 1px solid transparent;
+    font-weight: 600;
+    line-height: 1.3;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease,
+      transform 140ms ease;
+  }
+
+  .lb-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .lb-btn:not(:disabled):active {
+    transform: translateY(1px);
+  }
+
+  /* ------------------------------------------------------------- tables */
+
+  .lb-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 0.875rem;
+  }
+
+  .lb-table th,
+  .lb-table td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--lb-hairline);
+    vertical-align: middle;
+  }
+
+  .lb-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--lb-glass-bg-strong);
+    backdrop-filter: blur(var(--lb-glass-blur));
+    -webkit-backdrop-filter: blur(var(--lb-glass-blur));
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--lb-ink-muted);
+    white-space: nowrap;
+  }
+
+  .lb-table tbody tr:hover {
+    background: var(--lb-hover);
+  }
+
+  .lb-table tbody tr:last-child td {
+    border-bottom: 0;
+  }
+}
+
+/* -------------------------------------------------- accessibility fallbacks */
+
+/* Operators who ask their OS to reduce transparency get solid surfaces. The
+   layout, spacing and palette are unchanged; only the translucency goes. */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --lb-glass-bg: #ffffff;
+    --lb-glass-bg-strong: #ffffff;
+    --lb-glass-bg-soft: #f4f7fc;
+    --lb-glass-border: #c9d6e8;
+    --lb-glass-highlight: transparent;
+    --lb-glass-blur: 0px;
+  }
+
+  [data-theme='dark'] {
+    --lb-glass-bg: #101d2f;
+    --lb-glass-bg-strong: #14243a;
+    --lb-glass-bg-soft: #0e1a2a;
+    --lb-glass-border: #2b3d55;
+    --lb-glass-highlight: transparent;
+    --lb-glass-blur: 0px;
+  }
+
+  body::before {
+    display: none;
+  }
+}
+
+/* Same treatment where backdrop-filter is unavailable, so text never ends up
+   sitting on a see-through panel. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --lb-glass-bg: rgb(255 255 255 / 0.96);
+    --lb-glass-bg-strong: #ffffff;
+    --lb-glass-bg-soft: rgb(255 255 255 / 0.9);
+  }
+
+  [data-theme='dark'] {
+    --lb-glass-bg: rgb(16 29 47 / 0.97);
+    --lb-glass-bg-strong: #14243a;
+    --lb-glass-bg-soft: rgb(16 29 47 / 0.92);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .lb-interactive:hover {
+    transform: none;
+  }
+}

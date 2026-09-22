@@ -13,7 +13,42 @@ on:
       - '.github/workflows/front-end-tests.yml'
 
 jobs:
+  front-end-web:
+    name: Portal bundle (React)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node version
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: front_end/web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: front_end/web
+        run: npm ci
+
+      - name: Type check
+        working-directory: front_end/web
+        run: npm run typecheck
+
+      - name: Run vitest
+        working-directory: front_end/web
+        run: npm test
+
+      # Catches a bundle that type checks but cannot actually be built, which is
+      # what the container image does during `az acr build`.
+      - name: Build the production bundle
+        working-directory: front_end/web
+        run: npm run build
+
   front-end-test:
+    name: Portal BFF (Flask)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -44,6 +79,7 @@ jobs:
         run: pytest
 
   api-test:
+    name: Broker API
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -23,6 +23,7 @@ Two details matter here:
 
 - The supported path is `azd up` from the `deploy/` directory, not a separate manual mix of Bicep plus ad hoc scripts.
 - Container images are built remotely with `az acr build`, so local Docker is not required.
+- The `frontend` image is multi-stage and compiles the React portal in a Node stage, so the build host needs to reach the npm registry. See [Front end build requirements](#front-end-build-requirements).
 
 For upgrade scenarios, keep one more distinction clear:
 
@@ -362,6 +363,14 @@ That means `postprovision` does all of the following:
 - Assigns the `ScheduledTask` app role to the function app managed identity.
 - Adds AVD and Linux VM managed identities to the corresponding Entra groups.
 - Registers Linux hosts into `dbo.VirtualMachines` through `dbo.RegisterLinuxHostVm`.
+
+### Front End Build Requirements
+
+The Service Management Portal is a React and TypeScript single-page app. [front_end/Dockerfile](../front_end/Dockerfile) is multi-stage: a `node:22-alpine` stage runs `npm ci` and `npm run build`, and only the compiled bundle is copied into the Python runtime image.
+
+That means the machine performing the build, which is the ACR build agent when using `az acr build`, needs to pull the `node:22-alpine` base image and resolve packages from the npm registry. Nothing is fetched at runtime: the compiled bundle, the fonts, and the icons all ship inside the image, so the portal still renders in Government, sovereign and air-gapped environments.
+
+If the build environment cannot reach `registry.npmjs.org`, point npm at an internal mirror before building, for example by adding an `.npmrc` with a `registry=` entry alongside [front_end/web/package.json](../front_end/web/package.json). `package-lock.json` is committed, so `npm ci` installs an exact, reviewable dependency set.
 
 ## Migration For Existing Deployments
 
