@@ -64,18 +64,20 @@ if [ ! -d "$LOCAL_USERHOME" ]; then
     chmod 700 "$LOCAL_USERHOME"
 fi
 
-# Mount user's NFS home to local user home if not already mounted
-echo "Mount user home folder" >> $LOGFILE
-if ! mountpoint -q "$LOCAL_USERHOME"; then
-    mount --bind "$NFS_USERHOME" "$LOCAL_USERHOME"
-fi
-
+# The RHEL release agent unmounts a home that has no lease, so write the lease before the
+# home is mounted.
 if [ -n "$LEASE_ID" ]; then
     echo "Write lease marker for $USERNAME" >> $LOGFILE
     mkdir -p "$LEASE_DIRECTORY"
     printf '%s\n' "$LEASE_ID" > "$LEASE_FILE"
     chown root:root "$LEASE_FILE"
     chmod 600 "$LEASE_FILE"
+fi
+
+# Mount user's NFS home to local user home if not already mounted
+echo "Mount user home folder" >> $LOGFILE
+if ! mountpoint -q "$LOCAL_USERHOME"; then
+    mount --bind "$NFS_USERHOME" "$LOCAL_USERHOME"
 fi
 
 # Unmount NFS root

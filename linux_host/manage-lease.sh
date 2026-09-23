@@ -81,8 +81,8 @@ unmount_user_home() {
 release_lease() {
     if user_is_signed_in; then
         # Unmounting or deleting the account would pull the home out from under a live
-        # session, so leave both. Without the lease, the release agent unmounts the home
-        # once the user signs out.
+        # session, so leave both. Without the lease, the RHEL release agent unmounts the
+        # home once the user signs out. The Ubuntu agent never unmounts homes.
         rm -f "$LEASE_FILE"
         echo "__LEASE_ACTION=cleared-in-use__"
         return
