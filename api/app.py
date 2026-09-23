@@ -32,7 +32,7 @@ from config import *
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.161'
+app.config['VERSION'] = '0.162'
 
 # Backs is_member_of_group_cached, which keeps token validation off the Graph API on
 # every request.
@@ -999,6 +999,10 @@ def checkout_vm():
             return error_response("No hostname or LeaseId found for the checked-out VM.", 500)
 
         if not create_or_update_remote_user(vm_hostname, username, user_password, lease_id):
+            # create-user.sh may already have written the lease, and the host keeps the NFS
+            # home mounted for as long as the lease exists. Clean up before the VM can be
+            # handed to someone else.
+            delete_remote_user(vm_hostname, username, lease_id)
             release_vm_assignment(checked_out_vm.get("VMID"), lease_id)
             return error_response(f"Failed to create or update user '{username}' on VM '{vm_hostname}'.", 500)
         

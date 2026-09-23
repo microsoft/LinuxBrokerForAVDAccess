@@ -130,6 +130,13 @@ class FakeCursor:
         if self.proc in self.db.raise_on_execute:
             raise RuntimeError(self.db.raise_on_execute[self.proc])
 
+    def callproc(self, name, params=()):
+        self.proc = name
+        self.params = params
+        self.db.calls.append({"sql": name, "proc": name, "params": params})
+        if self.proc in self.db.raise_on_execute:
+            raise RuntimeError(self.db.raise_on_execute[self.proc])
+
     def fetchall(self):
         # A queued sequence lets a test model calls that must differ, such as the
         # out-of-range page probe re-querying the same procedure.

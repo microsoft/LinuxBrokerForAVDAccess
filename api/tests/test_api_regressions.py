@@ -429,3 +429,29 @@ def test_delete_remote_user_reports_a_home_that_is_still_mounted(app_module, mon
 
     assert app_module.delete_remote_user("lnxhost-01", "alice", LEASE_ID) is False
     assert "home directory is still mounted" in caplog.text
+
+
+def test_failed_checkout_cleans_up_the_host_before_releasing_the_vm(client, fake_db, app_module, monkeypatch):
+    """create-user.sh can fail after it writes the lease, which keeps the NFS home mounted.
+
+    The host must be cleaned up before the VM goes back to the pool, or the next user's
+    checkout could race the cleanup.
+    """
+    fake_db.fetchall_rows["CheckoutVm"] = [
+        {"VMID": 7, "Hostname": "lnxhost-07", "IPAddress": "10.0.0.7", "LeaseId": LEASE_ID}
+    ]
+    steps = []
+    monkeypatch.setattr(app_module, "create_or_update_remote_user", lambda *args: False)
+    monkeypatch.setattr(
+        app_module, "delete_remote_user",
+        lambda hostname, username, lease_id=None: steps.append(("delete", hostname, username, lease_id)) or True
+    )
+    monkeypatch.setattr(
+        app_module, "release_vm_assignment",
+        lambda vmid, lease_id: steps.append(("release", vmid, lease_id)) or True
+    )
+
+    response = client.post("/api/vms/checkout", json={"username": "alice", "avdhost": "avdhost-01"})
+
+    assert response.status_code == 500
+    assert steps == [("delete", "lnxhost-07", "alice", LEASE_ID), ("release", 7, LEASE_ID)]
