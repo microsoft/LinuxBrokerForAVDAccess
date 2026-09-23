@@ -133,10 +133,10 @@ The API reads environment variables directly; it does not load `.env` files by i
 | `STS_ISSUER_HOST` | required for `AzureCustom` | STS issuer host override. |
 | `GRAPH_API_ENDPOINT` | optional | Legacy Graph scope setting in `config.py`; current token acquisition uses `GRAPH_ENDPOINT`. |
 | `MICROSOFT_PROVIDER_AUTHENTICATION_SECRET` | required | Client secret used by the API to call Graph for group checks. |
-| `DOMAIN_NAME` | required for SSH actions | DNS suffix used to build `<admin>@<hostname>.<domain>`. |
+| `DOMAIN_NAME` | required for SSH actions | DNS suffix used to build `<admin>@<hostname>.<domain>`. The `azd` deployment sets it to its private DNS zone (`linuxbroker.internal`) unless you supply `domainName`. |
 | `VAULT_URL` | required | Key Vault URL for SQL password and SSH key retrieval. |
 | `KEY_NAME` | required for SSH actions | Key Vault secret name containing the PEM SSH private key. |
-| `NFS_SHARE` | required for checkout provisioning | NFS share argument passed to `create-user.sh`; used by code but not currently listed in `env.example`. |
+| `NFS_SHARE` | required for checkout provisioning | NFS share argument passed to `create-user.sh`; used by code but not currently listed in `env.example`. The `azd` deployment sets it to the Azure Files NFS share it provisions unless you supply `nfsShare` or set `deployNfsShare` to `false`. |
 
 ## Database Access
 

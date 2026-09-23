@@ -10,6 +10,8 @@ param authSettings object = {}
 param healthCheckPath string = ''
 param alwaysOn bool = true
 param useManagedIdentityForRegistry bool = true
+@description('Delegated subnet for regional VNet integration. Leave empty to keep the app off the virtual network.')
+param virtualNetworkSubnetId string = ''
 
 var webSiteConfig = union({
   alwaysOn: alwaysOn
@@ -31,6 +33,8 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
   properties: {
     serverFarmId: serverFarmId
     httpsOnly: true
+    // Only private (RFC 1918) traffic is routed into the VNet; SQL, Key Vault, Graph and ACR stay on the public path.
+    virtualNetworkSubnetId: empty(virtualNetworkSubnetId) ? null : virtualNetworkSubnetId
     siteConfig: webSiteConfig
   }
 }

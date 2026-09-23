@@ -3,14 +3,21 @@
 param(
     [Parameter(Mandatory = $true, HelpMessage = "The base URL for the Linux Broker API, e.g. https://your-broker.domain.com/api")]
     [ValidateNotNullOrEmpty()]
-    [string]$LinuxBrokerApiBaseUrl
+    [string]$LinuxBrokerApiBaseUrl,
+
+    [Parameter(Mandatory = $false, HelpMessage = "The client ID of the Linux Broker API app registration. The session host requests tokens for api://<client-id>.")]
+    [string]$LinuxBrokerApiClientId = "",
+
+    [Parameter(Mandatory = $false, HelpMessage = "Root URL the Linux Broker scripts are downloaded from. The repository layout must be preserved.")]
+    [ValidateNotNullOrEmpty()]
+    [string]$ScriptSourceRoot = "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main"
 )
 
 $sourceName = "LinuxBrokerScript"
 $logName = "Application"
 $moduleName = "SqlServer"
 # URL of the script to download
-$url = "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/avd_host/broker/Connect-LinuxBroker.ps1"
+$url = "$($ScriptSourceRoot.TrimEnd('/'))/avd_host/broker/Connect-LinuxBroker.ps1"
 
 # Function to write logs to console and event log
 function Write-Log {
@@ -124,7 +131,8 @@ $outputPath = "$folderPath\Connect-LinuxBroker.ps1"
 try {
     if (-not (Get-Module -ListAvailable -Name CredentialManager)) {
         Write-Log "CredentialManager module is not installed. Attempting to install..."
-        Install-Module -Name CredentialManager -Force -ErrorAction Stop
+        # Connect-LinuxBroker.ps1 runs as the signed-in user, so the module must be installed machine-wide.
+        Install-Module -Name CredentialManager -Scope AllUsers -Force -ErrorAction Stop
         Write-Log "CredentialManager module installed successfully."
     }
     else {
@@ -190,6 +198,22 @@ try {
 catch {
     Write-Log "Failed to update API Base URL. Error: $_" -Level Error
     exit 1
+}
+
+# Without the client ID the session host cannot request a token for the broker API.
+if ([string]::IsNullOrWhiteSpace($LinuxBrokerApiClientId)) {
+    Write-Log "LinuxBrokerApiClientId was not provided. Replace 'your_linuxbroker_api_client_id' in $outputPath before users connect." -Level Warning
+}
+else {
+    try {
+        Write-Log "Updating API client ID in script to: $LinuxBrokerApiClientId"
+        [System.IO.File]::WriteAllText($outputPath, ([System.IO.File]::ReadAllText($outputPath).Replace('your_linuxbroker_api_client_id', $LinuxBrokerApiClientId)))
+        Write-Log "Updated API client ID in $outputPath successfully."
+    }
+    catch {
+        Write-Log "Failed to update API client ID. Error: $_" -Level Error
+        exit 1
+    }
 }
 
 # Check if Azure CLI is already installed before downloading

@@ -22,7 +22,7 @@ LINUXBROKER_API_BASE_URL="${LINUXBROKER_API_BASE_URL%/}"
 
 epel_url="https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
 xpra_repo_path="/etc/yum.repos.d/xpra.repo"
-xpra_url="https://raw.githubusercontent.com/Xpra-org/xpra/master/packaging/repos/rhel/xpra.repo"
+xpra_url="https://raw.githubusercontent.com/Xpra-org/xpra/master/packaging/repos/almalinux/xpra.repo"
 microsoft_packages_url="https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm"
 
 # Override for sovereign or air-gapped clouds where raw.githubusercontent.com is unreachable.
@@ -102,7 +102,12 @@ echo "Installing Microsoft repository..."
 sudo dnf install -y "$microsoft_packages_url"
 
 echo "Adding Xpra repository..."
-sudo wget -O "$xpra_repo_path" "$xpra_url"
+# curl ships with the base image, while wget is only installed in the next step. xpra is
+# optional, so a missing repository definition must not stop the host provisioning on xrdp.
+if ! sudo curl -fsSL -o "$xpra_repo_path" "$xpra_url"; then
+    sudo rm -f "$xpra_repo_path"
+    echo "WARNING: Unable to download the Xpra repository definition from $xpra_url."
+fi
 
 echo "Installing essential packages..."
 sudo dnf install -y wget util-linux azure-cli xorgxrdp nfs-utils curl jq dconf
@@ -116,14 +121,7 @@ echo "Installing 'Server with GUI' group..."
 sudo dnf groupinstall -y "Server with GUI"
 
 case "$remoteAccessTool" in
-    "xrdp")
-        remoteAccessPackages=("xrdp")
-        ;;
-    "xpra")
-        remoteAccessPackages=("xpra")
-        ;;
-    "both")
-        remoteAccessPackages=("xrdp" "xpra")
+    "xrdp"|"xpra"|"both")
         ;;
     *)
         echo "Unsupported remote access tool: $remoteAccessTool"
@@ -131,8 +129,25 @@ case "$remoteAccessTool" in
         ;;
 esac
 
-echo "Installing remote access packages: ${remoteAccessPackages[@]}..."
-sudo dnf install -y "${remoteAccessPackages[@]}"
+if [[ "$remoteAccessTool" == "xrdp" || "$remoteAccessTool" == "both" ]]; then
+    echo "Installing xrdp..."
+    sudo dnf install -y xrdp
+fi
+
+# xpra comes from a third-party repository whose dependencies can drift from the RHEL minor
+# release. When both tools are requested, an xpra failure leaves the host serving xrdp only.
+if [[ "$remoteAccessTool" == "xpra" || "$remoteAccessTool" == "both" ]]; then
+    echo "Installing xpra..."
+    if ! sudo dnf install -y xpra; then
+        if [[ "$remoteAccessTool" == "both" ]]; then
+            echo "WARNING: xpra could not be installed. Continuing with xrdp only."
+            remoteAccessTool="xrdp"
+        else
+            echo "ERROR: xpra could not be installed."
+            exit 1
+        fi
+    fi
+fi
 
 echo "Setting default target to graphical..."
 sudo systemctl set-default graphical.target
@@ -167,9 +182,11 @@ if [[ "$remoteAccessTool" == "xpra" || "$remoteAccessTool" == "both" ]]; then
     sudo firewall-cmd --permanent --add-port=443/tcp
     if systemctl is-active --quiet xpra; then
         echo "xpra service is already active."
+    elif [[ "$remoteAccessTool" == "both" ]]; then
+        echo "Starting and enabling xpra service..."
+        sudo systemctl enable xpra --now || echo "WARNING: The xpra service did not start. xrdp remains available."
     else
         echo "Starting and enabling xpra service..."
-        sudo systemctl start xpra
         sudo systemctl enable xpra --now
     fi
 fi

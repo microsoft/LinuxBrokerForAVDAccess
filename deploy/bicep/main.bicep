@@ -53,11 +53,21 @@ param sqlAdminPassword string = ''
 @description('Flask session key for the frontend app.')
 param flaskKey string = ''
 
-@description('Optional custom domain used by Linux hosts.')
+@description('Optional custom domain used by Linux hosts. When empty, hosts register into the private DNS zone linuxbroker.internal and the broker uses that zone.')
 param domainName string = ''
 
-@description('Optional NFS share used by Linux hosts.')
+@description('Optional NFS share used by Linux hosts. When empty and deployNfsShare is true, a Premium Azure Files NFS share is provisioned.')
 param nfsShare string = ''
+
+@description('Provision a Premium Azure Files NFS share for Linux home directories when nfsShare is empty and Linux hosts are deployed.')
+param deployNfsShare bool = true
+
+@description('Provisioned size of the NFS share in GiB. Premium file shares have a 100 GiB minimum.')
+@minValue(100)
+param nfsShareQuotaGiB int = 100
+
+@description('Object ID of the Entra group whose members can launch the Linux Desktop RemoteApp. Leave empty to assign access manually.')
+param avdUsersGroupId string = ''
 
 @description('Admin login name used for Linux host provisioning.')
 param linuxHostAdminLoginName string = 'avdadmin'
@@ -194,6 +204,9 @@ module resources 'main.resources.bicep' = {
     flaskKey: flaskKey
     domainName: domainName
     nfsShare: nfsShare
+    deployNfsShare: deployNfsShare
+    nfsShareQuotaGiB: nfsShareQuotaGiB
+    avdUsersGroupId: avdUsersGroupId
     linuxHostAdminLoginName: linuxHostAdminLoginName
     hostAdminPassword: hostAdminPassword
     vmHostResourceGroup: vmHostResourceGroup
@@ -234,3 +247,5 @@ output containerRegistryName string = resources.outputs.containerRegistryName
 output sqlServerName string = resources.outputs.sqlServerName
 output sqlDatabaseName string = resources.outputs.sqlDatabaseName
 output virtualNetworkName string = resources.outputs.virtualNetworkName
+output linuxHostDomainName string = resources.outputs.linuxHostDomainName
+output nfsSharePath string = resources.outputs.nfsSharePath

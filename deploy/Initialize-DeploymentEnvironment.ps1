@@ -725,6 +725,64 @@ function Ensure-Group {
     return az ad group create --display-name $DisplayName --mail-nickname $DisplayName --output json | ConvertFrom-Json
 }
 
+function Ensure-GroupMember {
+    param(
+        [Parameter(Mandatory = $true)][string]$GroupId,
+        [Parameter(Mandatory = $true)][string]$MemberId
+    )
+
+    # Newly created groups can take a short time to replicate in Microsoft Entra ID.
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        $isMember = az ad group member check --group $GroupId --member-id $MemberId --query value --output tsv 2>$null
+        if ($LASTEXITCODE -eq 0 -and "$isMember".Trim() -eq 'true') {
+            return $true
+        }
+
+        az ad group member add --group $GroupId --member-id $MemberId 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            return $true
+        }
+
+        Start-Sleep -Seconds (5 * $attempt)
+    }
+
+    return $false
+}
+
+function Ensure-EntraRdpAuthentication {
+    param([Parameter(Mandatory = $true)][hashtable]$CloudContext)
+
+    # The host pool enables Microsoft Entra single sign-on (enablerdsaadauth:i:1),
+    # which requires Entra authentication for RDP on the Windows Cloud Login
+    # service principal. This is a tenant-wide setting that is only ever enabled here.
+    $windowsCloudLoginAppId = '270efc09-cd0d-444b-a71f-39af4910ec45'
+    $manualStepsUrl = 'https://learn.microsoft.com/azure/virtual-desktop/configure-single-sign-on#enable-microsoft-entra-authentication-for-rdp'
+
+    try {
+        $servicePrincipal = Ensure-ServicePrincipal -AppId $windowsCloudLoginAppId
+        if (-not $servicePrincipal -or -not $servicePrincipal.id) {
+            throw 'The Windows Cloud Login service principal could not be found or created.'
+        }
+
+        $configurationUrl = "$($CloudContext.GraphUrl)/v1.0/servicePrincipals/$($servicePrincipal.id)/remoteDesktopSecurityConfiguration"
+        $configuration = az rest --method GET --url $configurationUrl --output json 2>$null | ConvertFrom-Json
+        if ($LASTEXITCODE -eq 0 -and $configuration -and $configuration.isRemoteDesktopProtocolEnabled -eq $true) {
+            Write-Host 'Microsoft Entra authentication for RDP is already enabled on the Windows Cloud Login service principal.'
+            return
+        }
+
+        Invoke-GraphRestJson -Method 'PATCH' -Url $configurationUrl -Body @{ isRemoteDesktopProtocolEnabled = $true }
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Microsoft Graph rejected the remoteDesktopSecurityConfiguration update.'
+        }
+
+        Write-Host 'Enabled Microsoft Entra authentication for RDP on the Windows Cloud Login service principal (required for AVD single sign-on).'
+    }
+    catch {
+        Write-Warning "Unable to enable Microsoft Entra authentication for RDP automatically: $($_.Exception.Message) AVD single sign-on connections fail until an administrator enables it. See $manualStepsUrl"
+    }
+}
+
 function Ensure-FrontendApplication {
     param(
         [Parameter(Mandatory = $true)][hashtable]$CloudContext,
@@ -947,6 +1005,7 @@ $apiAppDisplayName = "$AppName-$EnvironmentName-api-ar"
 $frontendAppServiceName = "fe-$AppName-$EnvironmentName"
 $avdGroupName = "$AppName-$EnvironmentName-avd-hosts-sg"
 $linuxGroupName = "$AppName-$EnvironmentName-linux-hosts-sg"
+$avdUsersGroupName = "$AppName-$EnvironmentName-avd-users-sg"
 
 $subscription = az account show --output json | ConvertFrom-Json
 $defaultTenantId = $subscription.tenantId
@@ -989,6 +1048,9 @@ Ensure-DefaultEnvValue -Key 'appServicePlanSku' -ValueFactory { 'P2mv3' } | Out-
 Ensure-DefaultEnvValue -Key 'linuxHostAdminLoginName' -ValueFactory { 'avdadmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'domainName' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'nfsShare' -ValueFactory { '' } | Out-Null
+Ensure-DefaultEnvValue -Key 'deployNfsShare' -ValueFactory { 'true' } | Out-Null
+Ensure-DefaultEnvValue -Key 'nfsShareQuotaGiB' -ValueFactory { '100' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdUsersGroupId' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'vmHostResourceGroup' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'scriptSourceRoot' -ValueFactory { 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main' } | Out-Null
 # Always refresh the client IP since it can change between runs
@@ -1028,6 +1090,7 @@ $frontendServicePrincipal = Ensure-ServicePrincipal -AppId $frontendApp.appId
 Ensure-ClientSecret -Application $frontendApp -EnvClientIdKey 'FRONTEND_CLIENT_ID' -EnvSecretKey 'FRONTEND_CLIENT_SECRET' | Out-Null
 $apiApp = Ensure-ApiApplication -CloudContext $cloudContext -DisplayName $apiAppDisplayName -FrontendAppId $frontendApp.appId
 Ensure-AppAdminConsent -AppId $apiApp.appId -DisplayName $apiApp.displayName
+Ensure-AppAdminConsent -AppId $frontendApp.appId -DisplayName $frontendApp.displayName
 
 $avdGroup = Ensure-Group -DisplayName $avdGroupName
 $linuxGroup = Ensure-Group -DisplayName $linuxGroupName
@@ -1041,6 +1104,33 @@ if ($deploymentUser) {
 
 Ensure-GroupAppRoleAssignment -CloudContext $cloudContext -GroupId $avdGroup.id -ResourceServicePrincipalId $apiServicePrincipal.id -AppRoleId $apiRoleIds.AvdHost
 Ensure-GroupAppRoleAssignment -CloudContext $cloudContext -GroupId $linuxGroup.id -ResourceServicePrincipalId $apiServicePrincipal.id -AppRoleId $apiRoleIds.LinuxHost
+
+$avdUsersGroupSummary = 'not configured (AVD hosts are not deployed)'
+if ((Get-AzdEnvValue -Key 'deployAvdHosts') -eq 'true') {
+    $avdUsersGroupId = Get-AzdEnvValue -Key 'avdUsersGroupId'
+    if ([string]::IsNullOrWhiteSpace($avdUsersGroupId)) {
+        # No existing group was supplied, so create a managed group and add the
+        # deploying user so they can open the Linux Desktop RemoteApp right away.
+        $avdUsersGroup = Ensure-Group -DisplayName $avdUsersGroupName
+        $avdUsersGroupId = $avdUsersGroup.id
+        Set-AzdEnvValue -Key 'avdUsersGroupId' -Value $avdUsersGroupId
+        $avdUsersGroupSummary = "$($avdUsersGroup.displayName) ($avdUsersGroupId)"
+
+        if ($deploymentUser) {
+            if (Ensure-GroupMember -GroupId $avdUsersGroupId -MemberId $deploymentUser.id) {
+                Write-Host "Added $($deploymentUser.userPrincipalName) to AVD users group '$($avdUsersGroup.displayName)'."
+            }
+            else {
+                Write-Warning "Unable to add $($deploymentUser.userPrincipalName) to AVD users group '$($avdUsersGroup.displayName)'. Add users to the group manually."
+            }
+        }
+    }
+    else {
+        $avdUsersGroupSummary = "$avdUsersGroupId (supplied through azd environment value 'avdUsersGroupId')"
+    }
+
+    Ensure-EntraRdpAuthentication -CloudContext $cloudContext
+}
 
 Set-AzdEnvValue -Key 'API_CLIENT_ID' -Value $apiApp.appId
 Set-AzdEnvValue -Key 'FRONTEND_CLIENT_ID' -Value $frontendApp.appId
@@ -1058,6 +1148,7 @@ Write-Host "API application: $($apiApp.displayName) ($($apiApp.appId))"
 Write-Host "Frontend application: $($frontendApp.displayName) ($($frontendApp.appId))"
 Write-Host "AVD host group: $($avdGroup.displayName) ($($avdGroup.id))"
 Write-Host "Linux host group: $($linuxGroup.displayName) ($($linuxGroup.id))"
+Write-Host "AVD users group: $avdUsersGroupSummary"
 Write-Host 'Automatic admin consent was attempted for the configured application permissions. If consent was not granted, complete it manually in Microsoft Entra ID.'
 
 # Generate the Bicep parameters file with the real values so azd passes them
@@ -1079,11 +1170,14 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostSshPublicKey' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostSshPublicKey')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdHostGroupId' -Value (Get-RequiredAzdEnvValue -Key 'avdHostGroupId')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostGroupId' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostGroupId')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdUsersGroupId' -Value (Get-AzdEnvValue -Key 'avdUsersGroupId')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'sqlAdminLogin' -Value (Get-RequiredAzdEnvValue -Key 'sqlAdminLogin')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'sqlAdminPassword' -Value (Get-RequiredAzdEnvValue -Key 'sqlAdminPassword')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'flaskKey' -Value (Get-RequiredAzdEnvValue -Key 'flaskKey')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'domainName' -Value (Get-AzdEnvValue -Key 'domainName')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'nfsShare' -Value (Get-AzdEnvValue -Key 'nfsShare')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'deployNfsShare' -Value (ConvertTo-BoolParameterValue -Key 'deployNfsShare' -DefaultValue $true)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'nfsShareQuotaGiB' -Value (ConvertTo-IntParameterValue -Key 'nfsShareQuotaGiB' -DefaultValue 100)
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostAdminLoginName' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostAdminLoginName')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'hostAdminPassword' -Value (Get-RequiredAzdEnvValue -Key 'hostAdminPassword')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'vmHostResourceGroup' -Value (Get-AzdEnvValue -Key 'vmHostResourceGroup')

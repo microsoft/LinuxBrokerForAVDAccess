@@ -27,14 +27,41 @@ function Write-Log {
         [ValidateSet("INFO", "WARNING", "ERROR")]
         [string]$Level = "INFO"
     )
-    
+
+    # Write-EventLog only accepts EventLogEntryType names, so map the short level names onto them.
+    $entryType = switch ($Level) {
+        "WARNING" { "Warning" }
+        "ERROR" { "Error" }
+        default { "Information" }
+    }
+
     try {
-        #$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        #Write-Host "[$timestamp][$Level] $Message"
-        Write-EventLog -LogName $logName -Source $sourceName -EntryType $Level -EventId 1 -Message $Message
+        Write-EventLog -LogName $logName -Source $sourceName -EntryType $entryType -EventId 1 -Message $Message
     }
     catch {
-        #Write-Host "Failed to write to event log: $_"
+        # Logging must never stop the connection attempt.
+    }
+}
+
+# The RemoteApp runs without a visible console, so problems the user can act on are shown in a dialog.
+function Show-UserMessage {
+    param (
+        [string]$Message,
+        [ValidateSet("Information", "Warning", "Error")]
+        [string]$Icon = "Information"
+    )
+
+    $iconFlag = switch ($Icon) {
+        "Warning" { 48 }
+        "Error" { 16 }
+        default { 64 }
+    }
+
+    try {
+        (New-Object -ComObject WScript.Shell).Popup($Message, 0, "Linux Desktop", $iconFlag) | Out-Null
+    }
+    catch {
+        Write-Log "Failed to show message to the user: $_" "WARNING"
     }
 }
 
@@ -72,6 +99,7 @@ $accessToken = Get-AccessToken -Resource $apiAppIdUri
 
 if (-not $accessToken) {
     Write-Log "Unable to obtain access token. Exiting script." "ERROR"
+    Show-UserMessage "The Linux Broker could not authenticate this session host. Contact your administrator." "Error"
     exit 1
 }
 
@@ -136,6 +164,10 @@ if ($hasExistingCheckedInVM -and $checkoutResponse.IPAddress) {
         New-StoredCredential -Target $hostname -UserName $localUsername -Password $checkoutResponse.password -Persist LocalMachine | Out-Null
         New-StoredCredential -Target $ipAddress -UserName $localUsername -Password $checkoutResponse.password -Persist LocalMachine | Out-Null
 
+        # mstsc only reuses a saved credential whose target carries the TERMSRV/ prefix.
+        New-StoredCredential -Target "TERMSRV/$ipAddress" -UserName $localUsername -Password $checkoutResponse.password -Type Generic -Persist LocalMachine | Out-Null
+        New-StoredCredential -Target "TERMSRV/$hostname" -UserName $localUsername -Password $checkoutResponse.password -Type Generic -Persist LocalMachine | Out-Null
+
         Write-Log "Credentials for $hostname updated successfully in Credential Manager." "INFO"
     }
     catch {
@@ -145,6 +177,13 @@ if ($hasExistingCheckedInVM -and $checkoutResponse.IPAddress) {
     if ($Mode -ieq "desktop") {
         Write-Log "Connecting to $hostname (IP: $ipAddress) using Remote Desktop Connection..." "INFO"
         try {
+            # xrdp presents a self-signed certificate, so skip the server authentication warning for this user.
+            $rdpClientKey = "HKCU:\Software\Microsoft\Terminal Server Client"
+            if (-not (Test-Path $rdpClientKey)) {
+                New-Item -Path $rdpClientKey -Force | Out-Null
+            }
+            New-ItemProperty -Path $rdpClientKey -Name "AuthenticationLevelOverride" -PropertyType DWord -Value 0 -Force | Out-Null
+
             # Launch mstsc with the hostname or IP address
             Start-Process mstsc.exe -ArgumentList "/v:$ipAddress"
 
@@ -152,6 +191,7 @@ if ($hasExistingCheckedInVM -and $checkoutResponse.IPAddress) {
         }
         catch {
             Write-Log "Failed to connect to $hostname (IP: $ipAddress) using Remote Desktop Connection: $_" "ERROR"
+            Show-UserMessage "Remote Desktop Connection could not be started for $hostname. Try again, or contact your administrator." "Error"
         }
     }
     else {
@@ -166,4 +206,5 @@ if ($hasExistingCheckedInVM -and $checkoutResponse.IPAddress) {
 }
 else {
     Write-Log "No available or checked-out VM found. Exiting script." "WARNING"
+    Show-UserMessage "No Linux host is available right now. Try again in a few minutes." "Warning"
 }

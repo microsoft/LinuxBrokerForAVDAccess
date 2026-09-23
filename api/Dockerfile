@@ -6,8 +6,9 @@ ENV WEBSITES_PORT=8000
 
 WORKDIR /app
 
+# openssh-client provides the ssh binary the API uses to provision users and push host settings.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl freetds-dev gcc \
+    && apt-get install -y --no-install-recommends build-essential curl freetds-dev gcc openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY api/requirements.txt ./requirements.txt

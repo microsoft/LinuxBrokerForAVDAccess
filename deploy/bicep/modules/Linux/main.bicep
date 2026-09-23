@@ -61,12 +61,14 @@ var linuxConfiguration = authType == 'SSH'
       disablePasswordAuthentication: false
     }
 
+// The VMs below use Trusted Launch, which requires Generation 2 images. The RHEL SKUs named
+// by OSVersion (7-LVM, 8-LVM, 9-LVM) are Generation 1, so each maps to its Gen2 equivalent.
 var imageConfigs = {
   '7-LVM': {
     image: {
       publisher: 'RedHat'
       offer: 'RHEL'
-      sku: '7-LVM'
+      sku: '7lvm-gen2'
       version: 'latest'
     }
     script: {
@@ -78,7 +80,7 @@ var imageConfigs = {
     image: {
       publisher: 'RedHat'
       offer: 'RHEL'
-      sku: '8-LVM'
+      sku: '8-lvm-gen2'
       version: 'latest'
     }
     script: {
@@ -90,7 +92,7 @@ var imageConfigs = {
     image: {
       publisher: 'RedHat'
       offer: 'RHEL'
-      sku: '9-LVM'
+      sku: '9-lvm-gen2'
       version: 'latest'
     }
     script: {
