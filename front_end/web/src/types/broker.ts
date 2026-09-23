@@ -13,6 +13,8 @@ export interface SessionUser {
 
 export interface SessionInfo {
   authenticated: boolean;
+  subject: { tenantId: string; objectId: string } | null;
+  capabilities: { manage: boolean; connect: boolean };
   version: string;
   csrfToken: string;
   user: SessionUser | null;
@@ -24,6 +26,7 @@ export type NetworkStatus = 'Reachable' | 'Unreachable';
 
 /** Values are constrained by the VmStatus CHECK constraint on virtual_machines. */
 export const VM_STATUSES: VmStatus[] = ['Available', 'CheckedOut', 'Maintenance', 'Released'];
+export const UNASSIGNED_VM_STATUSES = ['Available', 'Maintenance'] as const;
 export const POWER_STATES: PowerState[] = ['On', 'Off'];
 export const NETWORK_STATUSES: NetworkStatus[] = ['Reachable', 'Unreachable'];
 
@@ -36,6 +39,14 @@ export interface Vm {
   VmStatus: string | null;
   Username: string | null;
   AvdHost: string | null;
+  LeaseId: string | null;
+  LeaseGeneration: number;
+  DisconnectedAt?: string | null;
+  OperationId?: string | null;
+  OperationKind?: string | null;
+  OperationState?: string | null;
+  OperationError?: string | null;
+  OperationStartedAt?: string | null;
   Description: string | null;
   LastUpdateDate: string | null;
   CreateDate: string | null;
@@ -124,7 +135,7 @@ export interface DashboardStats {
   unreachable: number;
   powered_on: number;
   powered_off: number;
-  ready: number;
+  ready: number | null;
   attention: number;
   utilization: number;
   pct: PoolComposition;
@@ -159,9 +170,13 @@ export interface VmInput {
   powerstate: string;
   networkstatus: string;
   vmstatus: string;
-  username?: string;
-  avdhost?: string;
   description?: string;
+}
+
+export interface LeaseGuard {
+  leaseId: string;
+  /** Positive safe JSON integer, from 1 through 9007199254740991. */
+  leaseGeneration: number;
 }
 
 export interface VmAttributesInput {

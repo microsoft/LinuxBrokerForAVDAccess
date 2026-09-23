@@ -10,7 +10,7 @@ import { useConfirm } from '../../hooks/useConfirm';
 import { useDeleteVm, useReleaseVm, useReturnVm, useVm } from '../../hooks/useBroker';
 import { errorMessage } from '../../lib/api';
 import { valueOrDash } from '../../lib/format';
-import { canRelease, canReturn } from '../../lib/vmLifecycle';
+import { canRelease, canReturn, canUpdateAttributes } from '../../lib/vmLifecycle';
 
 export function VmDetails() {
   const { vmid } = useParams<{ vmid: string }>();
@@ -53,9 +53,11 @@ export function VmDetails() {
             <ButtonLink to="/vms" size="sm" icon="chevron-left">
               Back to list
             </ButtonLink>
-            <ButtonLink to={`/vms/${vm.VMID}/update`} size="sm" variant="primary" icon="pencil">
-              Update attributes
-            </ButtonLink>
+            {canUpdateAttributes(vm) ? (
+              <ButtonLink to={`/vms/${vm.VMID}/update`} size="sm" variant="primary" icon="pencil">
+                Update attributes
+              </ButtonLink>
+            ) : null}
           </>
         }
       />
@@ -99,12 +101,12 @@ export function VmDetails() {
                 onClick={() =>
                   confirm({
                     title: `Release ${vm.Hostname}`,
-                    body: `Release ${vm.Hostname}? The session owner will be signed out and the host marked as released.`,
+                    body: `Release ${vm.Hostname}? This marks the current lease as released.`,
                     confirmLabel: 'Release',
                     variant: 'warning',
                     onConfirm: async () => {
                       try {
-                        await releaseVm.mutateAsync(vm.Hostname);
+                        await releaseVm.mutateAsync(vm);
                         showToast(`VM '${vm.Hostname}' released successfully.`, 'success');
                       } catch (cause) {
                         showToast(errorMessage(cause, 'Unable to release the VM.'), 'danger');
@@ -125,12 +127,12 @@ export function VmDetails() {
                 onClick={() =>
                   confirm({
                     title: `Return ${vm.Hostname}`,
-                    body: `Return ${vm.Hostname} to the pool? It will become available for checkout again.`,
+                    body: `End the current lease on ${vm.Hostname} and return it to the pool? The host becomes available only after cleanup succeeds.`,
                     confirmLabel: 'Return',
                     variant: 'primary',
                     onConfirm: async () => {
                       try {
-                        await returnVm.mutateAsync(vm.VMID);
+                        await returnVm.mutateAsync(vm);
                         showToast(`VM '${vm.Hostname}' returned successfully.`, 'success');
                       } catch (cause) {
                         showToast(errorMessage(cause, 'Unable to return the VM.'), 'danger');

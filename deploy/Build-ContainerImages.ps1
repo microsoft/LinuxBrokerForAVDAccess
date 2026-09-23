@@ -16,11 +16,18 @@ param(
     [string]$TaskAppName,
 
     [Parameter(Mandatory = $false)]
-    [string]$EnvironmentName
+    [string]$EnvironmentName,
+
+    [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$')]
+    [string]$ImageTag = 'latest',
+
+    [switch]$SkipRestart
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\Broker.Deployment.Common.ps1"
+. "$PSScriptRoot\Broker.BuildContext.ps1"
 
 function Invoke-AzCommandWithRetry {
     param(
@@ -52,10 +59,6 @@ function Invoke-AzCommandWithRetry {
 
         $delaySeconds = [Math]::Min($InitialDelaySeconds * [Math]::Pow(2, $attempt - 1), 30)
         Write-Warning "$Description failed on attempt $attempt of $MaxAttempts. Retrying in $([int]$delaySeconds) seconds."
-        if (-not [string]::IsNullOrWhiteSpace($lastError)) {
-            Write-Warning $lastError
-        }
-
         Start-Sleep -Seconds ([int]$delaySeconds)
     }
 
@@ -63,7 +66,7 @@ function Invoke-AzCommandWithRetry {
         throw "Failed to $Description after $MaxAttempts attempts."
     }
 
-    throw "Failed to $Description after $MaxAttempts attempts. Last error: $lastError"
+    throw "Failed to $Description after $MaxAttempts attempts. Response details were suppressed."
 }
 
 if ([string]::IsNullOrWhiteSpace($EnvironmentName)) {
@@ -85,12 +88,7 @@ function Get-AzdEnvValue {
         return ''
     }
 
-    $value = azd env get-value $Key --environment $EnvironmentName 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        return ''
-    }
-
-    return ($value | Out-String).Trim()
+    return [string](Get-BrokerEnvironment $EnvironmentName)[$Key]
 }
 
 if ([string]::IsNullOrWhiteSpace($RegistryName)) {
@@ -125,15 +123,27 @@ $images = @(
     @{ Name = 'task'; Dockerfile = 'task/Dockerfile' }
 )
 
-Push-Location $repoRoot
+$contextPath = Join-Path $PSScriptRoot ('.artifacts\container-context-' + [guid]::NewGuid().ToString('N'))
 try {
+    New-BrokerContainerBuildContext -SourceRoot $repoRoot -Destination $contextPath
     foreach ($image in $images) {
-        Write-Host "Building $($image.Name):latest in ACR '$RegistryName'"
-        az acr build --registry $RegistryName --image "$($image.Name):latest" --file $image.Dockerfile --no-logs --output none .
-        if ($LASTEXITCODE -ne 0) {
-            throw "ACR build failed for $($image.Name)."
-        }
+        Write-Host "Building $($image.Name):$ImageTag in ACR '$RegistryName'"
+        Invoke-BrokerAz -Arguments @('acr', 'build', '--registry', $RegistryName, '--image', "$($image.Name):$ImageTag",
+            '--file', $image.Dockerfile, '--no-logs', $contextPath) -Operation "Build $($image.Name) container" -NoOutput
     }
+
+    $registry = Invoke-BrokerAz -Arguments @('acr', 'show', '--name', $RegistryName) -Operation 'Read registry endpoint'
+    foreach ($app in @(
+            @{ Type = 'webapp'; Name = $FrontendAppName; Image = 'frontend' },
+            @{ Type = 'webapp'; Name = $ApiAppName; Image = 'api' },
+            @{ Type = 'functionapp'; Name = $TaskAppName; Image = 'task' })) {
+        $imageArgument = if ($app.Type -eq 'webapp') { '--container-image-name' } else { '--image' }
+        $registryArgument = if ($app.Type -eq 'webapp') { '--container-registry-url' } else { '--registry-server' }
+        Invoke-BrokerAz -Arguments @($app.Type, 'config', 'container', 'set', '--resource-group', $ResourceGroupName,
+            '--name', $app.Name, $imageArgument, "$($registry.loginServer)/$($app.Image):$ImageTag",
+            $registryArgument, "https://$($registry.loginServer)") -Operation "Pin $($app.Image) container" -NoOutput
+    }
+    if ($SkipRestart) { return }
 
     Invoke-AzCommandWithRetry -Description "restart frontend app '$FrontendAppName'" -Command {
         az webapp restart --name $FrontendAppName --resource-group $ResourceGroupName --only-show-errors --output none
@@ -148,5 +158,5 @@ try {
     }
 }
 finally {
-    Pop-Location
+    if (Test-Path -LiteralPath $contextPath) { Remove-Item -LiteralPath $contextPath -Recurse -Force }
 }

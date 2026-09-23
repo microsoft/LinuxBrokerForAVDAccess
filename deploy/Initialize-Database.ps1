@@ -18,6 +18,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\Broker.Deployment.Common.ps1"
+. "$PSScriptRoot\Broker.HostRegistration.ps1"
 
 function Get-SqlConnection {
     param(
@@ -27,8 +29,7 @@ function Get-SqlConnection {
         [Parameter(Mandatory = $true)][string]$Password
     )
 
-    $connectionString = "Server=tcp:$Server,1433;Initial Catalog=$Database;Persist Security Info=False;User ID=$Username;Password=$Password;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;"
-    return [System.Data.SqlClient.SqlConnection]::new($connectionString)
+    return New-BrokerSqlConnection -Server $Server -Database $Database -Username $Username -Password $Password
 }
 
 function Convert-SqlScriptContent {
@@ -81,16 +82,14 @@ function Invoke-SqlBatch {
 }
 
 if ($env:SKIP_SQL_BOOTSTRAP -eq 'true') {
-    Write-Host 'Skipping SQL bootstrap because SKIP_SQL_BOOTSTRAP=true.'
-    exit 0
+    throw 'SKIP_SQL_BOOTSTRAP cannot bypass the authorization/lifecycle schema upgrade. Leave checkout paused and apply the complete ordered schema.'
 }
 
 $resolvedScriptsPath = Resolve-Path $ScriptsPath -ErrorAction Stop
 $sqlFiles = Get-ChildItem -Path $resolvedScriptsPath -Filter '*.sql' | Sort-Object Name
 
 if (-not $sqlFiles) {
-    Write-Host "No SQL files found in $resolvedScriptsPath."
-    exit 0
+    throw "No SQL files found in $resolvedScriptsPath."
 }
 
 $connection = Get-SqlConnection -Server $SqlServerFqdn -Database $DatabaseName -Username $SqlAdminLogin -Password $SqlAdminPassword
@@ -118,6 +117,7 @@ try {
             Invoke-SqlBatch -Connection $connection -Batch $batches[$index] -FileName $sqlFile.Name -BatchNumber ($index + 1)
         }
     }
+    Assert-BrokerTrustedInventorySchema -Connection $connection
 }
 finally {
     if ($connection.State -ne [System.Data.ConnectionState]::Closed) {

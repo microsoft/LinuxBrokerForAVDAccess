@@ -3,21 +3,14 @@ import { useNavigate } from 'react-router-dom';
 
 import { Breadcrumbs } from '../../components/layout/Breadcrumbs';
 import { Button, ButtonLink } from '../../components/ui/Button';
-import { PageHeader } from '../../components/ui/Feedback';
+import { Notice, PageHeader } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
 import { SelectField, TextAreaField, TextField } from '../../components/ui/Field';
 import { useToast } from '../../components/ui/Toast';
 import { useAddVm } from '../../hooks/useBroker';
 import { errorMessage } from '../../lib/api';
-import { NETWORK_STATUSES, POWER_STATES } from '../../types/broker';
+import { NETWORK_STATUSES, POWER_STATES, UNASSIGNED_VM_STATUSES } from '../../types/broker';
 import type { VmInput } from '../../types/broker';
-
-const VM_STATUS_OPTIONS = [
-  { value: 'Available', label: 'Available' },
-  { value: 'CheckedOut', label: 'Checked out' },
-  { value: 'Maintenance', label: 'Maintenance' },
-  { value: 'Released', label: 'Released' },
-];
 
 const IPV4 = /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
 
@@ -27,8 +20,6 @@ const EMPTY: VmInput = {
   powerstate: 'On',
   networkstatus: 'Reachable',
   vmstatus: 'Available',
-  username: '',
-  avdhost: '',
   description: '',
 };
 
@@ -64,7 +55,7 @@ export function AddVm() {
 
     try {
       await addVm.mutateAsync(form);
-      showToast('VM added successfully.', 'success');
+      showToast('VM added to inventory. Trusted deployment enrollment is required before checkout.', 'success');
       navigate('/vms');
     } catch (cause) {
       showToast(errorMessage(cause, 'Unable to add VM.'), 'danger');
@@ -77,11 +68,16 @@ export function AddVm() {
 
       <PageHeader
         title="Add virtual machine"
-        subtitle="Register an existing Linux host with the broker."
+        subtitle="Add an unassigned Linux host to broker inventory."
         icon="plus"
       />
 
       <GlassCard className="max-w-4xl p-6">
+        <Notice className="mb-5">
+          Adding a VM creates an inventory record only. A deployment operator must import the host
+          from Azure Resource Manager (ARM) and enroll its host identity before the broker can offer
+          it for checkout. Setting Available, On, and Reachable here does not grant that trust.
+        </Notice>
         <form onSubmit={submit} noValidate>
           <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
             <TextField
@@ -121,26 +117,9 @@ export function AddVm() {
             <SelectField
               label="VM status"
               value={form.vmstatus}
-              options={VM_STATUS_OPTIONS}
-              help="Only Available hosts are offered for checkout."
+              options={UNASSIGNED_VM_STATUSES.map((value) => ({ value, label: value }))}
+              help="New hosts cannot be assigned to a user. The broker manages workspace leases."
               onChange={(event) => set('vmstatus', event.target.value)}
-            />
-          </div>
-
-          <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-2">
-            <TextField
-              label="Username (optional)"
-              value={form.username ?? ''}
-              autoComplete="off"
-              help="Only set this if the host is already assigned to someone."
-              onChange={(event) => set('username', event.target.value)}
-            />
-            <TextField
-              label="AVD host (optional)"
-              value={form.avdhost ?? ''}
-              autoComplete="off"
-              help="Session host this VM is currently brokered to."
-              onChange={(event) => set('avdhost', event.target.value)}
             />
           </div>
 

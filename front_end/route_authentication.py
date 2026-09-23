@@ -1,13 +1,16 @@
 import logging
+import math
+import time
 
+import requests
 from msal import ConfidentialClientApplication
 from flask import request, redirect, url_for, session
-from datetime import datetime, timedelta
 from config import CLIENT_ID, TENANT_ID, CLIENT_SECRET, AUTHORITY, AUTHORITY_HOST, API_SCOPE
+from function_authentication import PortalAccessError, portal_authority
 
 logger = logging.getLogger(__name__)
 
-def register_route_authentication(app):
+def register_route_authentication(app, spa_shell):
     @app.route('/login')
     def login():
         try:
@@ -21,8 +24,8 @@ def register_route_authentication(app):
             )
 
             return redirect(auth_url), 302
-        except Exception as e:
-            logger.error("An error occurred during login: %s", e)
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.error("Unable to start login (%s).", type(e).__name__)
             return "An error occurred during login.", 500
 
     @app.route('/getAToken')
@@ -45,37 +48,41 @@ def register_route_authentication(app):
             )
 
             if "error" in result:
-                error_description = result.get("error_description", result.get("error"))
-                logger.error("Login failure: %s", error_description)
+                logger.warning("Microsoft sign-in rejected the authorization code.")
 
                 if result.get("error") == "invalid_grant":
                     return "Invalid authorization code.", 400
                 else:
-                    return f"Login failure: {error_description}", 401
+                    return "Sign-in failed. Please try signing in again.", 401
 
+            session.clear()
             session["user"] = result.get("id_token_claims")
             session["access_token"] = result.get("access_token")
 
-            # Store token expiration time
-            expires_in = result.get("expires_in")  # in seconds
-            session["token_expiry"] = (datetime.utcnow() + timedelta(seconds=expires_in)).timestamp()
+            expires_in = result.get("expires_in")
+            if (type(expires_in) not in (int, float) or not math.isfinite(expires_in)
+                    or expires_in <= 0):
+                session.clear()
+                raise PortalAccessError(401)
+            session["token_expiry"] = time.time() + expires_in
 
+            authority = portal_authority()
+            if not authority['capabilities']['manage']:
+                logger.info("Portal login denied: administrator access required.")
+                return spa_shell(403)
             return redirect(url_for('index', _external=True, _scheme='https')), 302
-        except Exception as e:
-            logger.error("An error occurred during authorization process: %s", e)
+        except PortalAccessError as error:
+            return spa_shell(error.status)
+        except (requests.exceptions.RequestException, ValueError, OverflowError) as e:
+            logger.error("Unable to complete authorization (%s).", type(e).__name__)
             return "An error occurred during authorization.", 500
 
     @app.route('/logout')
     def logout():
-        try:
-            session.clear()
+        session.clear()
 
-            logout_url = (
-                f"{AUTHORITY_HOST}/{TENANT_ID}/oauth2/v2.0/logout"
-                f"?post_logout_redirect_uri={url_for('index', _external=True)}"
-            )
-
-            return redirect(logout_url), 302
-        except Exception as e:
-            logger.error("An error occurred during logout: %s", e)
-            return "An error occurred during logout.", 500
+        logout_url = (
+            f"{AUTHORITY_HOST}/{TENANT_ID}/oauth2/v2.0/logout"
+            f"?post_logout_redirect_uri={url_for('index', _external=True)}"
+        )
+        return redirect(logout_url), 302

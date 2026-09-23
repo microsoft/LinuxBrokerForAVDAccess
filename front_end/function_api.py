@@ -30,8 +30,12 @@ def auth_headers():
 
 
 def api_get(path, timeout=DEFAULT_TIMEOUT):
-    response = requests.get(f"{API_URL}{path}", headers=auth_headers(), timeout=timeout)
+    response = requests.get(
+        f"{API_URL}{path}", headers=auth_headers(), timeout=timeout, allow_redirects=False
+    )
     response.raise_for_status()
+    if response.status_code != 200:
+        raise requests.exceptions.HTTPError("Unexpected broker response status", response=response)
     return response.json()
 
 
@@ -201,6 +205,11 @@ def summary_from_api(payload):
         except (TypeError, ValueError):
             return 0
 
+    ready = payload.get("Ready")
+    if type(ready) is not int or ready < 0:
+        logger.warning("Broker summary did not provide a valid checkout readiness count.")
+        ready = None
+
     return _build_stats(
         total=count("TotalVMs"),
         available=count("Available"),
@@ -209,17 +218,17 @@ def summary_from_api(payload):
         released=count("Released"),
         unreachable=count("Unreachable"),
         powered_on=count("PoweredOn"),
-        ready=count("Ready"),
+        ready=ready,
     )
 
 
 def fetch_vm_summary():
     """Fetch dashboard counters, preferring the aggregate endpoint.
 
-    Falls back to counting the full VM list client-side if /vms/summary does not
-    behave, so the portal keeps working when it is deployed ahead of the API.
+    Falls back to inventory counters if /vms/summary fails. Checkout readiness
+    remains unknown: inventory attributes do not prove trusted host enrollment.
 
-    The fallback deliberately triggers on any HTTP error, not just 404. An API build
+    The fallback triggers on HTTP errors other than 401/403, not just 404. An API build
     that predates this endpoint does not 404: Werkzeug matches /api/vms/summary
     against the older `/api/vms/<vmid>` rule, so it reaches GetVmDetails with
     @VMID = 'summary', fails the int conversion in SQL, and returns 500. Keying the
@@ -227,11 +236,14 @@ def fetch_vm_summary():
 
     This cannot mask a real outage: if the broker or database is genuinely down, the
     /vms fallback fails too and the caller still sees the error.
+    Authentication and authorization errors must never trigger another business call.
     """
     try:
         return summary_from_api(api_get('/vms/summary'))
     except requests.exceptions.HTTPError as e:
         status = getattr(e.response, 'status_code', None)
+        if status in (401, 403):
+            raise
         logger.info("Falling back to client-side VM counting (/vms/summary returned %s).", status)
         return summarize_vms(api_get('/vms'))
 
@@ -251,16 +263,6 @@ def summarize_vms(vms):
     unreachable = count("NetworkStatus", "Unreachable")
     powered_on = count("PowerState", "On")
 
-    # A VM is "ready" only when it is powered on, reachable and unassigned --
-    # the same condition the API uses to pick a host for checkout.
-    ready = sum(
-        1
-        for vm in vms
-        if (vm or {}).get("VmStatus") == "Available"
-        and (vm or {}).get("PowerState") == "On"
-        and (vm or {}).get("NetworkStatus") == "Reachable"
-    )
-
     return _build_stats(
         total=total,
         available=available,
@@ -269,5 +271,5 @@ def summarize_vms(vms):
         released=released,
         unreachable=unreachable,
         powered_on=powered_on,
-        ready=ready,
+        ready=None,
     )

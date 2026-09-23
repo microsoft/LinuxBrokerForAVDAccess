@@ -1,9 +1,24 @@
 #!/bin/bash
+set -euo pipefail
 
 # Installs and configures the necessary packages for Linux Broker for AVD Access on Ubuntu 24 desktop
 
 LINUXBROKER_API_BASE_URL="${1:-}"
 LINUXBROKER_API_CLIENT_ID="${2:-}"
+broker_agent_source="${LINUXBROKER_LOCAL_AGENT_DIRECTORY:?Use the checksum-verified deployment extension to stage bootstrap and helper files first.}"
+[[ "$broker_agent_source" = /* ]] || { echo 'An absolute verified helper directory is required.' >&2; exit 1; }
+sudo bash "$broker_agent_source/check-broker-host-prerequisites.sh" platform
+broker_admin_username="${LINUXBROKER_ADMIN_USERNAME:-avdadmin}"
+if [[ ! "$broker_admin_username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || [ "$broker_admin_username" = root ]; then
+    echo 'Invalid broker SSH administrator username.' >&2
+    exit 1
+fi
+if sudo test -e /var/lib/linuxbroker-release-session/lease.json ||
+   { sudo test -d /var/lib/linuxbroker-release-session/leases &&
+     [ -n "$(sudo find /var/lib/linuxbroker-release-session/leases -mindepth 1 -maxdepth 1 -print -quit)" ]; }; then
+    echo 'Existing lease state requires the reviewed Migrate-ExistingEnvironment.ps1 flow, not bootstrap.' >&2
+    exit 1
+fi
 
 if [[ -z "$LINUXBROKER_API_BASE_URL" || -z "$LINUXBROKER_API_CLIENT_ID" ]]; then
     echo "Linux Broker API base URL and client ID are required."
@@ -24,14 +39,8 @@ LINUXBROKER_API_BASE_URL="${LINUXBROKER_API_BASE_URL%/}"
 script_source_root="${LINUXBROKER_SCRIPT_SOURCE_ROOT:-https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/main}"
 script_source_root="${script_source_root%/}"
 
-release_session_url="$script_source_root/linux_host/session_release_buffer/Ubuntu/release-session.sh"
-xrdp_who_xorg_url="$script_source_root/linux_host/session_release_buffer/xrdp-who-xorg.sh"
-logind_watcher_url="$script_source_root/linux_host/session_release_buffer/logind-session-watcher.sh"
-create_user_script_url="$script_source_root/linux_host/create-user.sh"
 create_user_script="/usr/local/bin/create-user.sh"
-manage_lease_script_url="$script_source_root/linux_host/manage-lease.sh"
 manage_lease_script="/usr/local/bin/manage-lease.sh"
-apply_settings_script_url="$script_source_root/linux_host/apply-host-settings.sh"
 apply_settings_script="/usr/local/bin/apply-host-settings.sh"
 
 arch=$(uname -m)
@@ -80,7 +89,8 @@ sudo apt update -y
 
 # Install Azure CLI
 echo "Installing Azure CLI..."
-sudo apt install -y azure-cli nfs-common jq dconf-cli
+sudo apt install -y azure-cli nfs-common jq dconf-cli python3 util-linux iproute2 procps passwd
+sudo python3 "$broker_agent_source/install-broker-python.py" --config-base64 "${LINUXBROKER_PYTHON_RUNTIME_CONFIG:?The pinned private Python runtime configuration is required.}"
 
 # Idle session enforcement degrades gracefully without xprintidle, so a host that cannot
 # install it must still finish provisioning rather than fail the extension.
@@ -146,27 +156,31 @@ if [ ! -d "$output_directory" ]; then
     echo "Directory $output_directory created."
 fi
 
-echo "Downloading release-session.sh..."
-sudo wget -O "$SCRIPT_PATH" "$release_session_url"
+echo "Installing verified release-session.sh..."
+sudo install -o root -g root -m 0755 "$broker_agent_source/release-session.sh" "$SCRIPT_PATH"
 
 sudo sed -i "s|YOUR_LINUX_BROKER_API_CLIENT_ID|$YOUR_LINUXBROKER_API_CLIENT_ID|g" "$SCRIPT_PATH"
 sudo sed -i "s|YOUR_LINUX_BROKER_API_BASE_URL|$YOUR_LINUXBROKER_API_BASE_URL|g" "$SCRIPT_PATH"
 sudo sed -i "s|YOUR_LINUX_BROKER_API_URL|$YOUR_LINUXBROKER_API_BASE_URL|g" "$SCRIPT_PATH"
 
-echo "Downloading xrdp-who-xorg.sh..."
-sudo wget -O "$output_directory/xrdp-who-xorg.sh" "$xrdp_who_xorg_url"
+echo "Installing verified xrdp-who-xorg.sh..."
+sudo install -o root -g root -m 0755 "$broker_agent_source/xrdp-who-xorg.sh" "$output_directory/xrdp-who-xorg.sh"
 
-echo "Downloading logind-session-watcher.sh..."
-sudo wget -O "$WATCHER_SCRIPT_PATH" "$logind_watcher_url"
+echo "Installing verified logind-session-watcher.sh..."
+sudo install -o root -g root -m 0755 "$broker_agent_source/logind-session-watcher.sh" "$WATCHER_SCRIPT_PATH"
 
-echo "Downloading create-user.sh..."
-sudo wget -O "$create_user_script" "$create_user_script_url"
+echo "Installing verified create-user.sh..."
+sudo install -o root -g root -m 0755 "$broker_agent_source/create-user.sh" "$create_user_script"
 
-echo "Downloading manage-lease.sh..."
-sudo wget -O "$manage_lease_script" "$manage_lease_script_url"
+echo "Installing verified lease and reconciliation helpers..."
+sudo install -o root -g root -m 0755 "$broker_agent_source/manage-lease.sh" "$manage_lease_script"
+sudo install -o root -g root -m 0755 "$broker_agent_source/broker-lease.py" "$output_directory/broker-lease.py"
+sudo install -o root -g root -m 0755 "$broker_agent_source/broker-freezer.py" "$output_directory/broker-freezer.py"
+sudo install -o root -g root -m 0755 "$broker_agent_source/configure-broker-xrdp-gate.py" "$output_directory/configure-broker-xrdp-gate.py"
+sudo install -o root -g root -m 0755 "$broker_agent_source/release-session-common.sh" "$output_directory/release-session-common.sh"
 
-echo "Downloading apply-host-settings.sh..."
-sudo wget -O "$apply_settings_script" "$apply_settings_script_url"
+echo "Installing verified apply-host-settings.sh..."
+sudo install -o root -g root -m 0755 "$broker_agent_source/apply-host-settings.sh" "$apply_settings_script"
 
 sudo chmod +x "$SCRIPT_PATH"
 sudo chmod +x "$output_directory/xrdp-who-xorg.sh"
@@ -174,9 +188,15 @@ sudo chmod +x "$WATCHER_SCRIPT_PATH"
 sudo chmod +x "$create_user_script"
 sudo chmod +x "$manage_lease_script"
 sudo chmod +x "$apply_settings_script"
+sudo chown root:root "$SCRIPT_PATH" "$WATCHER_SCRIPT_PATH" "$output_directory/xrdp-who-xorg.sh" \
+    "$create_user_script" "$manage_lease_script" "$apply_settings_script" \
+    "$output_directory/broker-lease.py" "$output_directory/release-session-common.sh"
+sudo chmod 0755 "$SCRIPT_PATH" "$WATCHER_SCRIPT_PATH" "$output_directory/xrdp-who-xorg.sh" \
+    "$create_user_script" "$manage_lease_script" "$apply_settings_script" \
+    "$output_directory/broker-lease.py" "$output_directory/release-session-common.sh"
 echo "Downloaded scripts are now executable."
 
-sudo mkdir -p "$state_directory"
+sudo install -d -o root -g root -m 0700 "$state_directory" "$state_directory/leases"
 sudo touch "$LOG_FILE" "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE"
 sudo chown root:root "$LOG_FILE" "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE"
 sudo chmod 600 "$LOG_FILE" "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE"
@@ -191,8 +211,7 @@ else
 fi
 rm -f "$tmp_cron"
 
-echo "Stopping any legacy release-session.sh processes..."
-sudo pkill -f "$SCRIPT_PATH" || true
+echo "Existing legacy processes must be quiesced through the coordinated migration, never by killing user desktops."
 
 echo "Installing systemd service for release-session.sh..."
 cat <<EOF | sudo tee "$SYSTEMD_SERVICE_PATH" >/dev/null
@@ -252,29 +271,16 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-echo "Reloading systemd and enabling release-session timer..."
-sudo systemctl disable --now "$WATCHER_SERVICE_NAME" >/dev/null 2>&1 || true
-sudo systemctl disable --now "$SYSTEMD_TIMER_NAME" >/dev/null 2>&1 || true
-sudo systemctl disable --now "$SYSTEMD_SERVICE_NAME" >/dev/null 2>&1 || true
+echo "Staging systemd units; post-provision activates them after trusted host enrollment."
 sudo systemctl daemon-reload
-sudo systemctl reset-failed "$SYSTEMD_SERVICE_NAME" >/dev/null 2>&1 || true
-sudo systemctl reset-failed "$WATCHER_SERVICE_NAME" >/dev/null 2>&1 || true
-sudo systemctl enable --now "$SYSTEMD_TIMER_NAME"
-sudo systemctl enable --now "$WATCHER_SERVICE_NAME"
-sudo systemctl start "$SYSTEMD_SERVICE_NAME"
-echo "Systemd timer and logind watcher configured successfully."
+sudo systemctl disable --now "$WATCHER_SERVICE_NAME" "$SYSTEMD_TIMER_NAME" "$SYSTEMD_SERVICE_NAME"
 
-if ! id avdadmin >/dev/null 2>&1; then
-    sudo useradd avdadmin
-fi
+id "$broker_admin_username" >/dev/null
 
-# Only the commands the broker API actually invokes with sudo. Privileged file work
-# (mount, chown, chmod, lease markers, host settings) happens inside the allowlisted
-# scripts, each of which validates its own input.
-cmds=(userdel groupadd usermod chpasswd "$create_user_script" "$manage_lease_script" "$apply_settings_script")
-full_paths=$(for cmd in "${cmds[@]}"; do command -v "$cmd"; done | paste -sd ',' -)
+full_paths="$create_user_script *, $manage_lease_script cleanup *, $apply_settings_script \"\""
 sudoers_tmp="/etc/sudoers.d/avdadmin.tmp"
-echo "avdadmin ALL=(ALL) NOPASSWD: $full_paths" | sudo tee "$sudoers_tmp" >/dev/null
+echo "$broker_admin_username ALL=(root) NOPASSWD: $full_paths" | sudo tee "$sudoers_tmp" >/dev/null
+sudo chown root:root "$sudoers_tmp"
 sudo chmod 440 "$sudoers_tmp"
 if sudo visudo -c -f "$sudoers_tmp" >/dev/null 2>&1; then
     sudo mv "$sudoers_tmp" /etc/sudoers.d/avdadmin
@@ -283,7 +289,7 @@ else
     echo "ERROR: Generated sudoers policy failed validation."
     exit 1
 fi
-echo "avdadmin user is created and permissioned"
+echo "Broker administrator is permissioned only for validated helpers; marker migration is deployment-root only."
 
 # Screen lock policy is generated by apply-host-settings.sh from the fleet-wide settings
 # profile, so every supported distribution now receives it. Seeding the defaults here means
@@ -292,4 +298,6 @@ echo "avdadmin user is created and permissioned"
 echo "Applying default Linux Broker host settings..."
 sudo "$apply_settings_script" --defaults
 
+sudo /usr/local/libexec/linuxbroker/python3 -I "$output_directory/configure-broker-xrdp-gate.py" --enroll-drained --admin-username "$broker_admin_username"
+sudo bash "$broker_agent_source/check-broker-host-prerequisites.sh" full
 echo "System configuration complete."

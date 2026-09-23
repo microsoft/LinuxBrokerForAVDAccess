@@ -32,6 +32,9 @@
     "scriptSourceRoot": {
       "value": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main"
     },
+    "linuxAgentFileHashes": {
+      "value": {}
+    },
     "tenantId": {
       "value": "<tenant-id>"
     },
@@ -44,14 +47,20 @@
     "apiClientId": {
       "value": "<api-app-client-id>"
     },
-    "apiClientSecret": {
-      "value": "<api-app-client-secret>"
+    "brokerLauncherClientId": {
+      "value": "<dedicated-public-launcher-client-id>"
     },
-    "avdHostGroupId": {
-      "value": "<avd-host-group-id>"
+    "brokerCheckoutEnabled": {
+      "value": false
     },
-    "linuxHostGroupId": {
-      "value": "<linux-host-group-id>"
+    "containerImageTag": {
+      "value": "<unique-upcoming-secured-rollout-tag>"
+    },
+    "workspaceUserGroupIds": {
+      "value": ["<existing-avd-user-group-object-id>"]
+    },
+    "workspaceUserIds": {
+      "value": []
     },
     "linuxHostSshPrivateKey": {
       "value": "<linux-host-ssh-private-key>"
@@ -64,6 +73,12 @@
     },
     "sqlAdminPassword": {
       "value": "<sql-admin-password>"
+    },
+    "sqlRuntimeLogin": {
+      "value": "brokerapi"
+    },
+    "sqlRuntimePassword": {
+      "value": "<separate-contained-runtime-user-password>"
     },
     "flaskKey": {
       "value": "<flask-session-secret>"

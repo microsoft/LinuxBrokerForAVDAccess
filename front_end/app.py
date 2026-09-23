@@ -13,8 +13,10 @@ from flask_session import Session
 from flask_wtf.csrf import CSRFProtect, CSRFError, generate_csrf
 
 from function_api import NotAuthenticated, api_post, fetch_vm_summary
-from function_authentication import login_required
-from function_bff import API_PREFIX, json_error
+from function_authentication import (
+    PortalAccessError, login_required, portal_authority, portal_error_response, session_claims,
+)
+from function_bff import API_PREFIX, broker_endpoint, json_error
 from route_authentication import register_route_authentication
 from route_vm_management import register_route_vm_management
 from route_scaling_management import register_route_scaling_management
@@ -106,6 +108,13 @@ def favicon():
 # Session and dashboard
 
 
+@app.after_request
+def private_portal_responses(response):
+    if request.path.startswith(API_PREFIX):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @app.route(f'{API_PREFIX}/session')
 def ui_session():
     """Bootstrap payload for the SPA.
@@ -113,29 +122,39 @@ def ui_session():
     Deliberately not behind @login_required: the signed-out landing page needs a
     successful response that simply reports `authenticated: false`.
     """
-    user = session.get('user')
-    # A malformed session must not produce a half-authenticated state: without
-    # usable claims there is no user to report, so treat it as signed out and let
-    # the client send the operator back through sign-in.
-    claims = user if isinstance(user, dict) else {}
-    authenticated = bool(claims) and bool(session.get('access_token'))
+    signed_in = isinstance(session.get('user'), dict) and bool(session.get('user'))
+    try:
+        claims = session_claims()
+    except PortalAccessError as error:
+        if signed_in:
+            return portal_error_response(error)
+        claims = None
+
+    authority = {"subject": None, "capabilities": {"manage": False, "connect": False}}
+    if claims is not None:
+        try:
+            authority = portal_authority()
+        except PortalAccessError as error:
+            return portal_error_response(error)
 
     return jsonify({
-        "authenticated": authenticated,
+        "authenticated": claims is not None,
+        **authority,
         "version": app.config['VERSION'],
         # Tied to the session and required on every state-changing request.
         "csrfToken": generate_csrf(),
         "user": {
-            "name": claims.get('name'),
-            "username": claims.get('preferred_username'),
-            "objectId": claims.get('oid'),
-            "tenantId": claims.get('tid'),
-        } if authenticated else None,
+            "name": claims.get('name') if isinstance(claims.get('name'), str) else None,
+            "username": claims.get('preferred_username') if isinstance(claims.get('preferred_username'), str) else None,
+            "objectId": authority['subject']['objectId'],
+            "tenantId": authority['subject']['tenantId'],
+        } if claims is not None else None,
     })
 
 
 @app.route(f'{API_PREFIX}/dashboard')
 @login_required
+@broker_endpoint("Unable to load the dashboard. Please try again later.")
 def ui_dashboard():
     """Aggregate pool counters plus the most recent scaling activity.
 
@@ -149,8 +168,10 @@ def ui_dashboard():
     try:
         stats = fetch_vm_summary()
     except NotAuthenticated:
-        return json_error("Your session has expired. Please sign in again.", 401)
+        raise
     except (requests.exceptions.RequestException, ValueError) as e:
+        if getattr(getattr(e, 'response', None), 'status_code', None) in (401, 403):
+            raise
         api_error = True
         logger.error("Unable to build dashboard VM summary: %s", e)
 
@@ -158,7 +179,11 @@ def ui_dashboard():
     try:
         activity = api_post('/scaling/log', {"limit": 5})
         recent_activity = activity[:5] if isinstance(activity, list) else []
-    except (NotAuthenticated, requests.exceptions.RequestException, ValueError) as e:
+    except NotAuthenticated:
+        raise
+    except (requests.exceptions.RequestException, ValueError) as e:
+        if getattr(getattr(e, 'response', None), 'status_code', None) in (401, 403):
+            raise
         logger.warning("Unable to load recent scaling activity for dashboard: %s", e)
 
     return jsonify({
@@ -226,7 +251,7 @@ def handle_server_error(e):
 # ===============================
 # Authentication
 
-register_route_authentication(app)
+register_route_authentication(app, spa_shell)
 
 # ===============================
 # VM Management

@@ -3,7 +3,7 @@
 import logging
 
 import requests
-from flask import jsonify, session
+from flask import jsonify
 
 from function_api import NotAuthenticated, api_get, api_post
 from function_authentication import login_required
@@ -42,7 +42,11 @@ def register_route_host_settings(app):
         # to empty rather than taking the whole page down.
         try:
             hosts = api_get('/vms')
-        except (NotAuthenticated, requests.exceptions.RequestException, ValueError) as e:
+        except NotAuthenticated:
+            raise
+        except (requests.exceptions.RequestException, ValueError) as e:
+            if getattr(getattr(e, 'response', None), 'status_code', None) in (401, 403):
+                raise
             hosts = []
             logger.warning("Unable to load hosts for the settings drift table: %s", e)
 
@@ -68,10 +72,6 @@ def register_route_host_settings(app):
         # which the API would read as "leave unchanged".
         for field, api_field in BOOLEAN_FIELDS.items():
             data[api_field] = bool(payload.get(field))
-
-        user = session.get('user') or {}
-        if isinstance(user, dict):
-            data['updatedBy'] = user.get('preferred_username') or user.get('name')
 
         settings = api_post('/hosts/settings/update', data)
 

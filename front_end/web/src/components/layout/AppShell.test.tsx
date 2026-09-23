@@ -4,7 +4,10 @@ import { screen } from '@testing-library/react';
 import { AppShell } from './AppShell';
 import { renderWithProviders, TEST_SESSION } from '../../test/render';
 
-const ANONYMOUS = { ...TEST_SESSION, authenticated: false, user: null };
+const ANONYMOUS = {
+  ...TEST_SESSION, authenticated: false, user: null, subject: null,
+  capabilities: { manage: false, connect: false },
+};
 
 function renderShell(route: string, session = TEST_SESSION) {
   return renderWithProviders(<AppShell>page body</AppShell>, { route, session });
@@ -43,6 +46,15 @@ describe('AppShell', () => {
     expect(screen.queryByRole('link', { name: 'VM Management' })).not.toBeInTheDocument();
     // A full navigation to Flask, which starts the MSAL redirect.
     expect(screen.getByRole('link', { name: /Sign in/ })).toHaveAttribute('href', '/login');
+  });
+
+  it('keeps sign out but hides all management and profile links from non-admins', () => {
+    renderShell('/vms', { ...TEST_SESSION, capabilities: { manage: false, connect: true } });
+    for (const name of ['Dashboard', 'VM Management', 'Scaling Management', 'Host Settings', 'Profile']) {
+      expect(screen.queryByRole('link', { name })).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole('link', { name: /Test Operator/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Sign out/ })).toHaveAttribute('href', '/logout');
   });
 
   it.each([

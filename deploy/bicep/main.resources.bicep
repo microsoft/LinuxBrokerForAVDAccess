@@ -10,15 +10,19 @@ param frontendClientId string
 @secure()
 param frontendClientSecret string
 param apiClientId string
-@secure()
-param apiClientSecret string
+param brokerLauncherClientId string
+param brokerCheckoutEnabled bool = false
+param containerImageTag string
+param workspaceUserGroupIds array = []
+param workspaceUserIds array = []
 @secure()
 param linuxHostSshPrivateKey string
-param avdHostGroupId string = ''
-param linuxHostGroupId string = ''
 param sqlAdminLogin string = 'brokeradmin'
 @secure()
 param sqlAdminPassword string
+param sqlRuntimeLogin string = 'brokerapi'
+@secure()
+param sqlRuntimePassword string
 @secure()
 param flaskKey string
 param domainName string = ''
@@ -51,6 +55,8 @@ param appServiceDomain string = ''
 
 @description('Root URL the Linux host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds.')
 param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
+param linuxAgentFileHashes object = {}
+param linuxPythonRuntime object
 param allowedClientIp string = ''
 param appServicePlanSku string = 'P2mv3'
 param deployLinuxHosts bool = false
@@ -166,7 +172,7 @@ module keyVault 'modules/core/key-vault.bicep' = {
     location: location
     tags: tags
     keyVaultName: keyVaultName
-    sqlAdminPassword: sqlAdminPassword
+    sqlRuntimePassword: sqlRuntimePassword
     linuxHostSshPrivateKey: linuxHostSshPrivateKey
   }
 }
@@ -206,9 +212,9 @@ resource storageAccountResource 'Microsoft.Storage/storageAccounts@2023-05-01' e
   name: storageAccountName
 }
 
-var frontendImageName = '${containerRegistry.outputs.loginServer}/frontend:latest'
-var apiImageName = '${containerRegistry.outputs.loginServer}/api:latest'
-var taskImageName = '${containerRegistry.outputs.loginServer}/task:latest'
+var frontendImageName = '${containerRegistry.outputs.loginServer}/frontend:${containerImageTag}'
+var apiImageName = '${containerRegistry.outputs.loginServer}/api:${containerImageTag}'
+var taskImageName = '${containerRegistry.outputs.loginServer}/task:${containerImageTag}'
 // ARM already knows the login endpoint of the cloud it is deploying into, so only the
 // endpoints environment() cannot supply need a lookup table.
 var cloudProfiles = {
@@ -238,7 +244,8 @@ var frontendApiBaseUrl = 'https://${apiAppName}.${resolvedAppServiceDomain}/api'
 // Built here rather than returned from the storage module, because module outputs are
 // persisted in deployment history and readable by anyone with deployment-read access.
 var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccountResource.name};AccountKey=${storageAccountResource.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
-var tenantIssuerUrl = '${environment().authentication.loginEndpoint}${tenantId}/v2.0'
+var authorityBase = endsWith(resolvedAuthorityHost, '/') ? substring(resolvedAuthorityHost, 0, length(resolvedAuthorityHost) - 1) : resolvedAuthorityHost
+var tenantIssuerUrl = '${authorityBase}/${tenantId}/v2.0'
 var frontendAllowedAudiences = [
   frontendClientId
   'api://${frontendClientId}'
@@ -302,7 +309,6 @@ var apiAuthSettings = {
       enabled: true
       registration: {
         clientId: apiClientId
-        clientSecretSettingName: 'MICROSOFT_PROVIDER_AUTHENTICATION_SECRET'
         openIdIssuer: tenantIssuerUrl
       }
       validation: {
@@ -325,23 +331,21 @@ var frontendSettings = {
   WEBSITE_AUTH_AAD_ALLOWED_TENANTS: tenantId
 }
 var apiSettings = {
-  AVD_HOST_GROUP_ID: avdHostGroupId
   AZURE_AUTHORITY_HOST: resolvedAuthorityHost
   AZURE_CLOUD_NAME: azureCloudName
+  BROKER_CHECKOUT_ENABLED: string(brokerCheckoutEnabled)
+  BROKER_LAUNCHER_CLIENT_ID: brokerLauncherClientId
   CLIENT_ID: apiClientId
   DB_DATABASE: sql.outputs.databaseName
   DB_PASSWORD_NAME: databasePasswordSecretName
   DB_SERVER: sql.outputs.sqlServerFullyQualifiedDomainName
-  DB_USERNAME: sqlAdminLogin
+  DB_USERNAME: sqlRuntimeLogin
   DOMAIN_NAME: domainName
-  GRAPH_API_ENDPOINT: '${resolvedGraphEndpoint}/.default'
-  GRAPH_ENDPOINT: resolvedGraphEndpoint
   KEY_NAME: linuxHostPrivateKeySecretName
   LINUX_HOST_ADMIN_LOGIN_NAME: linuxHostAdminLoginName
-  LINUX_HOST_GROUP_ID: linuxHostGroupId
-  MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: apiClientSecret
   NFS_SHARE: nfsShare
   OTEL_SERVICE_NAME: apiAppName
+  PORTAL_CLIENT_ID: frontendClientId
   SCM_DO_BUILD_DURING_DEPLOYMENT: 'false'
   STS_ISSUER_HOST: resolvedStsIssuerHost
   TENANT_ID: tenantId
@@ -350,6 +354,9 @@ var apiSettings = {
   VM_SUBSCRIPTION_ID: vmSubscriptionId
 }
 var functionSettings = {
+  'AzureWebJobs.ReturnReleasedVMs.Disabled': 'true'
+  'AzureWebJobs.TestVMConnectivity.Disabled': 'true'
+  'AzureWebJobs.ScalingVMs.Disabled': 'true'
   API_CLIENT_ID: apiClientId
   API_URL: frontendApiBaseUrl
   AZURE_AUTHORITY_HOST: resolvedAuthorityHost
@@ -482,6 +489,8 @@ module linuxHosts 'modules/Linux/main.bicep' = if (deployLinuxHosts && linuxHost
     linuxBrokerApiBaseUrl: frontendApiBaseUrl
     linuxBrokerApiClientId: apiClientId
     scriptSourceRoot: scriptSourceRoot
+    agentFileHashes: linuxAgentFileHashes
+    pythonRuntime: linuxPythonRuntime
     disableScreenLock: linuxHostDisableScreenLock
   }
 }
@@ -503,7 +512,8 @@ module avdHosts 'modules/AVD/main.bicep' = if (deployAvdHosts && avdSessionHostC
     vmSize: avdVmSize
     adminUsername: linuxHostAdminLoginName
     adminPassword: hostAdminPassword
-    linuxBrokerApiBaseUrl: frontendApiBaseUrl
+    workspaceUserGroupIds: workspaceUserGroupIds
+    workspaceUserIds: workspaceUserIds
   }
 }
 
@@ -517,3 +527,9 @@ output containerRegistryName string = containerRegistryName
 output sqlServerName string = sql.outputs.sqlServerName
 output sqlDatabaseName string = sql.outputs.databaseName
 output virtualNetworkName string = networking.outputs.vnetName
+output storageAccountName string = storageAccount.outputs.name
+output storageBlobEndpoint string = storageAccount.outputs.blobEndpoint
+output launcherArtifactContainerName string = storageAccount.outputs.launcherArtifactContainerName
+output avdApplicationGroupId string = deployAvdHosts && avdSessionHostCount > 0 && !empty(avdHostPoolName) ? avdHosts!.outputs.applicationGroupId : ''
+output resolvedAuthorityHost string = resolvedAuthorityHost
+output deploymentGraphEndpoint string = resolvedGraphEndpoint

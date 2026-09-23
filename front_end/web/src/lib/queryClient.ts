@@ -1,6 +1,23 @@
 import { QueryClient } from '@tanstack/react-query';
 
-import { ApiError } from './api';
+import { ApiError, isAuthorizationError } from './api';
+import type { SessionInfo } from '../types/broker';
+
+export function canManage(session: SessionInfo | null | undefined): boolean {
+  return session?.authenticated === true && !!session.subject && session.capabilities?.manage === true;
+}
+
+export function sessionSubject(session: SessionInfo | undefined): string | null {
+  return session?.authenticated && session.subject
+    ? JSON.stringify([session.subject.tenantId.toLowerCase(), session.subject.objectId.toLowerCase()])
+    : null;
+}
+
+export function clearManagementCache(queryClient: QueryClient) {
+  // Removal also cancels query fetches; a late response cannot repopulate the cache.
+  queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== 'session' });
+  queryClient.getMutationCache().clear();
+}
 
 export function createQueryClient() {
   return new QueryClient({
@@ -10,11 +27,14 @@ export function createQueryClient() {
         // window plus refetch-on-focus keeps a long-lived tab honest without
         // hammering the API.
         staleTime: 15_000,
-        refetchOnWindowFocus: true,
+        // The session revalidates first on focus. Management queries remount only
+        // after that check succeeds, rather than racing it with stale authority.
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
         retry: (failureCount, error) => {
           // A rejected request will keep being rejected; only retry transport and
           // upstream failures, and only briefly.
-          if (error instanceof ApiError && error.status < 500) {
+          if (isAuthorizationError(error) || (error instanceof ApiError && error.status < 500)) {
             return false;
           }
           return failureCount < 2;

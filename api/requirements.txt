@@ -7,6 +7,5 @@ azure-mgmt-compute==38.3.0
 pyjwt==2.13.0
 cryptography==50.0.0
 requests==2.34.2
-flask_caching==2.4.1
 pymssql==2.3.13
 azure-keyvault-secrets==4.11.1

@@ -1,0 +1,4 @@
+linux_host/**/*.sh text eol=lf
+linux_host/**/*.py text eol=lf
+custom_script_extensions/*.sh text eol=lf
+custom_script_extensions/*.py text eol=lf

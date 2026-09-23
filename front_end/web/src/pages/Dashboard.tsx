@@ -61,9 +61,6 @@ export function Dashboard() {
               <Icon name="refresh" size={14} />
               Refresh
             </button>
-            <ButtonLink to="/vms/checkout" variant="primary" size="sm" icon="person">
-              Checkout VM
-            </ButtonLink>
           </>
         }
       />
@@ -83,6 +80,12 @@ export function Dashboard() {
 
       {stats ? (
         <>
+          {stats.ready === null ? (
+            <Notice tone="warning" className="mb-5">
+              <strong>Checkout readiness unavailable.</strong> Inventory attributes alone do not verify
+              trusted host enrollment. Refresh to retry the broker summary.
+            </Notice>
+          ) : null}
           <div className="mb-5 grid grid-cols-2 gap-4 lg:grid-cols-4">
             <StatCard
               label="Total VMs"
@@ -95,9 +98,9 @@ export function Dashboard() {
             <StatCard
               label="Ready"
               value={stats.ready}
-              hint="On, reachable and unassigned"
+              hint={stats.ready === null ? 'Awaiting broker verification' : 'Verified by the broker for checkout'}
               icon="check-circle"
-              tone="ok"
+              tone={stats.ready === null ? 'neutral' : 'ok'}
               to="/vms"
             />
             <StatCard
@@ -206,8 +209,8 @@ function PoolComposition({ stats }: { stats: DashboardStats }) {
               />
               <Metric
                 label="Ready for checkout"
-                value={`${stats.ready}`}
-                tone={stats.ready ? 'ok' : 'danger'}
+                value={stats.ready === null ? 'Unavailable' : `${stats.ready}`}
+                tone={stats.ready === null ? undefined : stats.ready ? 'ok' : 'danger'}
               />
               <Metric label="Utilization" value={`${stats.utilization}%`} />
             </dl>
@@ -215,7 +218,7 @@ function PoolComposition({ stats }: { stats: DashboardStats }) {
         ) : (
           <EmptyState
             title="No virtual machines registered"
-            message="Add a VM to start brokering sessions."
+            message="Add a VM to inventory, then complete trusted deployment enrollment before brokering sessions."
             icon="server"
           />
         )}

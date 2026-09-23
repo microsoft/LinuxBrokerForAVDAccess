@@ -99,7 +99,16 @@ def test_save_sends_integers_to_the_api(signed_in_client, broker_api):
     payload = update_payload(broker_api)
     assert payload["GracePeriodSeconds"] == 900
     assert payload["IdleTimeoutSeconds"] == 1800
-    assert payload["updatedBy"] == "op@contoso.com"
+    assert "updatedBy" not in payload
+    assert set(payload) == set(HOST_SETTINGS) - {"SettingsVersion"}
+
+
+def test_settings_actor_cannot_be_supplied_by_the_browser(signed_in_client, broker_api):
+    response = save_settings(signed_in_client, {"updatedBy": "another-user", "updatedby": "another-user"})
+    assert response.status_code == 200
+    payload = update_payload(broker_api)
+    assert "updatedBy" not in payload
+    assert "updatedby" not in payload
 
 
 def test_save_returns_a_message_the_client_can_show(signed_in_client):
