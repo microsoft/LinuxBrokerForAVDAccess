@@ -32,7 +32,7 @@ from config import *
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.159'
+app.config['VERSION'] = '0.160'
 
 # Backs is_member_of_group_cached, which keeps token validation off the Graph API on
 # every request.
@@ -102,11 +102,19 @@ def refresh_db_password(interval=3600):
         time.sleep(interval)
         retrieve_db_password_from_key_vault()
 
+def normalize_private_key(value: str) -> str:
+    # The deployment hooks store the key with escaped newlines and trim the trailing one, and
+    # OpenSSH refuses to load a private key that does not end in a newline.
+    pem_key = value.replace('\\n', '\n').replace('\\', '').replace('\r', '')
+    if not pem_key.endswith('\n'):
+        pem_key += '\n'
+    return pem_key
+
 def retrieve_pem_key_from_key_vault(vault_url, key_name):
     credential = DefaultAzureCredential()
     secret_client = SecretClient(vault_url=vault_url, credential=credential)
     secret = secret_client.get_secret(key_name)
-    pem_key = secret.value.replace('\\n', '\n').replace('\\', '')
+    pem_key = normalize_private_key(secret.value)
     pem_file_path = '/tmp/private_key.pem'
     required_permissions = 0o600
 

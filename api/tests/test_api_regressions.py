@@ -17,6 +17,19 @@ def test_coerce_optional_int_handles_nullish_junk_and_clamps(app_module):
     assert coerce("999", minimum=1, maximum=200) == 200
 
 
+@pytest.mark.parametrize("stored", [
+    "-----BEGIN OPENSSH PRIVATE KEY-----\\nAAAA\\n-----END OPENSSH PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----\\nAAAA\\n-----END OPENSSH PRIVATE KEY-----\\n",
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----\r\nAAAA\r\n-----END OPENSSH PRIVATE KEY-----\r\n",
+])
+def test_private_key_always_ends_with_a_newline(app_module, stored):
+    """azd trims the trailing newline, and ssh then fails with 'error in libcrypto'."""
+    assert app_module.normalize_private_key(stored) == (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+    )
+
+
 @pytest.mark.parametrize("path,proc,_paged_proc", HISTORY_ENDPOINTS)
 def test_history_null_limit_is_omitted_for_unpaged_queries(client, fake_db, path, proc, _paged_proc):
     response = client.post(path, json={"startdate": "null", "enddate": "", "limit": "null"})

@@ -184,7 +184,16 @@ if [[ "$remoteAccessTool" == "xpra" || "$remoteAccessTool" == "both" ]]; then
         echo "xpra service is already active."
     elif [[ "$remoteAccessTool" == "both" ]]; then
         echo "Starting and enabling xpra service..."
-        sudo systemctl enable xpra --now || echo "WARNING: The xpra service did not start. xrdp remains available."
+        sudo systemctl enable xpra --now || true
+        # systemctl returns as soon as the proxy process forks, so a proxy that exits during
+        # startup only shows up a few seconds later. Left alone, the failed unit marks the host
+        # degraded and xpra.socket keeps accepting connections for a proxy that cannot run.
+        sleep 15
+        if ! systemctl is-active --quiet xpra; then
+            echo "WARNING: The xpra service did not stay running. Disabling it. xrdp remains available."
+            sudo systemctl disable --now xpra.socket xpra.service || true
+            sudo systemctl reset-failed xpra.service || true
+        fi
     else
         echo "Starting and enabling xpra service..."
         sudo systemctl enable xpra --now

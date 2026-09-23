@@ -375,19 +375,19 @@ Important deployment characteristics:
 
 It currently runs, in order:
 
-1. [Build-ContainerImages.ps1](Build-ContainerImages.ps1)
-2. [Initialize-Database.ps1](Initialize-Database.ps1)
-3. [Assign-FunctionAppApiRole.ps1](Assign-FunctionAppApiRole.ps1)
+1. [Assign-FunctionAppApiRole.ps1](Assign-FunctionAppApiRole.ps1)
+2. [Build-ContainerImages.ps1](Build-ContainerImages.ps1)
+3. [Initialize-Database.ps1](Initialize-Database.ps1)
 4. [Assign-VmApiRoles.ps1](Assign-VmApiRoles.ps1)
 5. [Register-LinuxHostSqlRecords.ps1](Register-LinuxHostSqlRecords.ps1)
 
 That means `postprovision` does all of the following:
 
+- Assigns the `ScheduledTask` app role to the function app managed identity. This runs before the images are built because the function app requests an API token as soon as its image starts, and the managed identity service caches that token for up to 24 hours.
 - Builds `frontend:latest`, `api:latest`, and `task:latest` in ACR.
 - Restarts the frontend app, API app, and function app after the new images are pushed.
 - Applies all SQL scripts from [../sql_queries](../sql_queries) through ADO.NET.
 - Makes the SQL bootstrap rerunnable by handling `GO` batches and converting procedure creation to `CREATE OR ALTER`.
-- Assigns the `ScheduledTask` app role to the function app managed identity.
 - Adds AVD and Linux VM managed identities to the corresponding Entra groups, retrying while new identities replicate, and fails the hook if a membership still cannot be confirmed.
 - Registers Linux hosts into `dbo.VirtualMachines` through `dbo.RegisterLinuxHostVm`.
 
@@ -611,6 +611,8 @@ Rerun [Post-Provision.ps1](Post-Provision.ps1) after confirming SQL connectivity
 
 The API connects to `<LINUX_HOST_ADMIN_LOGIN_NAME>@<hostname>.<DOMAIN_NAME>` over SSH from inside the virtual network. With the default configuration, confirm that the host has an A record in the `linuxbroker.internal` private DNS zone and that the zone is linked to the virtual network. If you supplied `domainName`, confirm that `<hostname>.<domainName>` resolves from the API's virtual network. Also confirm that the API app shows virtual network integration with the `snet-appsvc` subnet.
 
+If the API log shows `Load key "/tmp/private_key.pem": error in libcrypto` followed by `Permission denied (publickey)`, the API image is older than version 0.160. The private key loses its trailing newline on the way into Key Vault, and OpenSSH will not load a key without one; 0.160 restores it. Rebuild the images as described in [Rebuild container images and restart apps](#rebuild-container-images-and-restart-apps).
+
 ### Linux Desktop does not appear for a user
 
 Confirm that the user is a member of the AVD users group. The group must hold **Desktop Virtualization User** on the RemoteApp application group; that assignment is created only when `avdUsersGroupId` has a value during provisioning, so rerun `azd provision` after setting it.
@@ -619,17 +621,62 @@ Confirm that the user is a member of the AVD users group. The group must hold **
 
 Confirm that Microsoft Entra authentication for RDP is enabled on the Windows Cloud Login service principal (see [Microsoft Entra authentication for RDP](#microsoft-entra-authentication-for-rdp)) and that the user holds **Virtual Machine User Login** on the session host through the AVD users group.
 
+### The AVD session host is not joined to Microsoft Entra ID
+
+Users cannot sign in to a session host that is not joined, even though the `AADLoginForWindows` extension reports success. On the host, `dsregcmd /status` shows `AzureAdJoined : NO`, and the **Microsoft-Windows-User Device Registration/Admin** event log shows `error_hostname_duplicate` ("Another object with the same value for property hostnames already exists").
+
+A device object left over from an earlier deployment that used the same VM name blocks the join. In Microsoft Entra ID, find the devices with the session host's name, confirm from the Azure resource ID on the device that its VM no longer exists, and delete that device. The host retries the join on its own, typically within 15 minutes.
+
 ### Linux Desktop opens but reports that no Linux host is available
 
 `Connect-LinuxBroker.ps1` shows this when checkout does not return a host. Check the **LinuxBrokerScript** source in the session host's Application event log. A `403` from the API means the session host's managed identity is not yet in the AVD host group; rerun `azd hooks run postprovision`. Otherwise, confirm in the portal that at least one Linux host is available.
+
+### Released Linux hosts never return to Available
+
+The function app returns released hosts to the pool. If hosts stay **Released** and the API log shows `Access denied: insufficient scope or role permissions or group membership.` at the start of every minute, the function app's API token does not carry the `ScheduledTask` role.
+
+This happens when the function app requested a token before the role was assigned, which earlier versions of [Post-Provision.ps1](Post-Provision.ps1) allowed on a new deployment. The managed identity service caches the token for up to 24 hours, so restarting the function app does not help. Either wait for the token to expire, or give the function app a new identity. Stop the app first, so it cannot request a token before the role is in place:
+
+```powershell
+az functionapp stop --name <task-app> --resource-group <resource-group>
+$old = az functionapp identity show --name <task-app> --resource-group <resource-group> --query principalId --output tsv
+az functionapp identity remove --name <task-app> --resource-group <resource-group>
+$new = az functionapp identity assign --name <task-app> --resource-group <resource-group> --query principalId --output tsv
+
+# Move the registry pull assignment to the new identity under the same name, so the
+# next azd provision updates it instead of failing.
+$acrId = az acr show --name <registry> --query id --output tsv
+$name = az role assignment list --scope $acrId --role AcrPull --query "[?principalId=='$old'].name" --output tsv
+az role assignment delete --ids "$acrId/providers/Microsoft.Authorization/roleAssignments/$name"
+az role assignment create --name $name --assignee-object-id $new --assignee-principal-type ServicePrincipal --role AcrPull --scope $acrId
+
+.\Assign-FunctionAppApiRole.ps1 -ResourceGroupName <resource-group> -TaskAppName <task-app> -ApiClientId <api-client-id>
+Start-Sleep -Seconds 120
+az functionapp start --name <task-app> --resource-group <resource-group>
+```
 
 ### The Linux host deployment failed with a Trusted Launch error
 
 Trusted Launch requires Generation 2 images. The RHEL options map to Gen2 SKUs; if you customized the image, choose a Gen2 SKU.
 
+### A VM deployment failed with `SkuNotAvailable`
+
+The requested size is restricted for your subscription in that region, which is common for popular sizes. List the sizes your subscription can use with `az vm list-skus --location <region> --resource-type virtualMachines --output table` (sizes with `NotAvailableForSubscription` are blocked), then choose another size and rerun `azd provision`:
+
+```powershell
+azd env set linuxHostVmSize Standard_D2as_v5
+azd env set avdVmSize Standard_D8as_v4
+```
+
+`avdVmSize` accepts only the sizes listed in `main.bicep`, and both host types use Trusted Launch, so pick a Gen2-capable size.
+
 ### Home directories are not on the NFS share
 
 Linux hosts mount the share when the broker first creates a user. Confirm that `NFS_SHARE` is set on the API app, that `<account>.file.core.windows.net` resolves to a private IP address from the Linux host, and that the storage account's private endpoint is approved.
+
+### `xpra.service` is disabled on a RHEL 9 host
+
+The system proxy service installed by the upstream xpra 6.5 packages exits during startup on RHEL 9. Its unit binds a QUIC socket, and the `aioquic` module it needs is not packaged for RHEL 9. Left enabled, the failed unit would mark the host as degraded, so the bootstrap disables `xpra.socket` and `xpra.service` and logs a warning. xrdp, which the **Linux Desktop** app uses, is not affected.
 
 ### A RHEL session is stuck on a lock screen that will not accept the password
 
