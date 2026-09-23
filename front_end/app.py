@@ -247,4 +247,6 @@ register_route_host_settings(app)
 # Main
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Debug mode stays off unless FLASK_DEBUG=1 is set. The container runs gunicorn,
+    # so this block is only used for local runs.
+    app.run()

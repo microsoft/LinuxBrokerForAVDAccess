@@ -455,3 +455,71 @@ def test_failed_checkout_cleans_up_the_host_before_releasing_the_vm(client, fake
 
     assert response.status_code == 500
     assert steps == [("delete", "lnxhost-07", "alice", LEASE_ID), ("release", 7, LEASE_ID)]
+
+
+# ---------------------------------------------------------------------------
+# Every response is JSON (#33).
+#
+# The portal parses every successful broker response as JSON. These handlers used
+# to return a bare string, which Flask serves as text/html, so the change was saved
+# but the portal reported that it had failed.
+
+
+@pytest.mark.parametrize("path,body,proc,row,expected", [
+    ("/api/vms/5/delete", None, "DeleteVm", {"DeletedVMID": 5},
+     {"message": "VM with VMID 5 has been successfully deleted.", "VMID": 5}),
+    ("/api/scaling/rules/7/update", {"minvms": 1}, "UpdateScalingRule", None,
+     {"message": "Scaling rule with RuleID 7 updated successfully.", "RuleID": 7}),
+    ("/api/scaling/rules/7/delete", None, "DeleteScalingRule", {"Message": "Scaling rule deleted successfully."},
+     {"message": "Scaling rule with RuleID 7 has been successfully deleted.", "RuleID": 7}),
+])
+def test_successful_deletes_and_rule_updates_answer_with_json(client, fake_db, path, body, proc, row, expected):
+    if row is not None:
+        fake_db.fetchone_rows[proc] = row
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 200
+    assert response.mimetype == "application/json"
+    assert response.get_json() == expected
+    assert fake_db.commits == 1
+    # The router hands the handler an integer, which is what reaches SQL.
+    record_id = expected.get("VMID", expected.get("RuleID"))
+    assert fake_db.latest_call(proc)["params"][0] == record_id
+
+
+def test_returning_released_vms_with_nothing_to_return_answers_with_an_empty_array(client, fake_db):
+    response = client.post("/api/vms/released", json={})
+
+    assert response.status_code == 200
+    assert response.is_json
+    assert response.get_json() == []
+
+
+@pytest.mark.parametrize("method,path", [
+    ("get", "/api/vms/abc"),
+    ("post", "/api/vms/abc/update-attributes"),
+    ("post", "/api/vms/abc/delete"),
+    ("post", "/api/vms/abc/return"),
+    ("post", "/api/vms/1%3Cscript%3E/delete"),
+    ("post", "/api/vms/-1/delete"),
+])
+def test_vm_routes_reject_a_non_integer_vmid_before_reaching_sql(client, fake_db, method, path):
+    response = getattr(client, method)(path, json={"vmstatus": "Available"})
+
+    assert response.status_code == 404
+    assert response.is_json
+    assert response.get_json() == {"error": "The requested resource was not found."}
+    assert fake_db.calls == []
+
+
+def test_unknown_paths_and_methods_get_the_json_error_envelope(client):
+    response = client.get("/api/does-not-exist")
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "The requested resource was not found."}
+
+    response = client.get("/api/vms/5/delete")
+    assert response.status_code == 405
+    assert response.is_json
+    assert response.get_json() == {"error": "The method is not allowed for the requested URL."}
+    assert "POST" in response.headers["Allow"]
