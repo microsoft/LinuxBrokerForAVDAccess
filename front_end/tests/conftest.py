@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -66,13 +67,26 @@ HISTORY_PATHS = [f"{API}/vms/history", f"{API}/scaling/log", f"{API}/scaling/rul
 
 
 class FakeResponse:
+    """Stands in for requests.Response.
+
+    A dict or list payload is a JSON body. A string payload is the raw body text,
+    and json() rejects it the way requests does, so a broker that answers with plain
+    text fails here the same way it fails in production (#33).
+    """
+
     def __init__(self, payload, status_code=200):
         self._payload = payload
         self.status_code = status_code
-        self.text = str(payload)
+        self.text = payload if isinstance(payload, str) else json.dumps(payload)
 
     def json(self):
-        return self._payload
+        if not isinstance(self._payload, str):
+            return self._payload
+        import requests
+        try:
+            return json.loads(self._payload)
+        except json.JSONDecodeError as e:
+            raise requests.exceptions.JSONDecodeError(e.msg, e.doc, e.pos) from e
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -157,6 +171,22 @@ class FakeBrokerApi:
             return FakeResponse({"RuleID": 1}, status_code=201)
         if url.endswith("/vms/checkout"):
             return FakeResponse(VMS[0])
+        # The bodies the broker API returns for these, which the BFF passes through.
+        match = re.search(r"/vms/(\d+)/delete$", url)
+        if match:
+            vmid = int(match.group(1))
+            return FakeResponse({"message": f"VM with VMID {vmid} has been successfully deleted.",
+                                 "VMID": vmid})
+        match = re.search(r"/scaling/rules/(\d+)/update$", url)
+        if match:
+            ruleid = int(match.group(1))
+            return FakeResponse({"message": f"Scaling rule with RuleID {ruleid} updated successfully.",
+                                 "RuleID": ruleid})
+        match = re.search(r"/scaling/rules/(\d+)/delete$", url)
+        if match:
+            ruleid = int(match.group(1))
+            return FakeResponse({"message": f"Scaling rule with RuleID {ruleid} has been successfully deleted.",
+                                 "RuleID": ruleid})
         return FakeResponse({})
 
     def _history(self, rows, params):

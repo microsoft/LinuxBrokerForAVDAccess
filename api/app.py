@@ -32,7 +32,7 @@ from config import *
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.162'
+app.config['VERSION'] = '0.163'
 
 # Backs is_member_of_group_cached, which keeps token validation off the Graph API on
 # every request.
@@ -1043,7 +1043,7 @@ def checkout_vm():
         logger.exception("Failed to check out a VM.")
         return error_response("Unable to check out a virtual machine.", 500)
 
-@app.route('/api/vms/<vmid>/update-attributes', methods=['POST'])
+@app.route('/api/vms/<int:vmid>/update-attributes', methods=['POST'])
 @token_required(['ScheduledTask', 'access_as_user', 'FullAccess'])
 def update_vm_attributes(vmid):
     try:
@@ -1081,7 +1081,7 @@ def update_vm_attributes(vmid):
         logger.exception("Failed to update VM %s attributes.", vmid)
         return error_response("Unable to update virtual machine attributes.", 500)
 
-@app.route('/api/vms/<vmid>/delete', methods=['POST'])
+@app.route('/api/vms/<int:vmid>/delete', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
 def delete_vm(vmid):
     try:
@@ -1095,7 +1095,7 @@ def delete_vm(vmid):
         if not row:
             return error_response(f"VM with VMID {vmid} could not be deleted or was not found.", 404)
 
-        return f"VM with VMID {vmid} has been successfully deleted.", 200
+        return jsonify({'message': f"VM with VMID {vmid} has been successfully deleted.", 'VMID': vmid}), 200
 
     except DatabaseUnavailable:
         logger.error("Database connection failed while deleting VM %s.", vmid)
@@ -1150,7 +1150,7 @@ def add_new_vm():
         logger.exception("Failed to add a VM.")
         return error_response("Unable to add the virtual machine.", 500)
 
-@app.route('/api/vms/<vmid>', methods=['GET'])
+@app.route('/api/vms/<int:vmid>', methods=['GET'])
 @token_required(['access_as_user', 'FullAccess'])
 def get_vm_details(vmid):
     try:
@@ -1172,7 +1172,7 @@ def get_vm_details(vmid):
         logger.exception("Failed to read VM %s.", vmid)
         return error_response("Unable to retrieve the virtual machine.", 500)
 
-@app.route('/api/vms/<vmid>/return', methods=['POST'])
+@app.route('/api/vms/<int:vmid>/return', methods=['POST'])
 @token_required(['access_as_user', 'FullAccess'])
 def return_vm(vmid):
     try:
@@ -1267,7 +1267,7 @@ def return_released_vm_api():
             conn.commit()
 
         if not rows:
-            return "No VMs to return at this time.", 200
+            return jsonify([]), 200
 
         for row in rows:
             hostname = row.get("Hostname")
@@ -1482,7 +1482,7 @@ def update_scaling_rule(ruleid):
                 )
             conn.commit()
 
-        return f"Scaling rule with RuleID {ruleid} updated successfully.", 200
+        return jsonify({'message': f"Scaling rule with RuleID {ruleid} updated successfully.", 'RuleID': ruleid}), 200
 
     except json.JSONDecodeError:
         return error_response("Invalid JSON data", 400)
@@ -1508,7 +1508,7 @@ def delete_scaling_rule(ruleid):
         if not row:
             return error_response(f"Scaling rule with RuleID {ruleid} could not be deleted or was not found.", 404)
 
-        return f"Scaling rule with RuleID {ruleid} has been successfully deleted.", 200
+        return jsonify({'message': f"Scaling rule with RuleID {ruleid} has been successfully deleted.", 'RuleID': ruleid}), 200
 
     except DatabaseUnavailable:
         logger.error("Database connection failed while deleting scaling rule %s.", ruleid)
@@ -1716,6 +1716,23 @@ def acknowledge_host_settings(hostname):
     except Exception:
         logger.exception("Failed to record the applied settings version for %s.", hostname)
         return jsonify({'error': 'Unable to record the applied settings version.'}), 500
+
+# ===============================
+# Error Handlers
+
+# Werkzeug answers routing failures, such as a non-integer VMID, with an HTML page.
+# Keep them in the same JSON envelope as every other API error.
+@app.errorhandler(404)
+def handle_not_found(e):
+    return error_response("The requested resource was not found.", 404)
+
+@app.errorhandler(405)
+def handle_method_not_allowed(e):
+    response, status = error_response("The method is not allowed for the requested URL.", 405)
+    valid_methods = getattr(e, 'valid_methods', None)
+    if valid_methods:
+        response.headers['Allow'] = ', '.join(valid_methods)
+    return response, status
 
 # ===============================
 # Main

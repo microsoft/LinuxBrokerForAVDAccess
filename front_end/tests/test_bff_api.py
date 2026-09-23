@@ -477,6 +477,48 @@ def test_rules_history_route_is_not_shadowed_by_the_rule_detail_route(signed_in_
     assert "items" in payload
 
 
+# ====================================================== deletes and updates
+
+RULE_UPDATE = {
+    "minvms": "1", "maxvms": "9", "scaleupratio": "70",
+    "scaleupincrement": "1", "scaledownratio": "20", "scaledownincrement": "1",
+}
+
+# The three actions that saved the change but reported a failure in v1.1.0 (#33).
+SAVED_BUT_REPORTED_FAILED = [
+    (f"{API}/vms/1/delete", "/vms/1/delete",
+     {"message": "VM with VMID 1 has been successfully deleted.", "VMID": 1}),
+    (f"{API}/scaling/rules/7/update", "/scaling/rules/7/update",
+     {"message": "Scaling rule with RuleID 7 updated successfully.", "RuleID": 7}),
+    (f"{API}/scaling/rules/7/delete", "/scaling/rules/7/delete",
+     {"message": "Scaling rule with RuleID 7 has been successfully deleted.", "RuleID": 7}),
+]
+
+
+@pytest.mark.parametrize("path,broker_path,expected", SAVED_BUT_REPORTED_FAILED)
+def test_deletes_and_rule_updates_report_success(signed_in_client, broker_api, path, broker_path, expected):
+    response = post(signed_in_client, path, RULE_UPDATE)
+
+    assert response.status_code == 200
+    assert response.get_json() == expected
+    assert broker_api.posts[-1]["url"].endswith(broker_path)
+
+
+@pytest.mark.parametrize("path", [case[0] for case in SAVED_BUT_REPORTED_FAILED])
+def test_a_plain_text_broker_reply_is_reported_as_a_failure(signed_in_client, monkeypatch, path):
+    """The v1.1.0 broker answered these with plain text. The BFF parses every broker
+    reply as JSON, so the portal said the action failed even though it was saved.
+    The broker has to answer with JSON; this records what happens when it does not.
+    """
+    from conftest import FakeResponse
+
+    import requests
+    monkeypatch.setattr(requests, "post", lambda url, **kwargs: FakeResponse("Saved."))
+
+    response = post(signed_in_client, path, RULE_UPDATE)
+    assert response.status_code == 502
+
+
 # ============================================================ error mapping
 
 
