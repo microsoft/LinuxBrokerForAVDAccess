@@ -10,6 +10,8 @@ import type { SessionInfo } from '../types/broker';
 
 export const TEST_SESSION: SessionInfo = {
   authenticated: true,
+  subject: { tenantId: '2222-3333', objectId: '0000-1111' },
+  capabilities: { manage: true, connect: false },
   version: '0.114',
   csrfToken: 'test-csrf-token',
   user: {

@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { classNames } from '../../lib/format';
-import { useSession } from '../../hooks/useSession';
+import { useSession, useSignOut } from '../../hooks/useSession';
+import { canManage } from '../../lib/queryClient';
 import { Icon } from '../Icon';
 import type { IconName } from '../Icon';
 import { ThemeToggle } from './ThemeToggle';
@@ -44,6 +45,7 @@ const LINK_BASE =
 
 export function NavBar({ pathname }: { pathname: string }) {
   const session = useSession();
+  const signOut = useSignOut();
   const [open, setOpen] = useState(false);
 
   const linkClass = (active: boolean) =>
@@ -81,7 +83,7 @@ export function NavBar({ pathname }: { pathname: string }) {
             open ? 'flex' : 'hidden',
           )}
         >
-          {session.authenticated ? (
+          {canManage(session) ? (
             <ul className="m-0 flex list-none flex-col gap-1 p-0 lg:flex-row lg:items-center">
               {NAV_ITEMS.map((item) => {
                 const active = isActive(item, pathname);
@@ -110,21 +112,27 @@ export function NavBar({ pathname }: { pathname: string }) {
             {session.authenticated ? (
               <>
                 <li>
-                  <Link
-                    to="/profile"
-                    className={linkClass(pathname === '/profile')}
-                    aria-current={pathname === '/profile' ? 'page' : undefined}
-                    onClick={() => setOpen(false)}
-                  >
-                    <Icon name="person" size={16} />
-                    <span className="max-w-[16ch] truncate">
-                      {session.user?.name ?? 'Profile'}
+                  {canManage(session) ? (
+                    <Link
+                      to="/profile"
+                      className={linkClass(pathname === '/profile')}
+                      aria-current={pathname === '/profile' ? 'page' : undefined}
+                      onClick={() => setOpen(false)}
+                    >
+                      <Icon name="person" size={16} />
+                      <span className="max-w-[16ch] truncate">
+                        {session.user?.name ?? 'Profile'}
+                      </span>
+                    </Link>
+                  ) : (
+                    <span className={classNames(LINK_BASE, 'text-white/85')}>
+                      <span className="max-w-[16ch] truncate">{session.user?.name}</span>
                     </span>
-                  </Link>
+                  )}
                 </li>
                 <li>
                   {/* A full navigation: Flask clears the session and redirects to Entra ID. */}
-                  <a href="/logout" className={linkClass(false)}>
+                  <a href="/logout" className={linkClass(false)} onClick={signOut}>
                     <Icon name="box-arrow-right" size={16} />
                     Sign out
                   </a>

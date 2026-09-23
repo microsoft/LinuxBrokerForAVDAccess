@@ -18,6 +18,7 @@ from function_api import (
     pagination_from_args,
     validate_history_filters,
 )
+from function_authentication import PortalAccessError, portal_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -62,15 +63,16 @@ def upstream_error_message(response, fallback):
     except ValueError:
         return fallback
     if isinstance(payload, dict):
-        return payload.get("error") or payload.get("message") or fallback
+        message = payload.get("error") or payload.get("message")
+        return message if isinstance(message, str) and message else fallback
     return fallback
 
 
-def broker_endpoint(error_message):
+def broker_endpoint(error_message, conflict_message=None):
     """Turn broker exceptions into JSON responses instead of flash-and-redirect.
 
-    A 401 flows through unchanged so the SPA can send the operator to /login; a
-    4xx keeps its status because the broker's message is actionable; anything
+    A 401/403 uses the safe portal access error so the SPA can clear its data and
+    show sign-in or denial. Other 4xx errors keep their actionable status; anything
     else becomes a 502, because the failure is between the portal and the broker
     rather than a problem with the operator's request.
     """
@@ -82,11 +84,15 @@ def broker_endpoint(error_message):
             except BadRequest as e:
                 return json_error(str(e), 400)
             except NotAuthenticated:
-                return json_error("Your session has expired. Please sign in again.", 401)
+                return portal_error_response(PortalAccessError(401))
             except requests.exceptions.HTTPError as e:
                 response = getattr(e, 'response', None)
                 status = getattr(response, 'status_code', None) or 502
-                logger.error("%s: %s", error_message, e)
+                logger.error("%s (HTTP %s).", error_message, status)
+                if status in (401, 403):
+                    return portal_error_response(PortalAccessError(status))
+                if status == 409 and conflict_message:
+                    return json_error(conflict_message, 409)
                 if 400 <= status < 500:
                     return json_error(upstream_error_message(response, error_message), status)
                 return json_error(error_message, 502)

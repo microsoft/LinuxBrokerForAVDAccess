@@ -151,6 +151,7 @@ def test_dashboard_uses_the_summary_endpoint(signed_in_client, broker_api):
     assert payload["apiError"] is False
     assert payload["stats"]["total"] == 9
     assert payload["stats"]["checked_out"] == 3
+    assert payload["stats"]["ready"] == 3
     # 3 of 9 checked out.
     assert payload["stats"]["utilization"] == 33
 
@@ -168,7 +169,15 @@ def test_dashboard_falls_back_when_api_predates_the_summary_endpoint(signed_in_c
     assert payload["apiError"] is False
     # Counted client-side from the four seeded VMs.
     assert payload["stats"]["total"] == 4
-    assert payload["stats"]["ready"] == 1
+    assert payload["stats"]["ready"] is None
+
+
+def test_dashboard_does_not_infer_readiness_from_available_inventory(signed_in_client, broker_api):
+    broker_api.vm_summary["Ready"] = 0
+    payload = signed_in_client.get(f"{API}/dashboard").get_json()
+    assert payload["stats"]["available"] == 1
+    assert payload["stats"]["ready"] == 0
+    assert not any(call["url"].endswith("/vms") for call in broker_api.gets)
 
 
 def test_dashboard_reports_an_outage_when_both_paths_fail(signed_in_client, broker_api):
@@ -358,10 +367,8 @@ def test_add_vm_forwards_the_full_payload(signed_in_client, broker_api):
 
     sent = broker_api.posts[-1]["json"]
     assert sent["hostname"] == "linux-host-09"
-    # Optional fields are sent as empty strings rather than omitted, matching what
-    # the form used to submit.
-    assert sent["username"] == ""
-    assert sent["avdhost"] == ""
+    assert "username" not in sent
+    assert "avdhost" not in sent
     assert sent["description"] == ""
 
 
@@ -402,25 +409,22 @@ def test_update_vm_attributes_forwards_the_three_fields(signed_in_client, broker
 
 def test_release_uses_the_hostname_and_return_uses_the_vmid(signed_in_client, broker_api):
     """The broker's own routes differ, and the portal must not swap them."""
-    post(signed_in_client, f"{API}/vms/linux-host-02/release")
+    guards = {"leaseId": VMS[1]["LeaseId"], "leaseGeneration": VMS[1]["LeaseGeneration"]}
+    assert post(signed_in_client, f"{API}/vms/linux-host-02/release", guards).status_code == 200
     assert broker_api.posts[-1]["url"].endswith("/vms/linux-host-02/release")
+    assert broker_api.posts[-1]["json"] == guards
 
-    post(signed_in_client, f"{API}/vms/2/return")
+    assert post(signed_in_client, f"{API}/vms/2/return", guards).status_code == 200
     assert broker_api.posts[-1]["url"].endswith("/vms/2/return")
+    assert broker_api.posts[-1]["json"] == guards
 
 
-def test_checkout_requires_both_fields(signed_in_client):
-    response = post(signed_in_client, f"{API}/vms/checkout", {"username": "op@contoso.com"})
-    assert response.status_code == 400
-    assert "avdhost" in response.get_json()["error"]
-
-
-def test_checkout_returns_the_assigned_vm(signed_in_client):
+def test_checkout_no_longer_exists_even_for_an_administrator(signed_in_client, broker_api):
     response = post(signed_in_client, f"{API}/vms/checkout", {
         "username": "op@contoso.com", "avdhost": "avd-01",
     })
-    assert response.status_code == 200
-    assert response.get_json()["VMID"] == 1
+    assert response.status_code in (404, 405)
+    assert broker_api.posts == []
 
 
 def test_history_route_is_not_shadowed_by_the_vm_detail_route(signed_in_client):
@@ -512,11 +516,10 @@ def test_a_broker_5xx_becomes_a_502(signed_in_client, monkeypatch):
 
 
 def test_an_expired_token_returns_401_json(signed_in_client):
-    from datetime import datetime, timedelta
+    from time import time
 
     with signed_in_client.session_transaction() as session:
-        # Matches the app's naive datetime.utcnow().timestamp() convention.
-        session["token_expiry"] = (datetime.utcnow() - timedelta(minutes=5)).timestamp()
+        session["token_expiry"] = time() - 300
 
     response = signed_in_client.get(f"{API}/vms")
     assert response.status_code == 401

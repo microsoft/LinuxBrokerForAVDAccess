@@ -5,12 +5,10 @@ import os
 _CLOUD_PROFILES = {
     'AzurePublic': {
         'AZURE_AUTHORITY_HOST': 'https://login.microsoftonline.com',
-        'GRAPH_ENDPOINT': 'https://graph.microsoft.com',
         'STS_ISSUER_HOST': 'https://sts.windows.net',
     },
     'AzureUSGovernment': {
         'AZURE_AUTHORITY_HOST': 'https://login.microsoftonline.us',
-        'GRAPH_ENDPOINT': 'https://graph.microsoft.us',
         'STS_ISSUER_HOST': 'https://sts.windows.net',
     },
 }
@@ -31,20 +29,20 @@ def resolve_cloud_endpoint(name):
     return profile[name]
 
 AUTHORITY_HOST = resolve_cloud_endpoint('AZURE_AUTHORITY_HOST')
-GRAPH_ENDPOINT = resolve_cloud_endpoint('GRAPH_ENDPOINT')
 STS_ISSUER_HOST = resolve_cloud_endpoint('STS_ISSUER_HOST')
 
-TENANT_ID = os.environ.get("TENANT_ID")
+TENANT_ID = (os.environ.get("TENANT_ID") or "").lower()
 AUTHORITY = f"{AUTHORITY_HOST}/{TENANT_ID}"
 VM_SUBSCRIPTION_ID = os.environ.get("VM_SUBSCRIPTION_ID")
 VM_RESOURCE_GROUP = os.environ.get("VM_RESOURCE_GROUP")
-CLIENT_ID = os.environ.get("CLIENT_ID")
-MICROSOFT_PROVIDER_AUTHENTICATION_SECRET = os.environ.get("MICROSOFT_PROVIDER_AUTHENTICATION_SECRET")
+CLIENT_ID = (os.environ.get("CLIENT_ID") or "").lower()
+PORTAL_CLIENT_ID = (os.environ.get("PORTAL_CLIENT_ID") or "").lower()
+BROKER_LAUNCHER_CLIENT_ID = (os.environ.get("BROKER_LAUNCHER_CLIENT_ID") or "").lower()
+BROKER_CHECKOUT_ENABLED = os.environ.get("BROKER_CHECKOUT_ENABLED", "true").lower() == "true"
+# JSON numbers must remain exact for both JavaScript and jq consumers.
+MAX_LEASE_GENERATION = 9007199254740991
 APP_URI = f"api://{CLIENT_ID}"
-AVD_HOST_GROUP_ID = os.environ.get('AVD_HOST_GROUP_ID')
-LINUX_HOST_GROUP_ID = os.environ.get('LINUX_HOST_GROUP_ID')
 LINUX_HOST_ADMIN_LOGIN_NAME = os.environ.get('LINUX_HOST_ADMIN_LOGIN_NAME')
-GRAPH_API_ENDPOINT = os.environ.get('GRAPH_API_ENDPOINT') or f"{GRAPH_ENDPOINT}/.default"
 DOMAIN_NAME = os.environ.get('DOMAIN_NAME')
 VAULT_URL = os.environ.get('VAULT_URL')
 KEY_NAME = os.environ.get('KEY_NAME')

@@ -10,12 +10,12 @@ API_ROOT = REPO_ROOT / "api"
 
 # The API reads these at import time.
 _ENV = {
-    "TENANT_ID": "tenant-id",
-    "CLIENT_ID": "client-id",
+    "TENANT_ID": "11111111-1111-4111-8111-111111111111",
+    "CLIENT_ID": "22222222-2222-4222-8222-222222222222",
+    "PORTAL_CLIENT_ID": "33333333-3333-4333-8333-333333333333",
+    "BROKER_LAUNCHER_CLIENT_ID": "44444444-4444-4444-8444-444444444444",
     "VM_SUBSCRIPTION_ID": "subscription-id",
     "VM_RESOURCE_GROUP": "resource-group",
-    "AVD_HOST_GROUP_ID": "avd-group-id",
-    "LINUX_HOST_GROUP_ID": "linux-group-id",
     "DOMAIN_NAME": "example.invalid",
     "VAULT_URL": "https://vault.example.invalid",
     "KEY_NAME": "ssh-key",
@@ -23,7 +23,6 @@ _ENV = {
     "DB_DATABASE": "LinuxBrokerTest",
     "DB_USERNAME": "api-user",
     "DB_PASSWORD_NAME": "db-password",
-    "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "provider-secret",
     "NFS_SHARE": "/mnt/test",
 }
 for key, value in _ENV.items():
@@ -38,30 +37,6 @@ def _install_import_fakes():
     pymssql.Error = Exception
     pymssql.connect = lambda **kwargs: None
     sys.modules.setdefault("pymssql", pymssql)
-
-    jwt = types.ModuleType("jwt")
-
-    class ExpiredSignatureError(Exception):
-        pass
-
-    class InvalidAudienceError(Exception):
-        pass
-
-    class InvalidIssuerError(Exception):
-        pass
-
-    class RSAAlgorithm:
-        @staticmethod
-        def from_jwk(jwk):
-            return {"from_jwk": jwk}
-
-    jwt.ExpiredSignatureError = ExpiredSignatureError
-    jwt.InvalidAudienceError = InvalidAudienceError
-    jwt.InvalidIssuerError = InvalidIssuerError
-    jwt.algorithms = types.SimpleNamespace(RSAAlgorithm=RSAAlgorithm)
-    jwt.get_unverified_header = lambda token: {"kid": "test-kid"}
-    jwt.decode = lambda *args, **kwargs: {"oid": "user-oid", "scp": "access_as_user"}
-    sys.modules.setdefault("jwt", jwt)
 
     azure = types.ModuleType("azure")
     azure_monitor = types.ModuleType("azure.monitor")
@@ -100,14 +75,6 @@ def _install_import_fakes():
 
 
 _install_import_fakes()
-
-
-class FakeJwksResponse:
-    status_code = 200
-    text = "jwks"
-
-    def json(self):
-        return {"keys": [{"kid": "test-kid", "kty": "RSA", "use": "sig", "n": "n", "e": "e"}]}
 
 
 class FakeCursor:
@@ -231,8 +198,13 @@ def fake_db(app_module, monkeypatch):
 
 @pytest.fixture
 def client(app_module, fake_db, monkeypatch):
-    for endpoint, view in list(app_module.app.view_functions.items()):
-        original = getattr(view, "__wrapped__", None)
-        if original is not None:
-            monkeypatch.setitem(app_module.app.view_functions, endpoint, original)
+    from authorization import Principal, PrincipalKind
+    principal = Principal(
+        app_module.TENANT_ID, "55555555-5555-4555-8555-555555555555",
+        app_module.PORTAL_CLIENT_ID, PrincipalKind.USER,
+        frozenset({"access_as_user"}), frozenset({"FullAccess"}),
+    )
+    # These are handler regressions, not cryptographic evidence. Policies remain wrapped.
+    # The independent authorization_tests suite never requests this fixture.
+    monkeypatch.setattr(app_module, "authenticate", lambda _header: principal)
     return app_module.app.test_client()

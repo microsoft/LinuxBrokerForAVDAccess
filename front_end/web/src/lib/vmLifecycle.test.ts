@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canRelease, canReturn, isReady } from '../lib/vmLifecycle';
+import { canRelease, canReturn, canUpdateAttributes, hasAvailableHostAttributes, leaseGuard } from '../lib/vmLifecycle';
 
 /*
  * These four hosts mirror the fixtures in front_end/tests/conftest.py, and the
@@ -33,10 +33,10 @@ describe('VM lifecycle actions', () => {
   });
 });
 
-describe('isReady', () => {
+describe('hasAvailableHostAttributes', () => {
   it('requires available, powered on and reachable together', () => {
     expect(
-      isReady({ VmStatus: 'Available', PowerState: 'On', NetworkStatus: 'Reachable' }),
+      hasAvailableHostAttributes({ VmStatus: 'Available', PowerState: 'On', NetworkStatus: 'Reachable' }),
     ).toBe(true);
   });
 
@@ -45,6 +45,48 @@ describe('isReady', () => {
     { VmStatus: 'Available', PowerState: 'Off', NetworkStatus: 'Reachable' },
     { VmStatus: 'Available', PowerState: 'On', NetworkStatus: 'Unreachable' },
   ])('rejects %o', (vm) => {
-    expect(isReady(vm)).toBe(false);
+    expect(hasAvailableHostAttributes(vm)).toBe(false);
+  });
+});
+
+describe('leaseGuard', () => {
+  const LeaseId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
+  it.each([1, 7, 9007199254740991])('preserves the exact safe JSON generation %s', (LeaseGeneration) => {
+    const guard = leaseGuard({ LeaseId, LeaseGeneration });
+    expect(guard).toEqual({
+      leaseId: LeaseId, leaseGeneration: LeaseGeneration,
+    });
+    expect(JSON.stringify(guard)).toBe(`{"leaseId":"${LeaseId}","leaseGeneration":${LeaseGeneration}}`);
+  });
+
+  it.each([
+    { LeaseId: null, LeaseGeneration: 0 },
+    { LeaseId: '', LeaseGeneration: 7 },
+    { LeaseId: 'not-a-lease', LeaseGeneration: 7 },
+    { LeaseId, LeaseGeneration: -1 },
+    { LeaseId, LeaseGeneration: 0 },
+    { LeaseId, LeaseGeneration: 7.5 },
+    { LeaseId, LeaseGeneration: Number.NaN },
+    { LeaseId, LeaseGeneration: 9007199254740992 },
+    { LeaseId, LeaseGeneration: Number('9223372036854775807') },
+  ])('does not invent a guard for %o', (vm) => {
+    expect(leaseGuard(vm)).toBeNull();
+  });
+});
+
+describe('canUpdateAttributes', () => {
+  it.each(['Available', 'Maintenance'])('allows an unassigned %s host', (VmStatus) => {
+    expect(canUpdateAttributes({ VmStatus, LeaseId: null, Username: null })).toBe(true);
+  });
+
+  it.each([
+    { VmStatus: 'CheckedOut', LeaseId: 'lease', Username: 'user' },
+    { VmStatus: 'Released', LeaseId: 'lease', Username: 'user' },
+    { VmStatus: 'Available', LeaseId: 'lease', Username: null },
+    { VmStatus: 'Maintenance', LeaseId: 'lease', Username: 'user' },
+    { VmStatus: 'Maintenance', LeaseId: null, Username: 'user' },
+  ])('rejects an assigned host: %o', (vm) => {
+    expect(canUpdateAttributes(vm)).toBe(false);
   });
 });

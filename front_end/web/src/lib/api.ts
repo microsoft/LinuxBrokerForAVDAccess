@@ -5,11 +5,13 @@ const API_PREFIX = '/api/ui';
 /** A non-2xx response from the BFF, carrying the message it chose to surface. */
 export class ApiError extends Error {
   readonly status: number;
+  readonly code?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -28,38 +30,37 @@ export function getCsrfToken() {
   return csrfToken;
 }
 
-/**
- * Send the operator to the server-side sign-in redirect.
- *
- * `fetch` cannot follow the 302 to Entra ID, so the BFF answers an expired
- * session with a 401 and the browser navigates here instead.
- */
-export function redirectToLogin() {
-  window.location.assign('/login');
+export function isAuthorizationError(error: unknown): error is ApiError {
+  return error instanceof ApiError && (
+    error.status === 401 || error.status === 403
+    || (error.status === 503 && error.code === 'authorization_unavailable')
+  );
 }
 
-async function readError(response: Response): Promise<string> {
+async function readError(response: Response): Promise<ApiError> {
   try {
     const payload = await response.json();
     if (payload && typeof payload.error === 'string') {
-      return payload.error;
+      return new ApiError(
+        payload.error,
+        response.status,
+        typeof payload.code === 'string' ? payload.code : undefined,
+      );
     }
   } catch {
     /* A proxy or crash can return HTML; fall through to the generic message. */
   }
-  return `The request failed (HTTP ${response.status}).`;
+  return new ApiError(`The request failed (HTTP ${response.status}).`, response.status);
 }
 
 interface RequestOptions {
   method?: 'GET' | 'POST';
   body?: unknown;
-  /** Set for the session bootstrap, which must not bounce an anonymous visitor. */
-  allowUnauthenticated?: boolean;
   signal?: AbortSignal;
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, allowUnauthenticated = false, signal } = options;
+  const { method = 'GET', body, signal } = options;
 
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (body !== undefined) {
@@ -75,24 +76,22 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     headers,
     // The BFF authenticates with the Flask session cookie.
     credentials: 'same-origin',
+    cache: 'no-store',
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
 
-  if (response.status === 401 && !allowUnauthenticated) {
-    redirectToLogin();
-    throw new ApiError('Your session has expired. Please sign in again.', 401);
-  }
-
   if (!response.ok) {
-    throw new ApiError(await readError(response), response.status);
+    throw await readError(response);
   }
 
   if (response.status === 204) {
     return undefined as T;
   }
 
-  return (await response.json()) as T;
+  const payload: T = await response.json();
+  signal?.throwIfAborted();
+  return payload;
 }
 
 export function apiGet<T>(path: string, signal?: AbortSignal) {
@@ -110,12 +109,40 @@ export function apiPost<T>(path: string, body?: unknown) {
  * signed-out landing page has to render without bouncing to Entra ID.
  */
 export async function fetchSession(signal?: AbortSignal): Promise<SessionInfo> {
-  const session = await request<SessionInfo>('/session', {
-    allowUnauthenticated: true,
-    signal,
-  });
+  const session = await request<unknown>('/session', { signal });
+  if (!isSessionInfo(session)) {
+    throw new ApiError(
+      'Administrator access could not be verified. Please try again later.',
+      503,
+      'authorization_unavailable',
+    );
+  }
   setCsrfToken(session.csrfToken);
   return session;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isSessionInfo(value: unknown): value is SessionInfo {
+  if (!isRecord(value) || typeof value.authenticated !== 'boolean'
+      || typeof value.version !== 'string' || typeof value.csrfToken !== 'string'
+      || !value.csrfToken || !isRecord(value.capabilities)
+      || typeof value.capabilities.manage !== 'boolean'
+      || typeof value.capabilities.connect !== 'boolean') {
+    return false;
+  }
+  if (!value.authenticated) {
+    return value.subject === null && value.user === null
+      && !value.capabilities.manage && !value.capabilities.connect;
+  }
+  const { subject, user } = value;
+  return isRecord(subject) && typeof subject.tenantId === 'string' && !!subject.tenantId.trim()
+    && typeof subject.objectId === 'string' && !!subject.objectId.trim()
+    && isRecord(user) && user.tenantId === subject.tenantId && user.objectId === subject.objectId
+    && (user.name === null || typeof user.name === 'string')
+    && (user.username === null || typeof user.username === 'string');
 }
 
 /** Turn any thrown value into something safe to show the operator. */

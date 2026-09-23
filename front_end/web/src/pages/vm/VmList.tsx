@@ -11,7 +11,7 @@ import { useDeleteVm, useReleaseVm, useReturnVm, useVms } from '../../hooks/useB
 import { useToast } from '../../components/ui/Toast';
 import { errorMessage } from '../../lib/api';
 import { valueOrDash } from '../../lib/format';
-import { canRelease, canReturn } from '../../lib/vmLifecycle';
+import { canRelease, canReturn, canUpdateAttributes } from '../../lib/vmLifecycle';
 import type { Vm } from '../../types/broker';
 
 export function VmList() {
@@ -27,12 +27,12 @@ export function VmList() {
   function confirmRelease(vm: Vm) {
     confirm({
       title: `Release ${vm.Hostname}`,
-      body: `Release ${vm.Hostname}? The session owner will be signed out and the host marked as released.`,
+      body: `Release ${vm.Hostname}? This marks the current lease as released.`,
       confirmLabel: 'Release',
       variant: 'warning',
       onConfirm: async () => {
         try {
-          await releaseVm.mutateAsync(vm.Hostname);
+          await releaseVm.mutateAsync(vm);
           showToast(`VM '${vm.Hostname}' released successfully.`, 'success');
         } catch (cause) {
           showToast(errorMessage(cause, `Unable to release '${vm.Hostname}'.`), 'danger');
@@ -44,12 +44,12 @@ export function VmList() {
   function confirmReturn(vm: Vm) {
     confirm({
       title: `Return ${vm.Hostname}`,
-      body: `Return ${vm.Hostname} to the pool? It will become available for checkout again.`,
+      body: `End the current lease on ${vm.Hostname} and return it to the pool? The host becomes available only after cleanup succeeds.`,
       confirmLabel: 'Return',
       variant: 'primary',
       onConfirm: async () => {
         try {
-          await returnVm.mutateAsync(vm.VMID);
+          await returnVm.mutateAsync(vm);
           showToast(`VM '${vm.Hostname}' returned successfully.`, 'success');
         } catch (cause) {
           showToast(errorMessage(cause, `Unable to return '${vm.Hostname}'.`), 'danger');
@@ -141,9 +141,11 @@ export function VmList() {
           <Button size="sm" icon="eye" onClick={() => navigate(`/vms/${vm.VMID}`)}>
             Details
           </Button>
-          <Button size="sm" icon="pencil" onClick={() => navigate(`/vms/${vm.VMID}/update`)}>
-            Edit
-          </Button>
+          {canUpdateAttributes(vm) ? (
+            <Button size="sm" icon="pencil" onClick={() => navigate(`/vms/${vm.VMID}/update`)}>
+              Edit
+            </Button>
+          ) : null}
           {/*
             ReleaseVm moves a CheckedOut host to Released; ReturnVm moves CheckedOut
             or Released back to Available. Offering either on an already Available
@@ -189,15 +191,12 @@ export function VmList() {
     <>
       <PageHeader
         title="Virtual machines"
-        subtitle="Linux hosts registered with the broker."
+        subtitle="Linux hosts in broker inventory. Checkout also requires trusted host enrollment."
         icon="server"
         actions={
           <>
             <ButtonLink to="/vms/history" size="sm" icon="clock">
               History
-            </ButtonLink>
-            <ButtonLink to="/vms/checkout" size="sm" icon="person">
-              Checkout VM
             </ButtonLink>
             <ButtonLink to="/vms/add" size="sm" variant="primary" icon="plus">
               Add VM
@@ -215,7 +214,7 @@ export function VmList() {
       {vms && vms.length === 0 ? (
         <EmptyState
           title="No virtual machines found"
-          message="Register a Linux host to start brokering AVD sessions."
+          message="Add a Linux host to inventory, then complete trusted deployment enrollment before it can broker AVD sessions."
           icon="server"
           action={
             <ButtonLink to="/vms/add" variant="primary" icon="plus">
@@ -233,7 +232,7 @@ export function VmList() {
           searchable
           searchPlaceholder="Search hostname, IP, status or user…"
           noun="VMs"
-          caption="Virtual machines registered with the broker"
+          caption="Virtual machines in broker inventory"
         />
       ) : null}
 

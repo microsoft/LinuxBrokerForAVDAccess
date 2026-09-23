@@ -1,308 +1,147 @@
-## Database Setup and SQL Procedures
+# Broker SQL schema and lifecycle contracts
 
-This folder contains the SQL schema and stored procedure scripts used by the Linux Broker for AVD Access solution.
+Apply numbered SQL files in filename order to the selected database. No script contains `USE` or an embedded connection string. `deploy\Initialize-Database.ps1` splits `GO` batches, converts legacy `CREATE PROCEDURE`/`ALTER PROCEDURE` declarations to `CREATE OR ALTER`, and fails on SQL errors. The post-provision hooks also maintain inventory through `RegisterLinuxHostVm`.
 
-The primary deployment path is now automated through the deployment hooks under `deploy/`, not manual `sqlcmd` execution. This document describes both paths:
+Do not apply an incomplete subset while serving traffic. Earlier migrations retain their historical definitions; 040-046 are the final authorization/lifecycle definitions. Pause checkouts during coordinated migration and complete the entire ordered sequence before activating the new API/agents.
 
-- the supported automated path used by `azd up`
-- the manual fallback path when you need to apply or verify scripts yourself
+## Additive migrations
 
-For the full deployment workflow around these SQL scripts, see [../deploy/DEPLOYMENT.md](../deploy/DEPLOYMENT.md).
+| Migration | Purpose |
+| --- | --- |
+| 001-039 | Existing VM, UID catalog, settings, scaling, temporal history and pagination objects |
+| `040_add_broker_identity_and_operations.sql` | Bound subjects, lease owners/generations, separate disconnect clock, host registry, operation ledger, persistent host generation counters and transactional state lock |
+| `041_create_broker_identity_procedures.sql` | Operator bindings, race-safe new identity allocation, immutable mapping trigger and active-lease migration preflight |
+| `042_create_guarded_broker_lease_operations.sql` | Guarded checkout, observation, cleanup, completion/failure and retry candidates; disable unsafe legacy mutations |
+| `043_guard_vm_management_and_scaling.sql` | Unowned-only manual mutations, durable power reservations and lease-safe scaling |
+| `044_expose_guarded_lease_inventory.sql` | Management generation/operation metadata, matching ready-count predicates and paged lease history |
+| `045_define_broker_runtime_permissions.sql` | Least-privilege `BrokerApiRuntime` role; deployment-only binding procedures are not runtime operations |
+| `046_bind_host_enrollment_to_verified_inventory.sql` | Exact VM-record/address import receipts, atomic enrollment revocation on delete/endpoint change, and deployment-only re-enrollment |
 
-## Current Deployment Model
+These additions are rerunnable. Temporal versioning remains enabled and propagates the added VM columns into history. Existing username, UID, profile key and lease identifiers are not renamed. Duplicate hostnames fail 040 explicitly; do not choose an arbitrary duplicate or silently omit the uniqueness guarantee.
 
-### Primary path: automated SQL bootstrap
+`VmUsers` permanently retains each username/UID and any established `(TenantId,ObjectId)` binding. A deleted/recreated Entra account is a new identity, not the old profile's owner. `BrokerHosts` binds a verified managed-identity subject to a hostname and ARM resource, retaining retired identities. `BrokerTenant` pins the tenant from the first approved user/host binding; it must match the API's `TENANT_ID`.
 
-The supported deployment flow runs the SQL scripts automatically during `postprovision`.
+## Trusted deployment interfaces
 
-The sequence is:
+Use a separate trusted deployment SQL connection. These procedures are not exposed as HTTP self-registration or user-profile claiming endpoints.
 
-1. [../deploy/Post-Provision.ps1](../deploy/Post-Provision.ps1) runs after infrastructure provisioning.
-2. That script calls [../deploy/Initialize-Database.ps1](../deploy/Initialize-Database.ps1).
-3. `Initialize-Database.ps1` loads every `*.sql` file in this folder, sorts them by filename, and applies them in order.
-4. After the schema and procedures are in place, [../deploy/Register-LinuxHostSqlRecords.ps1](../deploy/Register-LinuxHostSqlRecords.ps1) registers Linux hosts into `dbo.VirtualMachines`.
+### `BindBrokerUser(TenantId, ObjectId, Username, Uid)`
 
-The automated bootstrap has a few important behaviors:
+Supply an operator-reviewed identity mapping, including the **existing** `VmUsers.username` and numeric `uid`. This validates tenant consistency, UUIDs, Linux-safe non-reserved names, exact stored username/UID, existing binding conflicts and conflicting legacy assignments. It binds the reviewed active assignment to that immutable owner and preserves its lease ID (creating one only if the approved legacy assignment lacked one). Active lease generations start at 1.
 
-- It connects to Azure SQL with ADO.NET from the machine running `azd up`.
-- It splits scripts on `GO` batch separators.
-- It rewrites `CREATE PROCEDURE` and `ALTER PROCEDURE` to `CREATE OR ALTER PROCEDURE` before execution so reruns work cleanly.
-- It now fails on SQL errors instead of silently continuing.
-- It can be skipped only by setting `SKIP_SQL_BOOTSTRAP=true`.
+Bindings are idempotent only when every identity/profile field agrees. Existing mappings cannot be renamed, re-UIDed, transferred or deleted. Do not infer ownership from UPNs, email, display names, sanitized Windows names, or a matching profile directory.
 
-### Secondary path: manual execution
+UIDs must be in `2000..2147483646` excluding reserved `65534`/`65535`. The transactional allocator skips both, including when resolving name collisions. A bound-user schema constraint and binding validation reject them. Unbound legacy records may remain for operator investigation, but they cannot be claimed, renamed or automatically re-UIDed to bypass the restriction.
 
-Manual execution is still available when you want to inspect or repair the database outside the azd workflow.
+Bind all returning users before enabling checkout. Unbound inactive legacy profiles are never automatically claimed, but issuing a genuinely new mapping before reviewing a returning user's old profile would create a different immutable mapping and block a later conflicting bind.
 
-Use that path when you need to:
+### `RegisterBrokerHost(TenantId, ObjectId, Hostname, ResourceId)`
 
-- validate objects in an existing environment
-- replay the scripts after a partial failure
-- troubleshoot SQL connectivity or permissions
-- apply the schema without running the full deployment flow
+First register inventory with `RegisterLinuxHostVm(Hostname,IPAddress,Description)`, then bind the verified ARM-managed identity with this procedure. Runtime requests cannot self-register or change this binding.
 
-## Objects In This Folder
+Migration 046 records each trusted inventory import in `BrokerHostInventory`, binding its exact `VMID`, hostname and address. `RegisterBrokerHost` requires that receipt to match the current inventory row before it can activate a host. The frozen four-argument identity-registration interface is unchanged; call the existing inventory-import procedure first with the address verified from ARM, never one accepted from portal input.
 
-### Tables
+`InvalidateBrokerHostInventory` revokes active enrollment and removes the receipt in the same transaction whenever a VM row is deleted or its hostname/address changes. An endpoint cannot change while a lease/power operation is in progress. Manual re-addition under the same hostname, even with the original address, cannot inherit enrollment; returning a changed address to its old value also cannot recreate a receipt.
 
-- `001_create_table-vm_scaling_rules.sql`: creates `dbo.VmScalingRules`
-- `002_create_table-vm_scaling_activity_log.sql`: creates `dbo.VmScalingActivityLog`
-- `003_create_table-virtual_machines.sql`: creates `dbo.VirtualMachines`
-- `024_create_table-vmusers.sql`: creates `dbo.VmUsers`
-- `026_add_lease_id_to_virtual_machines.sql`: adds `LeaseId` to `dbo.VirtualMachines` for lease-aware checkout and cleanup
-- `027_add_unique_index-virtual_machines_hostname.sql`: enforces `Hostname` uniqueness on `dbo.VirtualMachines`
-- `028_create_table-linux_host_settings.sql`: creates `dbo.LinuxHostSettings` and seeds the single global profile
-- `029_add_settings_tracking_to_virtual_machines.sql`: adds `SettingsVersion` and `SettingsAppliedDate` to `dbo.VirtualMachines` so settings drift is visible
+For legitimate re-enrollment, import the correct ARM inventory again, then call `RegisterBrokerHost` with the verified principal/resource. The same non-retired principal can reactivate that newly verified record. Identity replacement still requires no outstanding lease and permanently retires the old principal; invalidating an endpoint does not by itself retire the unchanged identity. Runtime `BrokerApiRuntime` is explicitly denied both import and enrollment procedures and has no direct table mutation authority.
 
-The table scripts above are written to be rerunnable.
+**First application of 046 is fail-closed:** existing hostname-only active registrations are deactivated, not automatically trusted or backfilled from mutable inventory. Previously inactive/retired identities remain retired. Re-import and re-enroll all intended ARM hosts during the paused cutover before readiness checks or resume. User/profile mappings, owned leases and monotonic `BrokerHostGenerations` are untouched. Reapplying the completed migration preserves valid verified enrollments.
 
-The scripts do not contain `USE <database>` statements. The target database comes from the connection, which [../deploy/Initialize-Database.ps1](../deploy/Initialize-Database.ps1) builds from its `-DatabaseName` argument, so a non-default `sqlDatabaseName` works without editing any script.
+The host name and resource path must agree and neither a principal nor a resource can be transferred to another hostname. A verified identity replacement for the **same** ARM resource is allowed only when the old host has no outstanding assignment or operation; the old subject is retired. Resolve active leases first rather than making a replacement identity implicitly own unknown state.
 
-`Hostname` is the natural key the broker resolves against: `RegisterLinuxHostVm`, `ReleaseVm`, and the Linux host agents all locate a VM by hostname alone. If an existing database already contains duplicate hostnames, `027` reports them and skips creating the index rather than failing the bootstrap. Remove the duplicates and rerun to gain the constraint.
+### `GetBrokerLeaseMigrationState(Hostname)`
 
-### Stored procedures
+Returns no rows for an unassigned host; otherwise returns exactly:
 
-- `005_create_procedure-CheckoutVm.sql`: checks out a VM for a user
-- `006_create_procedure-DeleteVm.sql`: deletes a VM record
-- `007_create_procedure-AddVm.sql`: adds a VM record manually
-- `008_create_procedure-GetVmDetails.sql`: gets details for a specific VM
-- `009_create_procedure-ReturnVm.sql`: returns a VM to the pool
-- `010_create_procedure-GetScalingRules.sql`: gets scaling rules
-- `011_create_procedure-UpdateScalingRule.sql`: updates a scaling rule
-- `012_create_procedure-TriggerScalingLogic.sql`: runs scaling logic
-- `013_create_procedure-GetScalingActivityLog.sql`: gets scaling activity history
-- `014_create_procedure-GetVms.sql`: gets the VM list
-- `015_create_procedure-CreateScalingRule.sql`: creates a scaling rule
-- `016_create_procedure-ReleaseVm.sql`: releases a checked-out VM
-- `017_create_procedure-UpdateVmAttributes.sql`: updates VM attributes
-- `018_create_procedure-ReturnReleasedVms.sql`: returns released VMs to the pool
-- `019_create_procedure-DeleteScalingRule.sql`: deletes a scaling rule
-- `020_create_procedure-GetVmHistory.sql`: gets VM history
-- `021_create_procedure-GetVmScalingRulesHistory.sql`: gets scaling rule history
-- `022_create_procedure-GetScalingRuleDetails.sql`: gets a specific scaling rule
-- `023_create_procedure-GetDeletedVirtualMachines.sql`: gets deleted VM history
-- `025_create_procedure-RegisterLinuxHostVm.sql`: upserts Linux host records into `dbo.VirtualMachines`
-- `030_create_procedure-GetLinuxHostSettings.sql`: reads the global Linux host settings profile
-- `031_create_procedure-UpdateLinuxHostSettings.sql`: updates the profile, bumping `SettingsVersion` only when a value actually changed
-- `032_create_procedure-RecordHostSettingsApplied.sql`: records the settings version a host has applied
-- `033_alter_procedure-GetVms.sql`: redefines `dbo.GetVms` to also return `SettingsVersion` and `SettingsAppliedDate`
-- `034_create_procedure-GetVmSummary.sql`: returns one aggregate row for dashboard VM counters
-- `035_alter_procedure-GetScalingActivityLog.sql`: redefines `dbo.GetScalingActivityLog` to parse optional `MM/DD/YYYY` date strings explicitly
-- `036_alter_procedure-GetVmScalingRulesHistory.sql`: redefines `dbo.GetVmScalingRulesHistory` to parse optional `MM/DD/YYYY` date strings explicitly
-- `037_create_procedure-GetVmHistoryPaged.sql`: returns paged VM history rows with `TotalCount`
-- `038_create_procedure-GetScalingActivityLogPaged.sql`: returns paged scaling activity rows with `TotalCount`
-- `039_create_procedure-GetVmScalingRulesHistoryPaged.sql`: returns paged scaling rule history rows with `TotalCount`
+```text
+Username, Uid, LeaseId, LeaseGeneration
+```
 
-`033` exists as its own file rather than being folded into `014` because `014` runs before `029` adds those columns, and SQL Server validates column references against existing tables when a procedure is created.
+An active/unresolved/conflicting owner, missing mapping/lease, inconsistent status, or operation in progress throws an error. Unknown hosts also fail. Deployment must not silently skip that failure. For a returned row, install version-matched helpers and run the root-only contract:
 
-`034` through `039` are also additive/redefinition files so fresh deployments keep procedure validation in numeric schema order. The paged history procedures intentionally omit the legacy `@Limit` parameter: `@Offset` and `@PageSize` are the only result-size controls, and `NULL`/empty/malformed date strings are treated as no date filter.
+```text
+sudo /usr/local/bin/manage-lease.sh migrate <username> <uid> <lease-id> <generation>
+```
 
-## Current Runtime Expectations
+The host validates the actual account UID and NFS home plus any legacy/current marker before atomically recording the approved lease. No account creation, reownership or profile renaming occurs during migration.
 
-The current code and deployment flow depend on the following SQL objects being present:
+## Runtime procedure interfaces
 
-- `dbo.VmScalingRules`
-- `dbo.VmScalingActivityLog`
-- `dbo.VirtualMachines`
-- `dbo.VmUsers`
-- `dbo.LinuxHostSettings`
-- all of the stored procedures above
-- especially `dbo.CheckoutVm`, `dbo.ReleaseVm`, `dbo.UpdateVmAttributes`, and `dbo.RegisterLinuxHostVm`
+All data arguments are bound parameters. The API commits each reservation before contacting a host or Azure; no SQL transaction spans remote work.
 
-Two current behaviors are worth calling out:
+| Procedure | Inputs and result |
+| --- | --- |
+| `GetBrokerHost` | `TenantId,ObjectId`; returns only a registered active hostname |
+| `BeginBrokerCheckout` | `TenantId,ObjectId,AvdHost`; on `Outcome=Ok`, returns VM/username/UID/lease/generation/operation and `NewAllocation` |
+| `ObserveBrokerSession` | `Hostname,LeaseId,LeaseGeneration,State`; state is `active`, `disconnected`, or `logged_off`; returns only an outcome |
+| `BeginBrokerCleanup` | `ExpectedLeaseId,ExpectedLeaseGeneration,Reason,ActorTenantId,ActorObjectId`, and exactly one of `VMID`/`Hostname`; returns reserved host/user/UID/lease/generation/operation |
+| `CompleteBrokerOperation` | `VMID,OperationId,LeaseGeneration,Outcome`; compare-and-set finalization only |
+| `FailBrokerOperation` | `VMID,OperationId,LeaseGeneration,ErrorCode`; preserves the assignment/reservation and records a fixed non-secret failure code |
+| `ReturnReleasedVms` | No inputs; returns at most 20 eligible/retryable candidates, **never clears an assignment** |
+| `TriggerScalingLogic` | `ActorTenantId,ActorObjectId`; returns fenced `PowerOn`/`PowerOff` reservations, not completed power changes |
 
-- `dbo.VmUsers` is required by the API path that creates and tracks Linux-side user IDs.
-- `dbo.RegisterLinuxHostVm` is the procedure used by post-provision automation to register Linux hosts automatically.
+`ResolveBrokerUser` is used inside checkout. It serializes subject/name/UID allocation and skips names already present in the legacy catalog; it cannot claim an unbound profile. `LockBrokerState` and `AdvanceBrokerGeneration` are internal helpers. The transaction-owned application lock serializes short state mutations across all API workers; unique subject/owner indexes are additional database invariants.
 
-Linux host settings are a single fleet-wide profile:
+### States, clocks and fencing
 
-- `dbo.LinuxHostSettings` is a singleton. `SettingsScope` is constrained to `Global` and made unique, so only one active profile can exist.
-- The table is seeded with the values that were previously hardcoded in the release agent and the systemd units, so applying the schema changes no behavior.
-- The `CHECK` constraints on that table are the last line of defence for values that reach the Linux hosts. The API and `linux_host/apply-host-settings.sh` validate the same bounds, and all three definitions must be kept in agreement.
-- `dbo.VirtualMachines.SettingsVersion` and `SettingsAppliedDate` record what each host actually applied, which is what the portal uses to display drift.
+Public `VmStatus` stays `Available`, `CheckedOut`, `Released`, or `Maintenance`. Internal operation state is `Running`, `Failed`, `Completed`, or `Superseded`. Provisioning/reclamation retain the owner and are never allocatable.
 
-The VM checkout lifecycle is now lease-aware:
+Each reservation increments the host's generation and records a distinct operation ID. Reconnect retains the same lease ID, username, UID and owner. `BrokerHostGenerations` keeps the counter even if an unowned inventory row is deleted/recreated; never reset this table or a host marker to make a stale operation pass.
 
-- `dbo.CheckoutVm` reuses an existing `CheckedOut` or `Released` assignment by `Username` and keeps the same `LeaseId` until the VM is returned to `Available`.
-- `dbo.ReleaseVm` can validate `Hostname`, `Username`, and `LeaseId` together while still tolerating older hostname-only callers during rollout. It always returns a `ReleaseStatus` column of `Released`, `NoActiveAssignment`, `LeaseMismatch`, or `NotFound` so the API can answer an already-released host with `200` instead of an error that the host agent would retry every minute.
-- `dbo.ReturnVm` and `dbo.ReturnReleasedVms` now preserve the returned username and lease metadata long enough for the API to perform lease-safe Linux-side cleanup.
-- `dbo.ReturnReleasedVms` expires released leases with a single set-based `UPDATE ... OUTPUT`, so the sweep is atomic and does not depend on `INSERT ... EXEC`.
+Generations remain `BIGINT` in storage, with a shared JSON-safe maximum of `9007199254740991`; 0 is reserved for unassigned inventory/counter initialization. Schema constraints reject out-of-range stored values, and advancement explicitly fails on exhaustion before arithmetic or mutation. Exhausted unowned hosts are not ready or eligible for new scaling reservations. Migration refuses inconsistent existing counters rather than clamping them or weakening fencing.
 
-## Automatic Linux Host Registration
+First disconnect sets `DisconnectedAt` once. Repeated disconnects and unrelated health/settings updates do not move it. Active observations restore `CheckedOut` and clear it. Expiry uses the singleton global `GracePeriodSeconds` (seeded 1200, permitted 60-86400) and is eligible at or beyond the boundary. No cleanup uses `LastUpdateDate` or a fixed 30-minute rule.
 
-After the SQL scripts are applied, [../deploy/Register-LinuxHostSqlRecords.ps1](../deploy/Register-LinuxHostSqlRecords.ps1) connects to Azure and SQL and runs `dbo.RegisterLinuxHostVm` for every VM tagged with `broker-role=linux-host`.
+Cleanup reasons are `expired`, `logged_off`, and `admin`. The host must recheck actual XRDP state behind its reconnect gate and acknowledge the matching generation/operation before SQL can clear anything. An active session cancels expiry/logoff cleanup. A logoff observation racing a surviving disconnected desktop is deferred to the normal grace period.
 
-That automation:
+Failed cleanup remains owned and appears in the maintenance retry candidates. Failed provisioning can be retried by that same subject or cleaned up by an administrator. An abandoned running operation is retryable only after 300 seconds, with a new generation; it is not made available on timeout. Old operation completion/failure cannot alter a newer lease.
 
-- only registers Linux hosts
-- does not register AVD hosts
-- uses the VM name and resolved private IP address
-- inserts a new record if the host is missing
-- updates the existing record if the host already exists
+`CheckoutVm`, `ReturnVm`, and `ReleaseVm` deliberately throw instead of supporting username-only, hostname-only, or unguarded legacy callers. Administrative return/release go through the new API with required lease ID and generation.
 
-This means future azd deployments no longer depend on a manual UI step just to seed Linux hosts into the database.
+### Management and scaling
 
-## Manual Deployment Steps
+Manual inventory creation allows only unassigned `Available`/`Maintenance` hosts and does **not** make them trusted or checkout-eligible. An operator must perform trusted ARM inventory import and managed-identity enrollment before use. Manual power/status changes and deletion reject any owner, username, lease or operation. Health updates cannot change assignment state or disconnect time. Deleting inventory revokes its host enrollment but preserves generation tombstones and immutable username/UID mappings.
 
-If you need to run the SQL setup manually, use the following flow.
+Scaling reserves only unowned registered hosts and includes outstanding power intentions in its capacity calculation. Occupied/released hosts count as in use. No power-on path overwrites `VmStatus` or a lease. SQL power completion follows confirmed Azure completion and sets reachability to `Unreachable` until the normal probe confirms it. `GetVmSummary.Ready` matches checkout's full registered/unowned/no-operation predicate.
 
-### Prerequisites
+## Runtime permissions
 
-- an Azure SQL Database instance already exists
-- you can connect with an admin or equivalent SQL principal
-- the client machine is allowed through the SQL firewall
+Provision a dedicated database user for the API, assign it to `BrokerApiRuntime`, and use that user's credential for `DB_USERNAME`/the configured Key Vault password secret. Do not use the deployment administrator as the runtime login or also grant runtime `db_owner`, schema-wide DML, or binding privileges.
 
-When using the azd deployment flow, remember that SQL bootstrap runs from the local machine. If the SQL firewall does not allow that client IP, the automated bootstrap will fail.
+Migration 045 grants the API's actual stored procedures, not arbitrary table access. It explicitly denies runtime execution of `BindBrokerUser`, `RegisterBrokerHost`, `RegisterLinuxHostVm`, and `GetBrokerLeaseMigrationState`. The trusted deployment connection must not be a member of the runtime role.
 
-### Recommended manual order
+## Disposable validation
 
-Run all scripts in filename order.
+### Windows LocalDB
 
-That means:
-
-1. Run the table scripts.
-2. Run the stored procedure scripts.
-3. Verify the objects.
-4. Optionally register Linux hosts by executing `dbo.RegisterLinuxHostVm` yourself or rerunning the post-provision script.
-
-### Example using `sqlcmd`
+Use an already-running, separately owned instance named `LinuxBrokerAuth_<unique-suffix>` and an initially empty, dedicated database named `LinuxBrokerAuthorizationTests_<unique-suffix>`:
 
 ```powershell
-$server = "your_server.database.windows.net"
-$database = "LinuxBroker"
-$username = "your_username"
-$password = "your_password"
-
-Get-ChildItem -Path .\sql_queries -Filter *.sql |
-    Sort-Object Name |
-    ForEach-Object {
-        Write-Host "Applying $($_.Name)"
-        sqlcmd -S $server -d $database -U $username -P $password -i $_.FullName
-    }
+.\sql_queries\tests\Run-LocalDbIntegration.ps1 `
+    -InstanceName LinuxBrokerAuth_fa1a4bc7 `
+    -DatabaseName LinuxBrokerAuthorizationTests_fa1a4bc7
 ```
 
-Manual execution is useful, but it does not automatically perform the newer post-provision Linux host registration unless you run that step separately.
+The harness uses `System.Data.SqlClient`, integrated Windows authentication and the exact instance's existing local named pipe. Pinning the pipe prevents an implicit LocalDB start. It refuses default instance names, stopped instances, remote SQL endpoints and non-test database names. The parent/CI setup owns instance/database creation, startup and deletion; the harness does none of those and never changes Docker Desktop.
 
-## Verification
+**Only the supplied database is used**, including runtime identification; there is no connection to `master` or another database. The harness first requires an empty database and records an instance/database-specific extended-property ownership marker. It resets only that marked test schema between cases, including disabling temporal versioning before dropping test tables. The marker permits intentional reruns after a failed case without adopting a nonempty application database. Reserve this database exclusively for the harness. Its final test state is left for parent/CI cleanup or inspection.
 
-After bootstrap, verify both tables and procedures.
+`SqlLocalDbExe` defaults to the SQL Server 2019 LocalDB tooling path under `C:\Program Files\Microsoft SQL Server\150\Tools\Binn`; pass that parameter if Windows CI installs it elsewhere. Use PowerShell 7.4+ (matching deployment); no Python packages or Pester modules are needed for this harness. `-Case fresh` or another validated case name can select a focused scenario while fixing a failure; omit `-Case` in CI to run the full suite.
 
-### Check tables
+Concurrency tests open independent asynchronous SqlClient connections, hold the actual `LockBrokerState` application lock, verify through SQL lock DMVs that **every** contender is waiting, and then release them together. This exercises genuine competing SQL transactions rather than only sequential calls or source checks. A successful run reports both executed case and synchronized race counts.
 
-```sql
-SELECT name
-FROM sys.tables
-WHERE name IN ('VmScalingRules', 'VmScalingActivityLog', 'VirtualMachines', 'VmUsers', 'LinuxHostSettings')
-ORDER BY name;
-```
+The Windows `idle-tombstone-evidence` case imports the deployment's actual `Get-BrokerIdleLeaseEvidence` reader and executes its parameterized query against this database, without invoking Azure or host inspection. It verifies the exact username/UID, retained fence after inventory recreation, rerunnable fingerprint-only evidence, and rejection of future generations or occupied/in-progress hosts.
 
-### Check procedures
+### Linux Docker / Python
 
-```sql
-SELECT name
-FROM sys.procedures
-WHERE name IN (
-    'CheckoutVm',
-    'DeleteVm',
-    'AddVm',
-    'GetVmDetails',
-    'ReturnVm',
-    'GetScalingRules',
-    'UpdateScalingRule',
-    'TriggerScalingLogic',
-    'GetScalingActivityLog',
-    'GetVms',
-    'CreateScalingRule',
-    'ReleaseVm',
-    'UpdateVmAttributes',
-    'ReturnReleasedVms',
-    'DeleteScalingRule',
-    'GetVmHistory',
-    'GetVmScalingRulesHistory',
-    'GetScalingRuleDetails',
-    'GetDeletedVirtualMachines',
-    'RegisterLinuxHostVm',
-    'GetLinuxHostSettings',
-    'UpdateLinuxHostSettings',
-    'RecordHostSettingsApplied',
-    'GetVmSummary',
-    'GetVmHistoryPaged',
-    'GetScalingActivityLogPaged',
-    'GetVmScalingRulesHistoryPaged'
-)
-ORDER BY name;
-```
-
-### Check Linux host rows
-
-```sql
-SELECT Hostname, IPAddress, PowerState, NetworkStatus, VmStatus, LastUpdateDate
-FROM dbo.VirtualMachines
-ORDER BY Hostname;
-```
-
-## Rerun Paths
-
-If the database bootstrap needs to be rerun, the preferred path is to rerun the deployment script rather than manually replaying only a subset of files.
-
-From the `deploy/` directory:
+From the repository root, with the API's declared `pymssql` dependency installed:
 
 ```powershell
-.\Initialize-Database.ps1 `
-  -SqlServerFqdn <server>.database.windows.net `
-  -DatabaseName LinuxBroker `
-  -SqlAdminLogin <login> `
-  -SqlAdminPassword <password> `
-  -ScriptsPath ..\sql_queries
+python -m sql_queries.tests.run_sql_integration --docker
 ```
 
-If you also want to refresh Linux host records after the schema run:
+The harness refuses remote Docker endpoints and accepts no external SQL connection string. It creates its own local SQL Server 2022 container bound only to loopback, chooses random test-only credentials/databases, applies every real script, opens independent SQL connections for races, and removes only its owned test container/databases.
 
-```powershell
-.\Register-LinuxHostSqlRecords.ps1 `
-  -ResourceGroupName <resource-group> `
-  -SqlServerFqdn <server>.database.windows.net `
-  -DatabaseName LinuxBroker `
-  -SqlAdminLogin <login> `
-  -SqlAdminPassword <password>
-```
+Coverage includes fresh install/rerun/temporal history, approved legacy bindings, immutable UID/name allocation, simultaneous same/different-owner checkouts, failed reconnect, release/reconnect/grace boundaries, return/checkout races, stale completion, cleanup retries, the 300-second abandoned-operation boundary, cleanup cancellation, manual-state guards, power-on/off scaling, host-generation continuity and actual runtime-role permission denials. Endpoint-binding cases execute the runtime delete/re-add attacker-IP path, verify denial, reject runtime attempts to repair registration, prove legitimate trusted re-enrollment, exercise endpoint-change rollback and delete/checkout races, and verify fail-closed upgrade without changing active leases or profile identifiers.
 
-## Troubleshooting
-
-### SQL bootstrap failed during `azd up`
-
-Common causes:
-
-- the local client IP is not allowed through the SQL firewall
-- the SQL admin credentials are wrong
-- an earlier script failed and blocked a later dependency
-
-The automated bootstrap now stops at the first SQL error, so the failing file name and batch number are the first place to look.
-
-### `VmUsers` is missing
-
-This table is now part of the supported schema and is required by the API user-creation path. Rerun the bootstrap or apply `024_create_table-vmusers.sql` manually.
-
-### Linux hosts were deployed but are not in `dbo.VirtualMachines`
-
-Rerun [../deploy/Register-LinuxHostSqlRecords.ps1](../deploy/Register-LinuxHostSqlRecords.ps1), or rerun [../deploy/Post-Provision.ps1](../deploy/Post-Provision.ps1) if you want the full post-provision sequence.
-
-### You only changed a stored procedure
-
-Keep the change in the numbered SQL file in source control, then rerun the bootstrap. The deployment script converts procedure creation statements into `CREATE OR ALTER PROCEDURE`, so reruns are supported.
-
-## Summary
-
-Treat this folder as the source of truth for the broker database schema and procedure layer.
-
-For new environments:
-
-- let `azd up` drive the SQL bootstrap automatically
-- use the deployment scripts under `deploy/` to rerun or troubleshoot
-- expect Linux hosts to be auto-registered into SQL after bootstrap
-
-For manual intervention:
-
-- execute the scripts in filename order
-- verify `VmUsers` and `RegisterLinuxHostVm` in addition to the older objects
-- rerun the deployment scripts when you want behavior that matches the supported automated path
+An absent Docker engine or a stopped/missing isolated LocalDB instance produces an explicit failure rather than a passing or silently skipped test. Python/PowerShell parsing or source-text inspection is **not** evidence that transactions passed. Actual XRDP/NFS/SSO compatibility still requires the separately authorized deployment pilot, not tests against live profiles.

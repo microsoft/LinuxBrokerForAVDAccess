@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
-import { apiGet, apiPost } from '../lib/api';
+import { ApiError, apiGet, apiPost, getCsrfToken } from '../lib/api';
 import { queryKeys } from '../lib/queryClient';
+import { leaseGuard } from '../lib/vmLifecycle';
+import { useManagementAccess } from './useSession';
 import type {
   ActivityLogEntry,
   ApplySettingsResult,
@@ -20,7 +22,9 @@ import type {
 /* -------------------------------------------------------------- dashboard */
 
 export function useDashboard(refreshMs: number | false) {
+  const enabled = useManagementAccess();
   return useQuery({
+    enabled,
     queryKey: queryKeys.dashboard,
     queryFn: ({ signal }) => apiGet<Dashboard>('/dashboard', signal),
     refetchInterval: refreshMs,
@@ -30,22 +34,27 @@ export function useDashboard(refreshMs: number | false) {
 /* -------------------------------------------------------------------- VMs */
 
 export function useVms() {
+  const enabled = useManagementAccess();
   return useQuery({
+    enabled,
     queryKey: queryKeys.vms,
     queryFn: ({ signal }) => apiGet<Vm[]>('/vms', signal),
   });
 }
 
 export function useVm(vmid: string | undefined) {
+  const authorized = useManagementAccess();
   return useQuery({
     queryKey: queryKeys.vm(vmid ?? ''),
     queryFn: ({ signal }) => apiGet<Vm>(`/vms/${vmid}`, signal),
-    enabled: Boolean(vmid),
+    enabled: authorized && Boolean(vmid),
   });
 }
 
 export function useVmHistory(search: string) {
+  const enabled = useManagementAccess();
   return useQuery({
+    enabled,
     queryKey: queryKeys.vmHistory(search),
     queryFn: ({ signal }) => apiGet<Paged<Vm>>(`/vms/history${search}`, signal),
     // Keeps the previous page on screen while the next one loads, instead of
@@ -102,9 +111,11 @@ export function useReleaseVm() {
   const invalidate = useVmInvalidation();
 
   return useMutation({
-    mutationFn: (hostname: string) =>
-      apiPost<unknown>(`/vms/${encodeURIComponent(hostname)}/release`),
+    mutationFn: (vm: Vm) => mutateLease(vm, `/vms/${encodeURIComponent(vm.Hostname)}/release`),
     onSuccess: invalidate,
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 409) invalidate();
+    },
   });
 }
 
@@ -112,40 +123,59 @@ export function useReturnVm() {
   const invalidate = useVmInvalidation();
 
   return useMutation({
-    mutationFn: (vmid: number) => apiPost<unknown>(`/vms/${vmid}/return`),
+    mutationFn: (vm: Vm) => mutateLease(vm, `/vms/${vm.VMID}/return`),
     onSuccess: invalidate,
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 409) invalidate();
+    },
   });
 }
 
-export function useCheckoutVm() {
-  const invalidate = useVmInvalidation();
+async function mutateLease(vm: Vm, path: string) {
+  const csrf = getCsrfToken();
+  let guard = leaseGuard(vm);
+  if (!guard) {
+    const fresh = await apiGet<Vm>(`/vms/${vm.VMID}`);
+    if (fresh.VMID !== vm.VMID || fresh.Hostname !== vm.Hostname
+        || (vm.LeaseId && fresh.LeaseId !== vm.LeaseId)) {
+      throw new ApiError('The VM lease changed. Refresh the VM and review its current assignment.', 409);
+    }
+    guard = leaseGuard(fresh);
+  }
+  if (!guard) {
+    throw new ApiError('The current VM lease could not be verified. Refresh the VM before trying again.', 409);
+  }
+  if (!csrf || getCsrfToken() !== csrf) {
+    throw new ApiError('Your session changed. Sign in again before managing this VM.', 401);
+  }
 
-  return useMutation({
-    mutationFn: (input: { username: string; avdhost: string }) =>
-      apiPost<Vm>('/vms/checkout', input),
-    onSuccess: invalidate,
-  });
+  return apiPost<unknown>(path, guard);
 }
 
 /* ---------------------------------------------------------------- scaling */
 
 export function useScalingRules() {
+  const enabled = useManagementAccess();
   return useQuery({
+    enabled,
     queryKey: queryKeys.rules,
     queryFn: ({ signal }) => apiGet<ScalingRule[]>('/scaling/rules', signal),
   });
 }
 
 export function useScalingRule(ruleid: string | undefined) {
+  const authorized = useManagementAccess();
   return useQuery({
     queryKey: queryKeys.rule(ruleid ?? ''),
     queryFn: ({ signal }) => apiGet<ScalingRule>(`/scaling/rules/${ruleid}`, signal),
-    enabled: Boolean(ruleid),
+    enabled: authorized && Boolean(ruleid),
   });
 }
 
 export function useActivityLog(search: string) {
+  const enabled = useManagementAccess();
   return useQuery({
+    enabled,
     queryKey: queryKeys.activityLog(search),
     queryFn: ({ signal }) => apiGet<Paged<ActivityLogEntry>>(`/scaling/log${search}`, signal),
     placeholderData: (previous) => previous,
@@ -153,7 +183,9 @@ export function useActivityLog(search: string) {
 }
 
 export function useRuleHistory(search: string) {
+  const enabled = useManagementAccess();
   return useQuery({
+    enabled,
     queryKey: queryKeys.ruleHistory(search),
     queryFn: ({ signal }) => apiGet<Paged<ScalingRule>>(`/scaling/rules/history${search}`, signal),
     placeholderData: (previous) => previous,
@@ -198,7 +230,9 @@ export function useDeleteScalingRule() {
 /* --------------------------------------------------------- host settings */
 
 export function useHostSettings() {
+  const enabled = useManagementAccess();
   return useQuery({
+    enabled,
     queryKey: queryKeys.hostSettings,
     queryFn: ({ signal }) => apiGet<HostSettingsPage>('/hosts/settings', signal),
   });

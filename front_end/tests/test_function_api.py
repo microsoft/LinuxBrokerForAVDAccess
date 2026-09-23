@@ -1,7 +1,10 @@
+import pytest
+
 from function_api import (
     build_history_payload,
     filters_from_args,
     pagination_from_args,
+    summary_from_api,
     summarize_vms,
     validate_history_filters,
 )
@@ -15,7 +18,7 @@ def test_summarize_vms_empty_and_none_are_safe():
         assert all(percent == 0 for percent in summary["pct"].values())
 
 
-def test_summarize_vms_ready_requires_available_on_reachable():
+def test_inventory_attributes_do_not_prove_checkout_readiness():
     vms = [
         {"VmStatus": "Available", "PowerState": "On", "NetworkStatus": "Reachable"},
         {"VmStatus": "Available", "PowerState": "Off", "NetworkStatus": "Reachable"},
@@ -25,12 +28,24 @@ def test_summarize_vms_ready_requires_available_on_reachable():
     ]
     summary = summarize_vms(vms)
     assert summary["total"] == 5
-    assert summary["ready"] == 1
+    assert summary["ready"] is None
     assert summary["available"] == 3
     assert summary["checked_out"] == 1
     assert summary["powered_on"] == 3
     assert summary["unreachable"] == 1
     assert summary["utilization"] == 20
+
+
+@pytest.mark.parametrize("ready", [0, 1, 7])
+def test_checkout_readiness_comes_only_from_the_broker_summary(ready):
+    assert summary_from_api({"Ready": ready})["ready"] == ready
+
+
+@pytest.mark.parametrize("payload", [{}, {"Ready": None}, {"Ready": "1"},
+                                    {"Ready": True}, {"Ready": -1}, {"Ready": 1.5}])
+def test_unverifiable_checkout_readiness_is_explicitly_unknown(payload, caplog):
+    assert summary_from_api(payload)["ready"] is None
+    assert "valid checkout readiness count" in caplog.text
 
 
 # --------------------------------------------------- history filter helpers

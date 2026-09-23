@@ -1,31 +1,17 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$ResourceGroupName,
-
-    [Parameter(Mandatory = $true)]
-    [string]$TaskAppName,
-
-    [Parameter(Mandatory = $true)]
-    [string]$ApiClientId,
-
-    [string]$RoleValue = 'ScheduledTask',
-
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory)][string]$ResourceGroupName,
+    [Parameter(Mandatory)][string]$TaskAppName,
+    [Parameter(Mandatory)][string]$ApiClientId,
+    [Parameter(Mandatory)][string]$TenantId,
     [string]$GraphEndpoint
 )
-
 $ErrorActionPreference = 'Stop'
-
-$identity = az functionapp identity show --name $TaskAppName --resource-group $ResourceGroupName --output json | ConvertFrom-Json
-if (-not $identity.principalId) {
-    throw "Unable to resolve managed identity for function app '$TaskAppName'."
-}
-
-& "$PSScriptRoot/Assign-ServicePrincipalApiRole.ps1" `
-    -PrincipalId $identity.principalId `
-    -ApiClientId $ApiClientId `
-    -RoleValue $RoleValue `
-    -GraphEndpoint $GraphEndpoint
-
-Write-Host "Ensured '$RoleValue' application permission for function app '$TaskAppName'."
+. "$PSScriptRoot\Broker.Deployment.Common.ps1"
+Assert-BrokerTenant $TenantId
+$identity = Invoke-BrokerAz -Arguments @('functionapp', 'identity', 'show', '--name', $TaskAppName,
+    '--resource-group', $ResourceGroupName) -Operation 'Read scheduled-task managed identity'
+if ($identity.tenantId -ne $TenantId) { throw 'Scheduled-task managed identity belongs to an unexpected tenant.' }
+$principalId = Assert-BrokerGuid $identity.principalId 'Scheduled-task principal ID'
+& "$PSScriptRoot\Assign-ServicePrincipalApiRole.ps1" -PrincipalId $principalId `
+    -ApiClientId $ApiClientId -RoleValue ScheduledTask -GraphEndpoint $GraphEndpoint

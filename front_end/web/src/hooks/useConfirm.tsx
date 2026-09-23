@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import type { ButtonVariant } from '../components/ui/Button';
+import { useManagementAccess } from './useSession';
 
 export interface ConfirmRequest {
   title: string;
@@ -19,6 +20,7 @@ export interface ConfirmRequest {
  * resource before anything is sent.
  */
 export function useConfirm() {
+  const authorized = useManagementAccess();
   const [request, setRequest] = useState<ConfirmRequest | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -31,7 +33,7 @@ export function useConfirm() {
   }, [busy]);
 
   const accept = useCallback(async () => {
-    if (!request) {
+    if (!request || !authorized) {
       return;
     }
     setBusy(true);
@@ -41,11 +43,11 @@ export function useConfirm() {
     } finally {
       setBusy(false);
     }
-  }, [request]);
+  }, [request, authorized]);
 
   const dialog = (
     <ConfirmDialog
-      open={request !== null}
+      open={request !== null && authorized}
       title={request?.title ?? ''}
       body={request?.body ?? ''}
       confirmLabel={request?.confirmLabel}

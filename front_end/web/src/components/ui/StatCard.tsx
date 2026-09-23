@@ -16,7 +16,7 @@ const ACCENT: Record<StatTone, string> = {
 
 export interface StatCardProps {
   label: string;
-  value: number;
+  value: number | null;
   hint?: string;
   icon: IconName;
   tone?: StatTone;

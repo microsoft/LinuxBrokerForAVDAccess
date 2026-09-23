@@ -1,11 +1,12 @@
 import { PageHeader } from '../components/ui/Feedback';
 import { GlassCard } from '../components/ui/GlassCard';
 import { ButtonAnchor } from '../components/ui/Button';
-import { useSession } from '../hooks/useSession';
+import { useSession, useSignOut } from '../hooks/useSession';
 import { valueOrDash } from '../lib/format';
 
 export function Profile() {
   const session = useSession();
+  const signOut = useSignOut();
   const user = session.user;
 
   const rows: Array<{ label: string; value: string }> = [
@@ -22,7 +23,7 @@ export function Profile() {
         subtitle="The account this portal session is signed in with."
         icon="person"
         actions={
-          <ButtonAnchor href="/logout" icon="box-arrow-right">
+          <ButtonAnchor href="/logout" icon="box-arrow-right" onClick={signOut}>
             Sign out
           </ButtonAnchor>
         }

@@ -1,166 +1,137 @@
 # Broker API
 
-This folder contains the Flask **Broker API** for the Linux Broker for AVD Access solution. It is the control-plane service used by the Service Management Portal, the scheduled scaling task, the AVD host broker, and the Linux host agents. For the full solution architecture and deployment model, see the repository [README](../README.md).
+The Flask broker authorizes Entra subjects, reserves Linux leases in SQL, provisions temporary local credentials, and manages inventory, scaling, and host settings. Linux accounts remain non-domain-joined and use their existing persistent NFS profiles.
 
-## Purpose
+## Authorization
 
-The API brokers Linux host checkouts, records VM state in Azure SQL, manages scaling rules, triggers scaling actions, and delivers the fleet-wide Linux host settings profile. It does not own the database schema; schema and stored procedure changes belong under the [`sql_queries`](../sql_queries/README.md) folder.
+`authorization.py` verifies RS256 signatures against the configured tenant JWKS, then constructs an immutable typed principal. Every business route has an explicit `Policy`; there is no scope/role/group OR shortcut and no runtime Microsoft Graph authorization.
 
-## Endpoint Reference
+Malformed JWT headers are authentication failures (401). Signing-key retrieval failures, malformed JWKS JSON and invalid key documents are dependency failures (503), with no token/body detail in the response or logs. Clients must not treat a key-service outage as a reason to force sign-in or token refresh.
 
-`token_required(...)` grants access when the bearer token has any listed delegated scope or app role. When a group is listed, membership in that configured group also grants access.
+Accepted audiences are `CLIENT_ID` and `api://<CLIENT_ID>`. Accepted issuers are `{AZURE_AUTHORITY_HOST}/{TENANT_ID}/v2.0`, `{AZURE_AUTHORITY_HOST}/{TENANT_ID}/`, and `{STS_ISSUER_HOST}/{TENANT_ID}/`. Required claims include `exp`, `nbf`, `iat`, `iss`, `aud`, `sub`, `tid`, `oid`, and `ver`. Identity/client IDs must be nonempty canonical UUID strings; lifetimes must be integers; scopes and roles must have their expected types. Version 1 tokens require `appid`; version 2 tokens require `azp`. Conflicting client claims are rejected.
 
-| Method | Path | Required scopes, roles, or groups | Description |
-| --- | --- | --- | --- |
-| GET | `/health` | none | Checks database connectivity and returns API health and version. |
-| GET | `/api/version` | none | Returns the API version string. |
-| GET | `/api/vms` | `access_as_user`, `FullAccess`, `ScheduledTask` | Lists all broker VM records. |
-| GET | `/api/vms/summary` | `access_as_user`, `FullAccess`, `ScheduledTask` | Returns dashboard counters: `TotalVMs`, `Available`, `CheckedOut`, `Maintenance`, `Released`, `PoweredOn`, `PoweredOff`, `Unreachable`, and `Ready`. |
-| POST | `/api/vms/checkout` | `AvdHost`, `access_as_user`, `FullAccess`, or `AVD_HOST_GROUP_ID` membership | Checks out a ready Linux host and creates or updates the remote user. |
-| POST | `/api/vms/<vmid>/update-attributes` | `ScheduledTask`, `access_as_user`, `FullAccess` | Updates VM power, network, or broker status fields. |
-| POST | `/api/vms/<vmid>/delete` | `access_as_user`, `FullAccess` | Deletes a VM record. |
-| POST | `/api/vms/add` | `access_as_user`, `FullAccess` | Adds a VM record. |
-| GET | `/api/vms/<vmid>` | `access_as_user`, `FullAccess` | Gets one VM record. |
-| POST | `/api/vms/<vmid>/return` | `access_as_user`, `FullAccess` | Returns a checked-out VM and removes the remote user when possible. |
-| POST | `/api/vms/<hostname>/release` | `LinuxHost`, `access_as_user`, `FullAccess`, or `LINUX_HOST_GROUP_ID` membership | Marks a host-side session released, with optional `username` and `leaseId` validation. |
-| POST | `/api/vms/released` | `ScheduledTask`, `access_as_user`, `FullAccess` | Returns expired released VMs to the available pool and removes remote users. |
-| POST | `/api/vms/history` | `access_as_user`, `FullAccess` | Returns VM history, optionally paged with `page` and `per_page`. |
-| POST | `/api/scaling/log` | `access_as_user`, `FullAccess` | Returns scaling activity history, optionally paged with `page` and `per_page`. |
-| POST | `/api/scaling/trigger` | `ScheduledTask`, `access_as_user`, `FullAccess` | Runs scaling logic and starts or stops Azure VMs as directed by SQL. |
-| GET | `/api/scaling/rules` | `access_as_user`, `FullAccess` | Lists scaling rules; an empty rule set is `[]` with `200`. |
-| GET | `/api/scaling/rules/<int:ruleid>` | `access_as_user`, `FullAccess` | Gets one scaling rule. |
-| POST | `/api/scaling/rules/create` | `access_as_user`, `FullAccess` | Creates a scaling rule. |
-| POST | `/api/scaling/rules/<int:ruleid>/update` | `access_as_user`, `FullAccess` | Updates a scaling rule. |
-| POST | `/api/scaling/rules/<int:ruleid>/delete` | `access_as_user`, `FullAccess` | Deletes a scaling rule. |
-| POST | `/api/scaling/rules/history` | `access_as_user`, `FullAccess` | Returns scaling rule history, optionally paged with `page` and `per_page`. |
-| GET | `/api/hosts/settings` | `LinuxHost`, `access_as_user`, `FullAccess`, `ScheduledTask`, or `LINUX_HOST_GROUP_ID` membership | Returns the fleet-wide Linux host settings profile. |
-| POST | `/api/hosts/settings/update` | `access_as_user`, `FullAccess` | Updates the fleet-wide Linux host settings profile. |
-| POST | `/api/hosts/settings/apply` | `access_as_user`, `FullAccess`, `ScheduledTask` | Pushes the current settings profile to reachable hosts over SSH. |
-| POST | `/api/hosts/<hostname>/settings/ack` | `LinuxHost`, `access_as_user`, `FullAccess`, or `LINUX_HOST_GROUP_ID` membership | Records the settings version applied by one host. |
+| Principal | Required authority | Allowed operations |
+| --- | --- | --- |
+| Workspace user | Delegated `connect_as_user`, `WorkspaceUser`, and `BROKER_LAUNCHER_CLIENT_ID` | Own checkout/reconnect only, plus own capabilities |
+| Portal administrator | Delegated `access_as_user`, `FullAccess`, and `PORTAL_CLIENT_ID` | Management; never credential checkout or impersonation |
+| Linux host | App-only `idtyp=app`, `LinuxHost`, and registered `(tid, oid)` | Global settings read, own settings acknowledgement, own guarded session observations |
+| Scheduled task | App-only `idtyp=app` and `ScheduledTask` | Minimal connectivity inventory, reachability updates, expiry/retry processing, and scaling trigger |
+| Unassigned delegated user from an intended client | Valid token but missing entitlement | Own capabilities with false flags |
 
-`/api/vms/available` is not present in `app.py`; do not add new callers for it.
+A user token cannot become a workload by carrying a workload role. An unscoped token is not considered app-only unless `idtyp=app` is present. Configure that optional access-token claim on the API registration. Legacy `AvdHost` roles, AVD/Linux group membership, and a plain delegated scope grant no business authority. An administrator who also connects needs a separately acquired native-client token with workspace scope and entitlement.
 
-## Consumers
+### Workload optional claim and cached-token cutover
 
-These callers constrain response shapes and endpoint compatibility.
+The **API resource registration**, not just its clients, must request `optionalClaims.accessToken` entry `{"name":"idtyp","source":null,"essential":false,"additionalProperties":[]}`. Deployment must merge this entry idempotently while preserving unrelated access-token, ID-token and SAML optional claims. Both verified v1 (`appid`) and v2 (`azp`) workload tokens require `idtyp=app` and their explicit application role. Delegated native/portal tokens require their scope, role and client; `idtyp` may be absent or `user`, never `app`.
 
-| Consumer | Endpoints |
-| --- | --- |
-| `front_end` portal | VM, scaling, and host-settings endpoints. The dashboard prefers `/api/vms/summary`; history pages request `page` and `per_page`. |
-| `task\function_app.py` | `/api/vms`, `/api/vms/released`, `/api/vms/<vmid>/update-attributes`, `/api/scaling/trigger` |
-| Linux host release agent (`linux_host\...\release-session.sh`) | `/api/vms/<hostname>/release` |
-| AVD host (`avd_host\...\Connect-LinuxBroker.ps1`) | `/api/vms/checkout` |
-| Linux host settings agent | `/api/hosts/settings`, `/api/hosts/<hostname>/settings/ack` |
+Stage and verify the registration change before enabling the secured workload flow. A manifest update does not modify JWTs already cached by IMDS or Azure Identity. Reacquiring a token or restarting a process can still return that old cached token; do not assume either forces immediate reissuance. During the coordinated paused cutover, revalidate renewed tokens through the actual read-only broker operation: registered Linux hosts use `GET /api/hosts/settings`, and scheduled tasks use `GET /api/vms`. `/api/me` is deliberately delegated-only and is not a workload probe.
 
-## Authentication and Authorization
+An older token without `idtyp=app` remains 401 with no business side effects, even if its roles otherwise match. Keep activation blocked until role assignment/optional-claim propagation and managed-identity cache renewal produce accepted tokens; no role-only, group-only or missing-claim fallback exists. Never print tokens or store them in cutover logs. Live token reissuance/propagation must be checked during authorized deployment, not inferred from local signed-token fixtures.
 
-Clients send Entra ID bearer tokens in the HTTP `Authorization` header. `token_required()` validates the token signature against the tenant JWKS, accepts audiences `CLIENT_ID` and `api://<CLIENT_ID>`, and accepts issuers:
+### Endpoint policies
 
-- `{AUTHORITY_HOST}/{TENANT_ID}/v2.0`
-- `{AUTHORITY_HOST}/{TENANT_ID}/`
-- `{STS_ISSUER_HOST}/{TENANT_ID}/`
+`Manage` below means the complete portal administrator policy, not just a scope or role.
 
-Authorization then checks delegated scopes in `scp`, app roles in `roles`, and optional group membership through Microsoft Graph `checkMemberGroups` using the token `oid`.
+| Method | Path | Policy |
+| --- | --- | --- |
+| GET | `/health`, `/api/version` | Public minimal health/version |
+| GET | `/api/me` | Intended delegated client; own principal/capabilities only |
+| GET | `/api/vms` | Manage or ScheduledTask; scheduled callers receive only VMID, hostname, IP, power and network state |
+| GET | `/api/vms/summary`, `/api/vms/<vmid>` | Manage |
+| POST | `/api/vms/checkout` | Workspace user |
+| POST | `/api/vms/<vmid>/update-attributes` | Manage; ScheduledTask may change only `networkstatus` |
+| POST | `/api/vms/add`, `/api/vms/<vmid>/delete` | Manage; unowned inventory only |
+| POST | `/api/vms/<vmid>/return`, `/api/vms/<hostname>/release` | Manage with required lease guards |
+| POST | `/api/vms/<hostname>/session` | Registered LinuxHost matching the hostname, with required lease guards |
+| POST | `/api/vms/released` | Manage or ScheduledTask |
+| POST | `/api/vms/history`, `/api/scaling/log`, `/api/scaling/rules/history` | Manage |
+| POST | `/api/scaling/trigger` | Manage or ScheduledTask |
+| GET | `/api/scaling/rules`, `/api/scaling/rules/<ruleid>` | Manage |
+| POST | `/api/scaling/rules/create`, `/api/scaling/rules/<ruleid>/update`, `/api/scaling/rules/<ruleid>/delete` | Manage |
+| GET | `/api/hosts/settings` | Manage or registered LinuxHost |
+| POST | `/api/hosts/settings/update`, `/api/hosts/settings/apply` | Manage |
+| POST | `/api/hosts/<hostname>/settings/ack` | Registered LinuxHost matching the hostname |
 
-Cloud endpoints are resolved in [`config.py`](config.py). `AZURE_CLOUD_NAME=AzurePublic` uses `login.microsoftonline.com`, `graph.microsoft.com`, and `sts.windows.net`. `AzureUSGovernment` uses `login.microsoftonline.us` and `graph.microsoft.us`. Any custom or sovereign cloud without a built-in profile must set `AZURE_AUTHORITY_HOST`, `GRAPH_ENDPOINT`, and `STS_ISSUER_HOST` explicitly.
+Settings update attribution comes from the verified subject, not a supplied `updatedBy`. Generic VM add/update cannot supply usernames, owners, leases, or manufacture `CheckedOut`/`Released` state. Power/status edits and deletion refuse owned or in-progress hosts.
 
-## Error Responses and Logging
+**Manual Add VM creates inventory, not trust.** A manually added or recreated hostname is not checkout-ready until the trusted deployment connection imports its verified ARM address with `RegisterLinuxHostVm` and enrolls its managed identity with `RegisterBrokerHost`. Deletion or an endpoint change revokes previous enrollment atomically; matching an old hostname, setting `Available`/`On`/`Reachable`, or restoring an old IP does not restore it. Portal administrators and scheduled tasks cannot execute either trusted enrollment procedure. This prevents management from redirecting a user's RDP credential to an administrator-supplied endpoint.
 
-Handler failures use a JSON error envelope:
+### Capability and checkout contracts
 
-```json
-{"error": "Unable to retrieve virtual machines."}
-```
-
-Exception detail must not be returned in the response body. Log details with the `linuxbroker.api` logger; when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set, that logger is configured for Azure Monitor. Authentication middleware and `/health` have their own fixed response shapes, but application handler errors should use the envelope.
-
-## Pagination Contract
-
-`/api/vms/history`, `/api/scaling/log`, and `/api/scaling/rules/history` support opt-in pagination. Supplying either `page` or `per_page` in the query string returns an envelope:
-
-```http
-POST /api/vms/history?page=2&per_page=25
-Content-Type: application/json
-
-{"startdate":"08/01/2026","enddate":"08/19/2026"}
-```
+`GET /api/me` returns exactly:
 
 ```json
 {
-  "items": [
-    {"VMID": 42, "Hostname": "linux-01"}
-  ],
-  "page": 2,
-  "per_page": 25,
-  "total": 91,
-  "total_pages": 4
+  "subject": {"tenantId": "<verified tid>", "objectId": "<verified oid>"},
+  "capabilities": {"manage": false, "connect": true}
 }
 ```
 
-When neither `page` nor `per_page` is present, the response remains a bare JSON array. Do not remove that default: `task\function_app.py` and older portal builds consume these endpoints as plain lists. The unpaged path also deliberately tolerates `"null"` for `limit`; older portal builds sent that sentinel for **No Limit**, and rolling deployments must not turn it into a SQL `INT` conversion failure.
+`POST /api/vms/checkout` accepts only `{"avdhost":"avd-01"}`. The hostname is audit metadata, not identity proof. Target usernames, tenant/object IDs, UIDs, lease overrides, unknown fields, and query parameters are rejected before allocation. SQL resolves the authenticated `(tid, oid)` to its immutable username/UID; UPN and display-name changes have no effect.
 
-Empty collection responses are arrays with `200`, including `/api/scaling/rules`, `/api/scaling/log`, and `/api/scaling/rules/history`.
+Broker UIDs are `2000..2147483646`, excluding reserved `65534` and `65535`. New allocation skips those values; existing reserved mappings are rejected for operator recovery, never silently assigned a different UID or profile.
 
-## VM Summary
+Successful checkout returns exactly `VMID`, `Hostname`, `IPAddress`, `Username`, `LeaseId`, `LeaseGeneration`, and `password`. The password is generated per authorized operation and passed through SSH stdin inside a single locked provisioning operation. Never log that response, the bearer token, SSH stdin, or host command output. Every `/api/` response, including denials, has `Cache-Control: no-store`.
 
-`GET /api/vms/summary` returns fixed-size dashboard counters instead of requiring the portal to fetch every VM. `Ready` uses the same condition as checkout host selection: `VmStatus='Available'`, `PowerState='On'`, and `NetworkStatus='Reachable'`.
+## Lease lifecycle and recovery
+
+Apply [SQL migrations 040-046](../sql_queries/README.md) and install the version-matched [Linux helpers](../linux_host/README.md) before activation. There is no vulnerable compatibility mode. The first application of 046 quarantines existing host enrollments until the normal trusted ARM import/enrollment sequence runs again; it preserves user mappings, active leases and generation tombstones.
+
+RHEL 7/8-style hosts can use the dedicated cgroup-v1 XRDP freezer backend with pre-exec service enrollment; newer unified-cgroup hosts use the systemd-v2 gate. Host `gate-status` must pass before provisioning/migration. Existing unenrolled desktops are left owned and pending a controlled drain/enrollment restart, not forcibly logged off or silently excluded by an OS upgrade requirement. See the Linux installation contract for `broker-freezer.py`, service wrappers and durable restart recovery.
+
+1. `BeginBrokerCheckout` resolves the immutable subject, reuses that subject's live lease or reserves one ready registered host, and creates a durable operation. The SQL transaction commits before SSH.
+2. The host validates the username/UID, generation, and operation under a root-owned lock, mounts/verifies the persistent profile, sets groups and rotates the password. SQL completion is a compare-and-set on the exact operation and generation.
+3. Host `active`, `disconnected`, and `logged_off` observations require a registered host identity and exact `leaseId`/integer `leaseGeneration`. Initial disconnect does not terminate Xorg. Automatic mstsc reconnect restores `CheckedOut` without relaunching the launcher or issuing credentials.
+4. `DisconnectedAt` is set once per disconnect and cleared by an active observation. Expiry reads the global `LinuxHostSettings.GracePeriodSeconds` (default 1200), never `LastUpdateDate` or a separate 30-minute constant.
+5. Cleanup reserves a new fenced operation while retaining ownership. The host gates XRDP reconnect, rechecks actual state, ends only the mapped UID's sessions, verifies a non-lazy home unmount, removes the local account without recursive home deletion, and preserves NFS files/UID.
+6. Only acknowledged cleanup and guarded SQL completion make the host available. Active sessions found during expiry/logoff cancel cleanup. Power operations likewise retain a reservation until Azure completion is confirmed; powering on never clears a lease.
+
+Both administrative return and release require a JSON object containing exactly `leaseId` and integer `leaseGeneration` from the current management record. Return forces guarded cleanup; release only marks disconnection and can be cancelled by the host observing an active session.
+
+Generations increase on reservations, including reconnects and cleanup; the lease ID remains stable until cleanup completes. A failed reconnect **never** returns the existing assignment. Failed operations retain ownership and are explicitly retryable. The same subject may retry failed provisioning; the maintenance sweep retries failed cleanup. An interrupted `Running` operation becomes retryable after 300 seconds with a new generation, not by clearing its guard. Stale host commands/finalizations cannot supersede newer generations.
+
+Lease generations use Int64 storage but the shared JSON domain is `1..9007199254740991`, so JavaScript, jq and native clients all retain exact values. They are not restricted to Int32. Request guards, issued credentials, root markers and SQL reservations enforce that bound; invalid values are never clamped or rounded. Unassigned inventory may use generation 0. Counter exhaustion fails closed and removes an unowned host from ready/scaling selection rather than wrapping its fence.
+
+Administrators must refresh the VM record before retrying an uncertain return; a stale request receives 409 without the current lease being disclosed. `OperationId`, `OperationKind`, `OperationState`, `OperationError`, and `OperationStartedAt` make pending recovery visible. Host unreachability, busy mounts, unsupported/unverified XRDP gates, and uncertain SSH or SQL completion remain unavailable. Never repair these by forcing `Available` or resetting a marker/generation.
 
 ## Configuration
 
-The API reads environment variables directly; it does not load `.env` files by itself. [`env.example`](env.example) shows the deployment settings.
+The API reads environment variables directly; see [env.example](env.example).
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `SCM_DO_BUILD_DURING_DEPLOYMENT` | deployment | Enables App Service build during deployment. |
-| `APPLICATIONINSIGHTS_CONNECTION_STRING` | optional | Enables Azure Monitor/OpenTelemetry export for `linuxbroker.api`. |
-| `ApplicationInsightsAgent_EXTENSION_VERSION` | optional | App Service Application Insights extension version. |
-| `APPLICATIONINSIGHTSAGENT_EXTENSION_ENABLED` | optional | Enables the App Service Application Insights extension. |
-| `WEBSITE_HTTPLOGGING_RETENTION_DAYS` | optional | App Service HTTP log retention. |
-| `VM_SUBSCRIPTION_ID` | required for scaling | Azure subscription used by `/api/scaling/trigger`. |
-| `VM_RESOURCE_GROUP` | required for scaling | Resource group containing Linux host VMs. |
-| `AVD_HOST_GROUP_ID` | required for AVD host group auth | Entra group whose members may call checkout. |
-| `LINUX_HOST_GROUP_ID` | required for Linux host group auth | Entra group whose members may call release and host-settings ack/read endpoints. |
-| `LINUX_HOST_ADMIN_LOGIN_NAME` | optional | SSH admin user prefix for remote host commands; defaults to `avdadmin`. |
-| `DB_SERVER` | required | Azure SQL Server name or FQDN for `pymssql`. |
-| `DB_DATABASE` | required | Azure SQL database name. |
-| `DB_USERNAME` | required | SQL login name. |
-| `DB_PASSWORD_NAME` | required | Key Vault secret name containing the SQL password. |
-| `CLIENT_ID` | required | Broker API app registration client ID and accepted token audience. |
-| `TENANT_ID` | required | Entra tenant used for token validation and Graph calls. |
-| `AZURE_CLOUD_NAME` | optional | Cloud profile name; defaults to `AzurePublic`. |
-| `AZURE_AUTHORITY_HOST` | required for `AzureCustom` | Login authority host override. |
-| `GRAPH_ENDPOINT` | required for `AzureCustom` | Microsoft Graph endpoint override. |
-| `STS_ISSUER_HOST` | required for `AzureCustom` | STS issuer host override. |
-| `GRAPH_API_ENDPOINT` | optional | Legacy Graph scope setting in `config.py`; current token acquisition uses `GRAPH_ENDPOINT`. |
-| `MICROSOFT_PROVIDER_AUTHENTICATION_SECRET` | required | Client secret used by the API to call Graph for group checks. |
-| `DOMAIN_NAME` | required for SSH actions | DNS suffix used to build `<admin>@<hostname>.<domain>`. |
-| `VAULT_URL` | required | Key Vault URL for SQL password and SSH key retrieval. |
-| `KEY_NAME` | required for SSH actions | Key Vault secret name containing the PEM SSH private key. |
-| `NFS_SHARE` | required for checkout provisioning | NFS share argument passed to `create-user.sh`; used by code but not currently listed in `env.example`. |
+| Variable | Purpose |
+| --- | --- |
+| `TENANT_ID`, `CLIENT_ID` | Single Entra tenant and broker API audience |
+| `PORTAL_CLIENT_ID`, `BROKER_LAUNCHER_CLIENT_ID` | Separate intended delegated clients |
+| `BROKER_CHECKOUT_ENABLED` | Defaults to `true`; `false` pauses checkout without weakening policy |
+| `AZURE_CLOUD_NAME` | `AzurePublic` (default), `AzureUSGovernment`, or `AzureCustom` |
+| `AZURE_AUTHORITY_HOST`, `STS_ISSUER_HOST` | Authentication endpoint overrides; both required for AzureCustom |
+| `DB_SERVER`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD_NAME` | Runtime SQL connection and Key Vault password secret name; use a dedicated `BrokerApiRuntime` database user |
+| `VAULT_URL`, `KEY_NAME` | Key Vault and SSH private key secret |
+| `LINUX_HOST_ADMIN_LOGIN_NAME`, `DOMAIN_NAME` | SSH admin (default `avdadmin`) and host DNS suffix |
+| `NFS_SHARE` | Required export for safe provisioning; empty/unverifiable storage fails closed |
+| `VM_SUBSCRIPTION_ID`, `VM_RESOURCE_GROUP` | Azure scaling target |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Optional telemetry; do not enable credential/header/body capture |
 
-## Database Access
+The API no longer uses `AVD_HOST_GROUP_ID`, `LINUX_HOST_GROUP_ID`, Graph scopes, or a Graph client secret. Deployment still uses Graph for trusted app/role configuration; that is a separate identity and permission boundary.
 
-Handlers call stored procedures rather than embedding schema logic in Python. `db_connection()` wraps `get_db_connection()` as a context manager so every acquired connection is closed on success or exception.
+## Existing collection contracts
 
-Keep schema and procedure changes in numbered files under [`sql_queries`](../sql_queries/README.md). The deployment bootstrap applies those scripts in filename order and rewrites procedures to `CREATE OR ALTER PROCEDURE` for reruns.
+History POSTs preserve opt-in `page`/`per_page` pagination: paged responses contain `items`, `page`, `per_page`, `total`, and `total_pages`; otherwise they remain arrays. The maximum page size is 200. Empty collections remain `[]` with 200. Existing nullable `limit` and date-filter normalization is retained.
 
-## Local Development and Tests
+`GET /api/vms/summary` retains its public counters. `Ready` additionally requires no owner, username, lease, or operation and an active registered host, matching checkout eligibility.
 
-Install runtime dependencies from this folder:
+## Validation
+
+Use isolated environments. From the repository root, after restoring `api\requirements.txt` and `api\requirements-dev.txt`:
 
 ```powershell
-cd .\api
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python .\app.py
+python -m pytest api\tests -q
+python -m pytest api\authorization_tests -q
+python sql_queries\tests\run_sql_integration.py --docker
 ```
 
-Set the required environment variables first. For local test runs, install the dev requirements and run pytest from the `api` folder:
+The default `python -m pytest` with working directory `api` also discovers both suites; do not restrict CI to `tests` alone. Keep API and frontend Python suites in separate processes. Regression fixtures inject an explicit administrator principal but keep policy decorators intact and no longer install a fake JWT module. `authorization_tests` has independent fixtures, signs RSA tokens with real PyJWT/cryptography, checks that neither authentication nor decorators were replaced, mocks only infrastructure, and checks all routes, cross-subject/host denials, capabilities, side-effect ordering, and secret handling. Its standalone command above also runs independently of the regression conftest.
 
-```powershell
-pip install -r requirements.txt -r requirements-dev.txt
-pytest
-```
+The SQL harness only creates a disposable loopback-bound local SQL Server container; it cannot accept a live connection string. It tests actual migration/rerun and competing SQL transactions. An unavailable Docker/SQL runtime is a limitation, not a passing transaction test. Host tests and installation prerequisites are documented in [linux_host/README.md](../linux_host/README.md).
 
-`api\tests\` contains pytest regression coverage for the hardened API paths, including connection cleanup, error envelopes, empty collections, VM summary, and paged history responses.
+Windows CI can instead use `sql_queries\tests\Run-LocalDbIntegration.ps1 -InstanceName LinuxBrokerAuth_<unique-suffix> -DatabaseName LinuxBrokerAuthorizationTests_<unique-suffix>` against an already-running isolated SQL LocalDB instance and initially empty dedicated test database. It uses native PowerShell `System.Data.SqlClient`, resets only its marked test schema inside that one supplied database, and synchronizes genuinely competing connections at the database lock. It never creates/drops databases or connects to default databases. The caller owns instance/database startup and cleanup; the harness never starts LocalDB or changes Docker Desktop. See the [SQL validation contract](../sql_queries/README.md).

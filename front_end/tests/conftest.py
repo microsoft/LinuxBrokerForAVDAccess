@@ -2,7 +2,7 @@ import os
 import re
 import shutil
 import sys
-from datetime import datetime, timedelta
+from time import time
 from pathlib import Path
 
 import pytest
@@ -25,19 +25,23 @@ os.chdir(FRONT_END)
 VMS = [
     {"VMID": 1, "Hostname": "linux-host-01", "IPAddress": "10.0.0.4", "PowerState": "On",
      "NetworkStatus": "Reachable", "VmStatus": "Available", "Username": None,
-     "AvdHost": None, "Description": "Pool host", "LastUpdateDate": "2026-08-01 10:00:00",
+     "AvdHost": None, "LeaseId": None, "LeaseGeneration": 0,
+     "Description": "Pool host", "LastUpdateDate": "2026-08-01 10:00:00",
      "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-01 10:00:00", "SysEndTime": None},
     {"VMID": 2, "Hostname": "linux-host-02", "IPAddress": "10.0.0.5", "PowerState": "On",
      "NetworkStatus": "Reachable", "VmStatus": "CheckedOut", "Username": "alice@contoso.com",
-     "AvdHost": "avd-01", "Description": "", "LastUpdateDate": "2026-08-02 11:00:00",
+     "AvdHost": "avd-01", "LeaseId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "LeaseGeneration": 7,
+     "Description": "", "LastUpdateDate": "2026-08-02 11:00:00",
      "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-02 11:00:00", "SysEndTime": None},
     {"VMID": 3, "Hostname": "linux-host-03", "IPAddress": "10.0.0.6", "PowerState": "Off",
      "NetworkStatus": "Unreachable", "VmStatus": "Maintenance", "Username": None,
-     "AvdHost": None, "Description": "Patching", "LastUpdateDate": "2026-08-03 09:00:00",
+     "AvdHost": None, "LeaseId": None, "LeaseGeneration": 0,
+     "Description": "Patching", "LastUpdateDate": "2026-08-03 09:00:00",
      "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-03 09:00:00", "SysEndTime": None},
     {"VMID": 4, "Hostname": "linux-host-04", "IPAddress": "10.0.0.7", "PowerState": "On",
      "NetworkStatus": "Reachable", "VmStatus": "Released", "Username": "bob@contoso.com",
-     "AvdHost": "avd-02", "Description": "", "LastUpdateDate": "2026-08-04 08:00:00",
+     "AvdHost": "avd-02", "LeaseId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "LeaseGeneration": 3,
+     "Description": "", "LastUpdateDate": "2026-08-04 08:00:00",
      "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-04 08:00:00", "SysEndTime": None},
 ]
 
@@ -64,6 +68,11 @@ API = "/api/ui"
 # read from, so they are parametrised together throughout the suite.
 HISTORY_PATHS = [f"{API}/vms/history", f"{API}/scaling/log", f"{API}/scaling/rules/history"]
 
+SUBJECT = {
+    "tenantId": "22222222-2222-4222-8222-222222222222",
+    "objectId": "11111111-1111-4111-8111-111111111111",
+}
+
 
 class FakeResponse:
     def __init__(self, payload, status_code=200):
@@ -84,7 +93,12 @@ class FakeResponse:
 
 class FakeBrokerApi:
     def __init__(self):
+        self.gets = []
         self.posts = []
+        self.capability_response = {
+            "subject": dict(SUBJECT), "capabilities": {"manage": True, "connect": False},
+        }
+        self.capability_status = 200
         # Number of rows the history endpoints report.
         self.history_total = 120
         self.scaling_log_payload = [
@@ -115,8 +129,11 @@ class FakeBrokerApi:
 
     def get(self, url, **kwargs):
         import requests
+        self.gets.append({"url": url, **kwargs})
         if any(url.endswith(path) for path in self.raise_get_paths):
             raise requests.exceptions.RequestException("broker unavailable")
+        if url.endswith("/me"):
+            return FakeResponse(self.capability_response, self.capability_status)
         if url.endswith("/vms/summary"):
             if self.summary_status is not None:
                 return FakeResponse({"error": "not found"}, status_code=self.summary_status)
@@ -155,8 +172,6 @@ class FakeBrokerApi:
             return self._history(rows, params)
         if url.endswith("/scaling/rules/create"):
             return FakeResponse({"RuleID": 1}, status_code=201)
-        if url.endswith("/vms/checkout"):
-            return FakeResponse(VMS[0])
         return FakeResponse({})
 
     def _history(self, rows, params):
@@ -265,11 +280,10 @@ def signed_in_client(client):
 
 
 def sign_in(client):
-    # Match the app's naive datetime.utcnow().timestamp() convention exactly.
-    expiry = (datetime.utcnow() + timedelta(hours=1)).timestamp()
+    expiry = time() + 3600
     with client.session_transaction() as sess:
         sess["user"] = {"name": "Test Operator", "preferred_username": "op@contoso.com",
-                        "oid": "0000-1111", "tid": "2222-3333"}
+                        "oid": SUBJECT["objectId"], "tid": SUBJECT["tenantId"]}
         sess["access_token"] = "fake-token"
         sess["token_expiry"] = expiry
 

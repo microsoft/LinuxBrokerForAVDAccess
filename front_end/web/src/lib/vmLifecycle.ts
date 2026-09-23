@@ -1,4 +1,13 @@
-import type { Vm } from '../types/broker';
+import type { LeaseGuard, Vm } from '../types/broker';
+
+export function leaseGuard(vm: Pick<Vm, 'LeaseId' | 'LeaseGeneration'>): LeaseGuard | null {
+  if (typeof vm.LeaseId !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(vm.LeaseId)
+      || !Number.isSafeInteger(vm.LeaseGeneration) || vm.LeaseGeneration <= 0) {
+    return null;
+  }
+  return { leaseId: vm.LeaseId, leaseGeneration: vm.LeaseGeneration };
+}
 
 /*
  * Which lifecycle actions a VM row offers.
@@ -18,8 +27,13 @@ export function canReturn(vm: Pick<Vm, 'VmStatus'>): boolean {
   return vm.VmStatus === 'CheckedOut' || vm.VmStatus === 'Released';
 }
 
-/** A VM is ready only when it is powered on, reachable and unassigned. */
-export function isReady(vm: Pick<Vm, 'VmStatus' | 'PowerState' | 'NetworkStatus'>): boolean {
+export function canUpdateAttributes(vm: Pick<Vm, 'VmStatus' | 'LeaseId' | 'Username'>): boolean {
+  return (vm.VmStatus === 'Available' || vm.VmStatus === 'Maintenance')
+    && vm.LeaseId === null && !vm.Username;
+}
+
+/** Inventory conditions only; checkout readiness also requires broker-verified enrollment. */
+export function hasAvailableHostAttributes(vm: Pick<Vm, 'VmStatus' | 'PowerState' | 'NetworkStatus'>): boolean {
   return (
     vm.VmStatus === 'Available' && vm.PowerState === 'On' && vm.NetworkStatus === 'Reachable'
   );

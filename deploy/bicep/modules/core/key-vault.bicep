@@ -2,7 +2,7 @@ param location string = resourceGroup().location
 param tags object = {}
 param keyVaultName string
 @secure()
-param sqlAdminPassword string
+param sqlRuntimePassword string
 @secure()
 param linuxHostSshPrivateKey string
 
@@ -25,11 +25,11 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
-resource sqlAdminPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource sqlRuntimePasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'db-password'
   properties: {
-    value: sqlAdminPassword
+    value: sqlRuntimePassword
   }
 }
 

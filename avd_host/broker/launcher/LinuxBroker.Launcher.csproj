@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>LinuxBroker.Launcher</AssemblyName>
+    <RootNamespace>LinuxBroker.Launcher</RootNamespace>
+    <Version>1.0.0</Version>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+    <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Identity.Client" Version="[4.84.2]" />
+    <PackageReference Include="Microsoft.Identity.Client.Broker" Version="[4.84.2]" />
+    <InternalsVisibleTo Include="LinuxBroker.Launcher.Tests" />
+  </ItemGroup>
+</Project>

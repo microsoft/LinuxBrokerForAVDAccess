@@ -23,12 +23,57 @@ Broker API
 
 Why the BFF stays:
 
-- The MSAL **confidential client** flow is unchanged. The access token lives in the Flask session
-  and never reaches the browser, so there is no token in `localStorage` to steal and no Entra app
-  registration changes were needed for the rewrite.
+- MSAL's **confidential client** flow stays server-side. The API access token lives in the Flask
+  session and never reaches the browser or `localStorage`. The callback checks broker capability
+  before admitting an administrator.
 - `Flask-WTF` CSRF protection still guards every state-changing request.
 - Flask serves the SPA shell for **every** non-API path, so a bookmarked deep link or a hard
   refresh still resolves and React Router renders the right page.
+
+## Administrator Access
+
+**Ordinary AVD users have no portal access**, including read-only pages and direct BFF business
+requests. Portal denial does not change AVD access. A single Entra account can have workspace
+and administrator permissions separately:
+
+| Permission | Authorized workflow |
+| --- | --- |
+| `WorkspaceUser` with `connect_as_user` from the approved native launcher | The user's own Linux workspace through AVD, not this portal. |
+| `FullAccess` with `access_as_user` from the approved portal client | Administrator management of VMs, scaling, history, and settings, not credential checkout or impersonation. |
+
+Require assignment to the portal enterprise application and synchronize those assignments with
+the intended broker administrators. In this service, `CLIENT_ID` is the portal application's ID
+and `API_CLIENT_ID` is the broker API's ID. They must match the broker's configured
+`PORTAL_CLIENT_ID` and API audience respectively.
+
+The BFF calls **`GET /api/me`** using its server-side API access token during the MSAL callback,
+each signed-in session bootstrap, and **every management request**, before calling a business
+endpoint. The frozen broker response is:
+
+```json
+{
+  "subject": { "tenantId": "<validated tid>", "objectId": "<validated oid>" },
+  "capabilities": { "manage": true, "connect": false }
+}
+```
+
+Only `capabilities.manage === true` grants portal access. The subject must match the MSAL-authenticated
+session's tenant and object IDs, and the session must have a valid, unexpired token lifetime.
+ID-token roles are not API roles: the BFF never uses them for authorization and never decodes
+an unverified API token. Capabilities are not cached across requests. An unavailable, malformed,
+or missing capability endpoint fails closed; there is no fallback for older broker deployments.
+Capabilities describe the current token/client, not all permissions the account may have in a
+different workflow.
+
+Signed-in non-administrators get a simple explanation and a working **Sign out or switch account**
+link. They do not get a management shell or a sign-in redirect loop. The browser does not start
+management queries until the server grants access. Revalidation pauses management queries and confirmation dialogs;
+ordinary rechecks preserve unsaved administrator forms. Logout, a changed `(tenantId, objectId)`,
+or authorization loss clears management query and mutation data and cancels outstanding queries.
+
+**There is no portal checkout page, hook, navigation action, or BFF credential proxy.** Use the
+approved AVD launcher for personal workspace access. The legacy `/vms/checkout` page is not
+interpreted as a VM ID, and `/api/ui/vms/checkout` cannot issue credentials.
 
 ## Directory Layout
 
@@ -36,7 +81,7 @@ Why the BFF stays:
 | --- | --- |
 | `app.py` | Creates the Flask app, serves the SPA shell, exposes `/api/ui/session` and `/api/ui/dashboard`, and defines the JSON and SPA error handlers. |
 | `config.py` | Reads cloud, Entra ID, and Broker API settings from environment variables. |
-| `function_authentication.py` | `@login_required`. Returns `401` JSON for `/api/ui/*` and redirects page requests to `/login`. |
+| `function_authentication.py` | `@login_required` requires live broker administrator authority, session expiry, and subject matching. Shared `401`/`403`/`503` authorization errors. |
 | `function_api.py` | Authenticated Broker API helpers, request timeouts, JSON decoding, dashboard VM summary retrieval, history filter parsing, and paged history calls. |
 | `function_bff.py` | Shared JSON plumbing: the `@broker_endpoint` error decorator, request-body helpers, and the paged history envelope. |
 | `route_authentication.py` | Sign in, token callback, and sign out. Browser redirects, not JSON. |
@@ -70,16 +115,15 @@ a path that serves the SPA shell.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/ui/session` | Bootstrap: `authenticated`, `user`, `version`, `csrfToken`. Not behind `@login_required`, because the signed-out landing page needs a `200`. |
-| GET | `/api/ui/dashboard` | `{stats, recentActivity, apiError}`. |
+| GET | `/api/ui/session` | Bootstrap: `authenticated`, `subject`, `capabilities`, `user`, `version`, `csrfToken`. Signed-out sessions get a `200` with no user or subject and false capabilities; expired signed-in sessions get `401`. A verified non-admin gets a `200` with their own identity and `manage: false`, never management data. |
+| GET | `/api/ui/dashboard` | `{stats, recentActivity, apiError}`. `stats.ready` comes from the broker summary; it is `null` (unavailable) when that count cannot be verified. Inventory fallback counters never imply checkout readiness. |
 | GET | `/api/ui/vms` | |
 | GET | `/api/ui/vms/<vmid>` | |
-| POST | `/api/ui/vms` | Returns `201`. |
-| POST | `/api/ui/vms/<vmid>/update-attributes` | |
+| POST | `/api/ui/vms` | Returns `201`. Unowned inventory only, not trusted host enrollment. New status must be `Available` or `Maintenance`. No username, AVD host assignment, owner, or lease fields. |
+| POST | `/api/ui/vms/<vmid>/update-attributes` | Only `powerstate`, `networkstatus`, and `vmstatus`; unassigned `Available`/`Maintenance` hosts only. Assignment changes require guarded lease actions. |
 | POST | `/api/ui/vms/<vmid>/delete` | |
-| POST | `/api/ui/vms/<hostname>/release` | Keyed by **hostname**, matching the broker. |
-| POST | `/api/ui/vms/<vmid>/return` | Keyed by **VMID**, matching the broker. |
-| POST | `/api/ui/vms/checkout` | |
+| POST | `/api/ui/vms/<hostname>/release` | Keyed by **hostname**. Requires current `leaseId` and `leaseGeneration`. |
+| POST | `/api/ui/vms/<vmid>/return` | Keyed by **VMID**. Requires current `leaseId` and `leaseGeneration`. |
 | GET | `/api/ui/vms/history` | Paged. Filters in the query string. |
 | GET | `/api/ui/scaling/rules` | |
 | GET | `/api/ui/scaling/rules/<ruleid>` | |
@@ -89,11 +133,59 @@ a path that serves the SPA shell.
 | GET | `/api/ui/scaling/log` | Paged. |
 | GET | `/api/ui/scaling/rules/history` | Paged. |
 | GET | `/api/ui/hosts/settings` | `{settings, hosts}`. |
-| POST | `/api/ui/hosts/settings` | |
+| POST | `/api/ui/hosts/settings` | Only settings fields reach the API. The API derives the audit actor from the verified subject; the portal never supplies `updatedBy`. |
 | POST | `/api/ui/hosts/settings/apply` | Returns a `message` and `tone` the client shows verbatim. |
 
 Server-rendered routes that are **not** JSON: `/login`, `/getAToken`, `/logout`, `/health`,
 `/favicon.ico`.
+
+All listed business endpoints require `manage: true`, regardless of method or CSRF validity.
+The only unauthenticated JSON bootstrap is `/api/ui/session`; `/health` is a minimal health
+probe. BFF responses use `Cache-Control: no-store`.
+
+### Inventory is not trusted host enrollment
+
+**Add VM remains a supported administrator inventory action.** It does not make a host eligible
+for checkout. Neither setting `Available`/`On`/`Reachable` nor reusing an old hostname grants trust.
+Deleting and recreating a VM, or changing its hostname/IP endpoint, invalidates the previous host
+enrollment and trusted inventory receipt.
+
+A deployment operator must run the ARM-verified inventory import (`RegisterLinuxHostVm`) followed
+by host identity enrollment (`RegisterBrokerHost`) for the exact current VMID, hostname, and IP.
+Do not skip import because an inventory row already exists. `RegisterBrokerHost` alone cannot
+repair a manually recreated or changed endpoint; the portal and runtime role cannot supply the
+trusted inventory receipt.
+
+On the first application of `046_bind_host_enrollment_to_verified_inventory.sql`, previous
+hostname-only enrollments are intentionally deactivated. Complete that trusted import/enrollment
+sequence for **every intended host**, even when its address is unchanged, before readiness checks
+and resuming checkouts. These operations belong to the trusted deployment workflow, not the portal.
+
+The dashboard uses the broker's verified `Ready` count. If that summary cannot be obtained, it
+may still display inventory counts, but checkout readiness is explicitly unavailable rather than
+inferred from editable host attributes.
+
+### Administrative lease mutations
+
+Admin VM records include `LeaseId` and `LeaseGeneration`. Return and release send exactly the
+current values with the contract's lower-case request field names:
+
+```json
+{ "leaseId": "<current LeaseId>", "leaseGeneration": 7 }
+```
+
+The wire generation remains a **JSON number**, restricted to positive safe integers from
+`1` through `9007199254740991`, inclusive. Both the BFF and React reject zero, fractions, and
+unsafe values before forwarding a mutation; they never round, wrap, or convert the guard to a
+string. SQL `BIGINT` and C# `long` storage do not imply full Int64 wire support: JavaScript and
+older jq must preserve the same exact value.
+
+The UI uses the displayed record's guards; when those are unavailable it fetches current VM
+details rather than guessing a lease or generation. A missing/invalid guard prevents the
+mutation. A stale `409` explains that the lease changed and refreshes VM data for review;
+the client never automatically retries the mutation against a new assignment. The BFF requires
+both guards and forwards them to `/api/vms/<vmid>/return` or `/api/vms/<hostname>/release`.
+Returning a host does not make it available until the broker reports successful cleanup.
 
 ### Error contract
 
@@ -106,21 +198,27 @@ Server-rendered routes that are **not** JSON: `/login`, `/getAToken`, `/logout`,
 | Situation | Status |
 | --- | --- |
 | Client sent something unusable (`BadRequest`) | `400`, naming the field |
-| No usable token in the session | `401` |
-| Broker answered `4xx` | The same status, with the broker's own message, which names the rejected value |
+| Missing, invalid, or expired session/API token; capability subject mismatch | `401` on business routes; no redirect from a fetch |
+| Authenticated but not authorized for administrator management | `403` |
+| Capability service unavailable, missing, malformed, or otherwise unverifiable | `503`; no business call or authorization fallback |
+| Stale administrative lease | `409`, with a safe instruction to refresh and review the assignment |
+| Broker answered another `4xx` | The same status, preserving actionable validation errors |
 | Broker answered `5xx`, timed out, or returned junk | `502` |
 | Missing or stale CSRF token | `400` |
 | Unknown `/api/ui/*` path | `404` JSON |
-| Unknown page path | `200` SPA shell; React renders the not-found state |
+| Unknown page path (including legacy checkout) | `200` SPA shell; an authorized React client renders the not-found state |
 
-The client redirects to `/login` on a `401` and shows the `error` string as a toast otherwise.
-`fetch` cannot follow a `302` to Entra ID, which is exactly why the API answers `401` instead of
-redirecting.
+Authorization errors also include a stable `code`: `session_expired`, `administrator_required`,
+or `authorization_unavailable`. Broker authentication/authorization response details and MSAL
+error descriptions are not echoed to the browser. A `401` shows an expired-session sign-in
+state, `403` shows administrator-only access denied, and capability `503` offers retry/sign-out.
+The same states apply to authorization loss during an existing page or mutation, clearing its
+cached data. Other operation failures remain explicit page errors or toasts.
 
 ## Client Routing
 
 Routes mirror the URLs the Jinja portal served, so existing bookmarks and runbook links still
-resolve: `/`, `/profile`, `/vms`, `/vms/add`, `/vms/checkout`, `/vms/history`, `/vms/:vmid`,
+resolve: `/`, `/profile`, `/vms`, `/vms/add`, `/vms/history`, `/vms/:vmid`,
 `/vms/:vmid/update`, `/scaling/rules`, `/scaling/rules/create`, `/scaling/rules/history`,
 `/scaling/rules/:ruleid`, `/scaling/rules/:ruleid/update`, `/scaling/log`, `/settings/hosts`.
 
@@ -280,12 +378,13 @@ Two suites, both run in `.github/workflows/front-end-tests.yml`.
 # BFF contract
 cd .\front_end
 .\.venv\Scripts\Activate.ps1
-pytest
+python -m pytest
 
 # Client
 cd .\front_end\web
 npm run typecheck
 npm test
+npm run build
 ```
 
 `tests/conftest.py` fakes the Broker API with `FakeBrokerApi` and exposes three helpers worth
@@ -305,14 +404,21 @@ walks every authenticated route, so a page that throws on mount, a missing provi
 incorrectly fails there rather than in a browser. Add a row to its route table whenever you add a
 page.
 
+`tests/test_authorization.py` exercises every BFF business route with administrator, ordinary
+workspace-user, scope-only, and ID-role-mismatch fixtures, plus expiry, subject mismatch,
+capability outages, removed checkout paths, and required/stale lease guards. `FakeBrokerApi`
+supplies the trusted `/me` contract; JWT verification itself belongs to the broker API suite.
+The React tests cover pending/signed-out/denied/admin states, direct URLs, absence of unauthorized
+queries/navigation, cache isolation (including late responses), and exact lease mutation bodies.
+
 ## How to Add a Page
 
 1. Add the JSON endpoint to the matching `route_*.py` module, under `API_PREFIX`.
-2. Decorate it with `@login_required` and `@broker_endpoint("…")`. Use `json_body()` and
+2. Decorate it with the administrator-enforcing `@login_required` and `@broker_endpoint("…")`. Use `json_body()` and
    `require()` for `POST` bodies so a missing field is named rather than becoming an opaque `400`.
 3. Add the response shape to `web/src/types/broker.ts`.
-4. Add a query or mutation hook to `web/src/hooks/useBroker.ts`. Mutations should invalidate every
-   query their change affects.
+4. Add a query or mutation hook to `web/src/hooks/useBroker.ts`. Gate queries with
+   `useManagementAccess()`. Mutations should invalidate every query their change affects.
 5. Create the page under `web/src/pages/`, and register it in the route table in `web/src/App.tsx`.
    Add a matching row to the route table in `web/src/App.test.tsx` so the page is mounted for real
    by the integration test.

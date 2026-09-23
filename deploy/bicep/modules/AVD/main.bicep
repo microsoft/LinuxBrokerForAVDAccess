@@ -48,10 +48,15 @@ param adminUsername string
 @secure()
 param adminPassword string
 
-@description('Base URL for the AVD Linux Broker API')
-param linuxBrokerApiBaseUrl string
-@description('URI for the AVD Linux Broker configuration script')
-param linuxBrokerConfigScriptUri string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-AVD-Host.ps1'
+@description('Explicitly selected AVD user groups also entitled to the broker WorkspaceUser role.')
+param workspaceUserGroupIds array = []
+param workspaceUserIds array = []
+
+var workspaceGroups = [for id in workspaceUserGroupIds: { id: id, type: 'Group' }]
+var workspaceUsers = [for id in workspaceUserIds: { id: id, type: 'User' }]
+var workspacePrincipals = concat(workspaceGroups, workspaceUsers)
+var desktopUserRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '1d18fff3-a72a-46b5-b4a9-0b38a3cd7e63')
+var vmUserLoginRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'fb879df8-f326-4884-b1cf-06f3ad86be52')
 
 var osImage = 'microsoftwindowsdesktop:Windows-11:win11-24h2-avd:latest'
 var vmNames = [for i in range(1, sessionHostCount): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
@@ -92,6 +97,16 @@ resource desktopAppGroup 'Microsoft.DesktopVirtualization/applicationGroups@2024
     hostPoolArmPath: resourceId('Microsoft.DesktopVirtualization/hostpools', hostPool.name)
   }
 }
+
+resource desktopUserAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for principal in workspacePrincipals: {
+  name: guid(desktopAppGroup.id, principal.id, desktopUserRoleId)
+  scope: desktopAppGroup
+  properties: {
+    principalId: principal.id
+    principalType: principal.type
+    roleDefinitionId: desktopUserRoleId
+  }
+}]
 
 resource workspace 'Microsoft.DesktopVirtualization/workspaces@2024-11-01-preview' = {
   name: '${hostPoolName}-workspace'
@@ -164,6 +179,7 @@ resource vmSessionHost 'Microsoft.Compute/virtualMachines@2024-11-01' = [
   for (name, i) in vmNames: {
     name: name
     location: location
+    tags: tags
     identity: {
       type: 'SystemAssigned'
     }
@@ -217,6 +233,16 @@ resource vmSessionHost 'Microsoft.Compute/virtualMachines@2024-11-01' = [
     ]
   }
 ]
+
+resource vmUserLoginAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for index in range(0, sessionHostCount * length(workspacePrincipals)): {
+  name: guid(vmSessionHost[index / length(workspacePrincipals)].id, workspacePrincipals[index % length(workspacePrincipals)].id, vmUserLoginRoleId)
+  scope: vmSessionHost[index / length(workspacePrincipals)]
+  properties: {
+    principalId: workspacePrincipals[index % length(workspacePrincipals)].id
+    principalType: workspacePrincipals[index % length(workspacePrincipals)].type
+    roleDefinitionId: vmUserLoginRoleId
+  }
+}]
 
 resource entraloginExtension 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' = [
   for (name, i) in vmNames: {
@@ -278,27 +304,5 @@ resource avdDscExtension 'Microsoft.Compute/virtualMachines/extensions@2024-11-0
   }
 ]
 
-resource linuxBrokerConfig 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' = [
-  for (name, i) in vmNames: {
-    name: '${name}/CustomScriptExtension'
-    location: location
-    properties: {
-      publisher: 'Microsoft.Compute'
-      type: 'CustomScriptExtension'
-      typeHandlerVersion: '1.10'
-      autoUpgradeMinorVersion: true
-      settings: {
-        fileUris: array(linuxBrokerConfigScriptUri)
-      }
-      protectedSettings: {
-        commandToExecute: 'powershell -ExecutionPolicy Unrestricted -File Configure-AVD-Host.ps1 -LinuxBrokerApiBaseUrl "${linuxBrokerApiBaseUrl}"'
-      }
-    }
-    dependsOn: [
-      hostPoolRegistrationToken
-      vmSessionHost[i]
-      entraloginExtension[i]
-      avdDscExtension[i]
-    ]
-  }
-]
+// Post-Provision.ps1 builds/stages the verified native bundle before installing it on these hosts.
+output applicationGroupId string = desktopAppGroup.id

@@ -9,15 +9,9 @@ import { SelectField } from '../../components/ui/Field';
 import { useToast } from '../../components/ui/Toast';
 import { useUpdateVmAttributes, useVm } from '../../hooks/useBroker';
 import { errorMessage } from '../../lib/api';
-import { NETWORK_STATUSES, POWER_STATES } from '../../types/broker';
+import { canUpdateAttributes } from '../../lib/vmLifecycle';
+import { NETWORK_STATUSES, POWER_STATES, UNASSIGNED_VM_STATUSES } from '../../types/broker';
 import type { VmAttributesInput } from '../../types/broker';
-
-const VM_STATUS_OPTIONS = [
-  { value: 'Available', label: 'Available' },
-  { value: 'CheckedOut', label: 'Checked out' },
-  { value: 'Maintenance', label: 'Maintenance' },
-  { value: 'Released', label: 'Released' },
-];
 
 export function UpdateVmAttributes() {
   const { vmid = '' } = useParams<{ vmid: string }>();
@@ -53,6 +47,16 @@ export function UpdateVmAttributes() {
             Back to list
           </ButtonLink>
         }
+      />
+    );
+  }
+
+  if (!canUpdateAttributes(vm)) {
+    return (
+      <ErrorPanel
+        title="VM attributes cannot be edited"
+        message="Only unassigned hosts in Available or Maintenance can be edited. Return the current lease and wait for cleanup to finish before changing host attributes."
+        action={<ButtonLink to={`/vms/${vm.VMID}`}>Back to VM</ButtonLink>}
       />
     );
   }
@@ -110,8 +114,8 @@ export function UpdateVmAttributes() {
             <SelectField
               label="VM status"
               value={form.vmstatus}
-              options={VM_STATUS_OPTIONS}
-              help="Only Available hosts are offered for checkout."
+              options={UNASSIGNED_VM_STATUSES.map((value) => ({ value, label: value }))}
+              help="Only unassigned hosts can be edited. Use the guarded return action to end a lease."
               onChange={(event) => set('vmstatus', event.target.value)}
             />
           </div>
