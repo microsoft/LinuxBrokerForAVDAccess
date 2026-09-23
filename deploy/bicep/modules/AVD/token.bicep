@@ -6,6 +6,8 @@ param hostPoolType string
 param loadBalancerType string
 param preferredAppGroupType string
 param maxSessionLimit int
+@description('RDP properties to preserve. This module re-PUTs the host pool, so any property it omits is reset.')
+param customRdpProperty string = ''
 param startVMOnConnect bool
 param validationEnvironment bool
 param agentUpdate object
@@ -25,6 +27,7 @@ resource hostPoolTokenUpdate 'Microsoft.DesktopVirtualization/hostPools@2024-04-
     loadBalancerType: loadBalancerType
     preferredAppGroupType: preferredAppGroupType
     maxSessionLimit: maxSessionLimit
+    customRdpProperty: customRdpProperty
     startVMOnConnect: startVMOnConnect
     validationEnvironment: validationEnvironment
     agentUpdate: agentUpdate

@@ -32,7 +32,7 @@ from config import *
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.159'
+app.config['VERSION'] = '0.162'
 
 # Backs is_member_of_group_cached, which keeps token validation off the Graph API on
 # every request.
@@ -41,6 +41,11 @@ cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 REMOTE_CREATE_USER_SCRIPT = '/usr/local/bin/create-user.sh'
 REMOTE_MANAGE_LEASE_SCRIPT = '/usr/local/bin/manage-lease.sh'
 REMOTE_APPLY_SETTINGS_SCRIPT = '/usr/local/bin/apply-host-settings.sh'
+
+# Output markers shared with linux_host/manage-lease.sh and the delete command below.
+LEASE_ACTION_CLEARED = '__LEASE_ACTION=cleared__'
+LEASE_ACTION_CLEARED_IN_USE = '__LEASE_ACTION=cleared-in-use__'
+HOME_STILL_MOUNTED_MARKER = '__HOME_STILL_MOUNTED__'
 
 # ===============================
 # Logging Configuration
@@ -102,11 +107,19 @@ def refresh_db_password(interval=3600):
         time.sleep(interval)
         retrieve_db_password_from_key_vault()
 
+def normalize_private_key(value: str) -> str:
+    # The deployment hooks store the key with escaped newlines and trim the trailing one, and
+    # OpenSSH refuses to load a private key that does not end in a newline.
+    pem_key = value.replace('\\n', '\n').replace('\\', '').replace('\r', '')
+    if not pem_key.endswith('\n'):
+        pem_key += '\n'
+    return pem_key
+
 def retrieve_pem_key_from_key_vault(vault_url, key_name):
     credential = DefaultAzureCredential()
     secret_client = SecretClient(vault_url=vault_url, credential=credential)
     secret = secret_client.get_secret(key_name)
-    pem_key = secret.value.replace('\\n', '\n').replace('\\', '')
+    pem_key = normalize_private_key(secret.value)
     pem_file_path = '/tmp/private_key.pem'
     required_permissions = 0o600
 
@@ -524,35 +537,55 @@ def delete_remote_user(hostname: str, username: str, lease_id: str = None) -> bo
 
     try:
         quoted_username = shlex.quote(username)
-        missing_user_message = shlex.quote(f"User {username} does not exist")
-        delete_user_command = f"sudo userdel -r {quoted_username} 2>/dev/null || echo {missing_user_message}"
 
+        # manage-lease.sh unmounts the NFS-backed home before it clears the lease, so it runs
+        # first on both paths. userdel -r then removes only the empty local mount point, not
+        # the profile on the share.
         if normalized_lease_id:
             clear_lease_command = "sudo {script} clear {username} {lease_id}".format(
                 script=REMOTE_MANAGE_LEASE_SCRIPT,
                 username=quoted_username,
                 lease_id=shlex.quote(normalized_lease_id)
             )
-
-            result, host_fqdn = run_remote_command(hostname, clear_lease_command)
-            if result.returncode != 0:
-                logger.error("Failed to evaluate lease for user '%s' on VM '%s'. Error: %s", username, host_fqdn, result.stderr)
-                return False
-
-            if '__LEASE_ACTION=cleared__' not in result.stdout:
-                logger.info("Skipped deleting user '%s' on VM '%s' because the lease no longer matches.", username, hostname)
-                return True
         else:
-            clear_lease_command = "sudo {script} clear-any {username} >/dev/null 2>&1 || true".format(
+            clear_lease_command = "sudo {script} clear-any {username}".format(
                 script=REMOTE_MANAGE_LEASE_SCRIPT,
                 username=quoted_username
             )
-            delete_user_command = f"{delete_user_command}; {clear_lease_command}"
+
+        result, host_fqdn = run_remote_command(hostname, clear_lease_command)
+        if result.returncode != 0:
+            logger.error("Failed to clear the lease for user '%s' on VM '%s'. Error: %s", username, host_fqdn, result.stderr)
+            return False
+
+        if LEASE_ACTION_CLEARED_IN_USE in result.stdout:
+            logger.warning("User '%s' is still signed in to VM '%s', so the account was left in place.", username, hostname)
+            return False
+
+        if LEASE_ACTION_CLEARED not in result.stdout:
+            logger.info("Skipped deleting user '%s' on VM '%s' because the lease no longer matches.", username, hostname)
+            return True
+
+        # A host whose manage-lease.sh predates the unmount can still have the home mounted.
+        # Refuse rather than let userdel -r delete the profile on the share.
+        home_directory = shlex.quote(f"/home/{username}")
+        missing_user_message = shlex.quote(f"User {username} does not exist")
+        delete_user_command = (
+            f"if mountpoint -q {home_directory}; then echo {HOME_STILL_MOUNTED_MARKER}; exit 1; fi; "
+            f"sudo userdel -r {quoted_username} 2>/dev/null || echo {missing_user_message}"
+        )
 
         result, host_fqdn = run_remote_command(hostname, delete_user_command)
 
         if result.returncode != 0:
-            logger.error("Failed to delete user '%s' on VM '%s'. Error: %s", username, host_fqdn, result.stderr)
+            if HOME_STILL_MOUNTED_MARKER in (result.stdout or ''):
+                logger.error(
+                    "Skipped deleting user '%s' on VM '%s' because its home directory is still mounted. "
+                    "Update the host scripts with deploy/Migrate-LinuxHostReleaseAgent.ps1.",
+                    username, host_fqdn
+                )
+            else:
+                logger.error("Failed to delete user '%s' on VM '%s'. Error: %s", username, host_fqdn, result.stderr)
             return False
 
         return True
@@ -966,6 +999,10 @@ def checkout_vm():
             return error_response("No hostname or LeaseId found for the checked-out VM.", 500)
 
         if not create_or_update_remote_user(vm_hostname, username, user_password, lease_id):
+            # create-user.sh may already have written the lease, and the host keeps the NFS
+            # home mounted for as long as the lease exists. Clean up before the VM can be
+            # handed to someone else.
+            delete_remote_user(vm_hostname, username, lease_id)
             release_vm_assignment(checked_out_vm.get("VMID"), lease_id)
             return error_response(f"Failed to create or update user '{username}' on VM '{vm_hostname}'.", 500)
         

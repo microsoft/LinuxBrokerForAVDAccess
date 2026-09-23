@@ -58,7 +58,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 ## User Workflow
 
 1. **User Logs into AVD**: The user accesses the AVD web client or any supported client.
-2. **Selects Linux Host Connection**: The user selects a desktop icon for full RDP session or an application for xpra session.
+2. **Selects Linux Host Connection**: The user opens the **Linux Desktop** RemoteApp, which the `azd` deployment publishes, for a full RDP session to a Linux host.
 3. **Broker Agent Initiates Connection**:
    - The Broker Agent script (`Connect-LinuxBroker.ps1`) connects to the Broker API using the AVD host's managed identity.
    - It checks out an available Linux VM for the user.

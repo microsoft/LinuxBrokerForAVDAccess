@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "18215410845754632442"
+      "templateHash": "6702220923033346297"
     }
   },
   "parameters": {
@@ -122,14 +122,36 @@
       "type": "string",
       "defaultValue": "",
       "metadata": {
-        "description": "Optional custom domain used by Linux hosts."
+        "description": "Optional custom domain used by Linux hosts. When empty, hosts register into the private DNS zone linuxbroker.internal and the broker uses that zone."
       }
     },
     "nfsShare": {
       "type": "string",
       "defaultValue": "",
       "metadata": {
-        "description": "Optional NFS share used by Linux hosts."
+        "description": "Optional NFS share used by Linux hosts. When empty and deployNfsShare is true, a Premium Azure Files NFS share is provisioned."
+      }
+    },
+    "deployNfsShare": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Provision a Premium Azure Files NFS share for Linux home directories when nfsShare is empty and Linux hosts are deployed."
+      }
+    },
+    "nfsShareQuotaGiB": {
+      "type": "int",
+      "defaultValue": 100,
+      "minValue": 100,
+      "metadata": {
+        "description": "Provisioned size of the NFS share in GiB. Premium file shares have a 100 GiB minimum."
+      }
+    },
+    "avdUsersGroupId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Object ID of the Entra group whose members can launch the Linux Desktop RemoteApp. Leave empty to assign access manually."
       }
     },
     "linuxHostAdminLoginName": {
@@ -414,6 +436,15 @@
           "nfsShare": {
             "value": "[parameters('nfsShare')]"
           },
+          "deployNfsShare": {
+            "value": "[parameters('deployNfsShare')]"
+          },
+          "nfsShareQuotaGiB": {
+            "value": "[parameters('nfsShareQuotaGiB')]"
+          },
+          "avdUsersGroupId": {
+            "value": "[parameters('avdUsersGroupId')]"
+          },
           "linuxHostAdminLoginName": {
             "value": "[parameters('linuxHostAdminLoginName')]"
           },
@@ -500,7 +531,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "8583720927426092955"
+              "templateHash": "2311462574901901206"
             }
           },
           "parameters": {
@@ -564,6 +595,28 @@
             "nfsShare": {
               "type": "string",
               "defaultValue": ""
+            },
+            "deployNfsShare": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Provision a Premium Azure Files NFS share for Linux home directories when nfsShare is empty."
+              }
+            },
+            "nfsShareQuotaGiB": {
+              "type": "int",
+              "defaultValue": 100,
+              "minValue": 100,
+              "metadata": {
+                "description": "Provisioned size of the NFS share in GiB. Premium file shares have a 100 GiB minimum."
+              }
+            },
+            "avdUsersGroupId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Object ID of the Entra group whose members can launch the Linux Desktop RemoteApp. Leave empty to assign access manually."
+              }
             },
             "linuxHostAdminLoginName": {
               "type": "string",
@@ -741,8 +794,15 @@
             "effectiveVmResourceGroup": "[if(empty(parameters('vmHostResourceGroup')), resourceGroup().name, parameters('vmHostResourceGroup'))]",
             "keyVaultSecretsUserRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
             "acrPullRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+            "vmPowerRoleDefinitionGuid": "40c5ff49-9181-41f8-ae61-143b0e78555e",
             "databasePasswordSecretName": "db-password",
             "linuxHostPrivateKeySecretName": "linux-host",
+            "hostDnsZoneName": "linuxbroker.internal",
+            "effectiveDomainName": "[if(empty(parameters('domainName')), variables('hostDnsZoneName'), parameters('domainName'))]",
+            "provisionNfsShare": "[and(and(and(parameters('deployNfsShare'), empty(parameters('nfsShare'))), parameters('deployLinuxHosts')), greater(parameters('linuxHostCount'), 0))]",
+            "nfsStorageAccountName": "[take(format('nfs{0}{1}', variables('sanitizedApp'), variables('suffix')), 24)]",
+            "nfsShareName": "home",
+            "effectiveNfsShare": "[if(variables('provisionNfsShare'), format('{0}.file.{1}:/{2}/{3}', variables('nfsStorageAccountName'), environment().suffixes.storage, variables('nfsStorageAccountName'), variables('nfsShareName')), parameters('nfsShare'))]",
             "cloudProfiles": {
               "AzurePublic": {
                 "graphEndpoint": "https://graph.microsoft.com",
@@ -950,6 +1010,12 @@
                   },
                   "privateEndpointSubnetName": {
                     "value": "[variables('privateEndpointSubnetName')]"
+                  },
+                  "createHostDnsZone": {
+                    "value": "[empty(parameters('domainName'))]"
+                  },
+                  "hostDnsZoneName": {
+                    "value": "[variables('hostDnsZoneName')]"
                   }
                 },
                 "template": {
@@ -959,7 +1025,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "14934542853432924784"
+                      "templateHash": "2428013649856032888"
                     }
                   },
                   "parameters": {
@@ -989,6 +1055,20 @@
                     "privateEndpointSubnetName": {
                       "type": "string",
                       "defaultValue": "snet-private-endpoints"
+                    },
+                    "createHostDnsZone": {
+                      "type": "bool",
+                      "defaultValue": true,
+                      "metadata": {
+                        "description": "Create a private DNS zone that every VM in the virtual network registers into automatically."
+                      }
+                    },
+                    "hostDnsZoneName": {
+                      "type": "string",
+                      "defaultValue": "linuxbroker.internal",
+                      "metadata": {
+                        "description": "Name of the private DNS zone the hosts register into. The broker API connects to Linux hosts as <hostname>.<zone>."
+                      }
                     }
                   },
                   "resources": [
@@ -1061,6 +1141,32 @@
                         "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('avdSubnetName'))]",
                         "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
                       ]
+                    },
+                    {
+                      "condition": "[parameters('createHostDnsZone')]",
+                      "type": "Microsoft.Network/privateDnsZones",
+                      "apiVersion": "2024-06-01",
+                      "name": "[parameters('hostDnsZoneName')]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]"
+                    },
+                    {
+                      "condition": "[parameters('createHostDnsZone')]",
+                      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+                      "apiVersion": "2024-06-01",
+                      "name": "[format('{0}/{1}', parameters('hostDnsZoneName'), format('link-{0}', parameters('vnetName')))]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "registrationEnabled": true,
+                        "virtualNetwork": {
+                          "id": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Network/privateDnsZones', parameters('hostDnsZoneName'))]",
+                        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+                      ]
                     }
                   ],
                   "outputs": {
@@ -1071,6 +1177,10 @@
                     "vnetId": {
                       "type": "string",
                       "value": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+                    },
+                    "hostDnsZoneName": {
+                      "type": "string",
+                      "value": "[if(parameters('createHostDnsZone'), parameters('hostDnsZoneName'), '')]"
                     },
                     "appSubnetName": {
                       "type": "string",
@@ -1107,6 +1217,230 @@
                   }
                 }
               }
+            },
+            {
+              "condition": "[variables('provisionNfsShare')]",
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
+              "name": "nfsStorage",
+              "properties": {
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "location": {
+                    "value": "[parameters('location')]"
+                  },
+                  "tags": {
+                    "value": "[parameters('tags')]"
+                  },
+                  "storageAccountName": {
+                    "value": "[variables('nfsStorageAccountName')]"
+                  },
+                  "shareName": {
+                    "value": "[variables('nfsShareName')]"
+                  },
+                  "shareQuotaGiB": {
+                    "value": "[parameters('nfsShareQuotaGiB')]"
+                  },
+                  "virtualNetworkId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.vnetId.value]"
+                  },
+                  "privateEndpointSubnetId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.privateEndpointSubnetId.value]"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "5316144026629540858"
+                    }
+                  },
+                  "parameters": {
+                    "storageAccountName": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 24,
+                      "metadata": {
+                        "description": "Name of the premium FileStorage account that hosts the NFS share."
+                      }
+                    },
+                    "location": {
+                      "type": "string",
+                      "defaultValue": "[resourceGroup().location]"
+                    },
+                    "tags": {
+                      "type": "object",
+                      "defaultValue": {}
+                    },
+                    "shareName": {
+                      "type": "string",
+                      "defaultValue": "home",
+                      "metadata": {
+                        "description": "Name of the NFS share that holds user home directories."
+                      }
+                    },
+                    "shareQuotaGiB": {
+                      "type": "int",
+                      "defaultValue": 100,
+                      "minValue": 100,
+                      "metadata": {
+                        "description": "Provisioned size of the share in GiB. Premium file shares have a 100 GiB minimum."
+                      }
+                    },
+                    "virtualNetworkId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Virtual network the Linux hosts mount the share from."
+                      }
+                    },
+                    "privateEndpointSubnetId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Subnet the storage private endpoint is placed in."
+                      }
+                    }
+                  },
+                  "variables": {
+                    "privateDnsZoneName": "[format('privatelink.file.{0}', environment().suffixes.storage)]"
+                  },
+                  "resources": [
+                    {
+                      "type": "Microsoft.Storage/storageAccounts",
+                      "apiVersion": "2023-05-01",
+                      "name": "[parameters('storageAccountName')]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "kind": "FileStorage",
+                      "sku": {
+                        "name": "Premium_LRS"
+                      },
+                      "properties": {
+                        "supportsHttpsTrafficOnly": false,
+                        "minimumTlsVersion": "TLS1_2",
+                        "allowBlobPublicAccess": false,
+                        "allowSharedKeyAccess": false,
+                        "publicNetworkAccess": "Disabled",
+                        "networkAcls": {
+                          "bypass": "AzureServices",
+                          "defaultAction": "Deny"
+                        }
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Storage/storageAccounts/fileServices",
+                      "apiVersion": "2023-05-01",
+                      "name": "[format('{0}/{1}', parameters('storageAccountName'), 'default')]",
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+                      "apiVersion": "2023-05-01",
+                      "name": "[format('{0}/{1}/{2}', parameters('storageAccountName'), 'default', parameters('shareName'))]",
+                      "properties": {
+                        "enabledProtocols": "NFS",
+                        "rootSquash": "NoRootSquash",
+                        "shareQuota": "[parameters('shareQuotaGiB')]"
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Storage/storageAccounts/fileServices', parameters('storageAccountName'), 'default')]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Network/privateEndpoints",
+                      "apiVersion": "2024-05-01",
+                      "name": "[format('pe-{0}-file', parameters('storageAccountName'))]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "subnet": {
+                          "id": "[parameters('privateEndpointSubnetId')]"
+                        },
+                        "privateLinkServiceConnections": [
+                          {
+                            "name": "file",
+                            "properties": {
+                              "privateLinkServiceId": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+                              "groupIds": [
+                                "file"
+                              ]
+                            }
+                          }
+                        ]
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Network/privateDnsZones",
+                      "apiVersion": "2024-06-01",
+                      "name": "[variables('privateDnsZoneName')]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]"
+                    },
+                    {
+                      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+                      "apiVersion": "2024-06-01",
+                      "name": "[format('{0}/{1}', variables('privateDnsZoneName'), format('link-{0}', last(split(parameters('virtualNetworkId'), '/'))))]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "registrationEnabled": false,
+                        "virtualNetwork": {
+                          "id": "[parameters('virtualNetworkId')]"
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneName'))]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+                      "apiVersion": "2024-05-01",
+                      "name": "[format('{0}/{1}', format('pe-{0}-file', parameters('storageAccountName')), 'default')]",
+                      "properties": {
+                        "privateDnsZoneConfigs": [
+                          {
+                            "name": "file",
+                            "properties": {
+                              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneName'))]"
+                            }
+                          }
+                        ]
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneName'))]",
+                        "[resourceId('Microsoft.Network/privateEndpoints', format('pe-{0}-file', parameters('storageAccountName')))]"
+                      ]
+                    }
+                  ],
+                  "outputs": {
+                    "storageAccountName": {
+                      "type": "string",
+                      "value": "[parameters('storageAccountName')]"
+                    },
+                    "shareName": {
+                      "type": "string",
+                      "value": "[parameters('shareName')]"
+                    },
+                    "nfsSharePath": {
+                      "type": "string",
+                      "value": "[format('{0}.file.{1}:/{2}/{3}', parameters('storageAccountName'), environment().suffixes.storage, parameters('storageAccountName'), parameters('shareName'))]"
+                    }
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Resources/deployments', 'networking')]"
+              ]
             },
             {
               "type": "Microsoft.Resources/deployments",
@@ -1753,7 +2087,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "4486542650804701912"
+                      "templateHash": "8972138919102563065"
                     }
                   },
                   "parameters": {
@@ -1799,6 +2133,13 @@
                     "useManagedIdentityForRegistry": {
                       "type": "bool",
                       "defaultValue": true
+                    },
+                    "virtualNetworkSubnetId": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Delegated subnet for regional VNet integration. Leave empty to keep the app off the virtual network."
+                      }
                     }
                   },
                   "variables": {
@@ -1818,6 +2159,7 @@
                       "properties": {
                         "serverFarmId": "[parameters('serverFarmId')]",
                         "httpsOnly": true,
+                        "virtualNetworkSubnetId": "[if(empty(parameters('virtualNetworkSubnetId')), null(), parameters('virtualNetworkSubnetId'))]",
                         "siteConfig": "[variables('webSiteConfig')]"
                       }
                     },
@@ -1937,14 +2279,14 @@
                       "DB_PASSWORD_NAME": "[variables('databasePasswordSecretName')]",
                       "DB_SERVER": "[reference(resourceId('Microsoft.Resources/deployments', 'sql'), '2025-04-01').outputs.sqlServerFullyQualifiedDomainName.value]",
                       "DB_USERNAME": "[parameters('sqlAdminLogin')]",
-                      "DOMAIN_NAME": "[parameters('domainName')]",
+                      "DOMAIN_NAME": "[variables('effectiveDomainName')]",
                       "GRAPH_API_ENDPOINT": "[format('{0}/.default', variables('resolvedGraphEndpoint'))]",
                       "GRAPH_ENDPOINT": "[variables('resolvedGraphEndpoint')]",
                       "KEY_NAME": "[variables('linuxHostPrivateKeySecretName')]",
                       "LINUX_HOST_ADMIN_LOGIN_NAME": "[parameters('linuxHostAdminLoginName')]",
                       "LINUX_HOST_GROUP_ID": "[parameters('linuxHostGroupId')]",
                       "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "[parameters('apiClientSecret')]",
-                      "NFS_SHARE": "[parameters('nfsShare')]",
+                      "NFS_SHARE": "[variables('effectiveNfsShare')]",
                       "OTEL_SERVICE_NAME": "[variables('apiAppName')]",
                       "SCM_DO_BUILD_DURING_DEPLOYMENT": "false",
                       "STS_ISSUER_HOST": "[variables('resolvedStsIssuerHost')]",
@@ -1965,6 +2307,9 @@
                   },
                   "useManagedIdentityForRegistry": {
                     "value": true
+                  },
+                  "virtualNetworkSubnetId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.appSubnetId.value]"
                   }
                 },
                 "template": {
@@ -1974,7 +2319,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "4486542650804701912"
+                      "templateHash": "8972138919102563065"
                     }
                   },
                   "parameters": {
@@ -2020,6 +2365,13 @@
                     "useManagedIdentityForRegistry": {
                       "type": "bool",
                       "defaultValue": true
+                    },
+                    "virtualNetworkSubnetId": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Delegated subnet for regional VNet integration. Leave empty to keep the app off the virtual network."
+                      }
                     }
                   },
                   "variables": {
@@ -2039,6 +2391,7 @@
                       "properties": {
                         "serverFarmId": "[parameters('serverFarmId')]",
                         "httpsOnly": true,
+                        "virtualNetworkSubnetId": "[if(empty(parameters('virtualNetworkSubnetId')), null(), parameters('virtualNetworkSubnetId'))]",
                         "siteConfig": "[variables('webSiteConfig')]"
                       }
                     },
@@ -2115,6 +2468,7 @@
                 "[resourceId('Microsoft.Resources/deployments', 'appServicePlan')]",
                 "[resourceId('Microsoft.Resources/deployments', 'containerRegistry')]",
                 "[resourceId('Microsoft.Resources/deployments', 'keyVault')]",
+                "[resourceId('Microsoft.Resources/deployments', 'networking')]",
                 "[resourceId('Microsoft.Resources/deployments', 'observability')]",
                 "[resourceId('Microsoft.Resources/deployments', 'sql')]"
               ]
@@ -2158,6 +2512,9 @@
                   },
                   "useManagedIdentityForRegistry": {
                     "value": true
+                  },
+                  "virtualNetworkSubnetId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.appSubnetId.value]"
                   }
                 },
                 "template": {
@@ -2167,7 +2524,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "9382984199753345417"
+                      "templateHash": "8923775579275792284"
                     }
                   },
                   "parameters": {
@@ -2204,6 +2561,13 @@
                     "useManagedIdentityForRegistry": {
                       "type": "bool",
                       "defaultValue": true
+                    },
+                    "virtualNetworkSubnetId": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Delegated subnet for regional VNet integration. Leave empty to keep the app off the virtual network."
+                      }
                     }
                   },
                   "resources": [
@@ -2220,6 +2584,7 @@
                       "properties": {
                         "serverFarmId": "[parameters('serverFarmId')]",
                         "httpsOnly": true,
+                        "virtualNetworkSubnetId": "[if(empty(parameters('virtualNetworkSubnetId')), null(), parameters('virtualNetworkSubnetId'))]",
                         "siteConfig": {
                           "acrUseManagedIdentityCreds": "[parameters('useManagedIdentityForRegistry')]",
                           "alwaysOn": true,
@@ -2263,8 +2628,84 @@
               "dependsOn": [
                 "[resourceId('Microsoft.Resources/deployments', 'appServicePlan')]",
                 "[resourceId('Microsoft.Resources/deployments', 'containerRegistry')]",
+                "[resourceId('Microsoft.Resources/deployments', 'networking')]",
                 "[resourceId('Microsoft.Resources/deployments', 'observability')]",
                 "[resourceId('Microsoft.Resources/deployments', 'storageAccount')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
+              "name": "apiVmPowerRole",
+              "subscriptionId": "[parameters('vmSubscriptionId')]",
+              "resourceGroup": "[variables('effectiveVmResourceGroup')]",
+              "properties": {
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "principalId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2025-04-01').outputs.principalId.value]"
+                  },
+                  "roleDefinitionGuid": {
+                    "value": "[variables('vmPowerRoleDefinitionGuid')]"
+                  },
+                  "principalType": {
+                    "value": "ServicePrincipal"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "12274979140044826021"
+                    }
+                  },
+                  "parameters": {
+                    "principalId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Object ID of the principal that receives the role."
+                      }
+                    },
+                    "roleDefinitionGuid": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "GUID of the built-in or custom role definition to assign."
+                      }
+                    },
+                    "principalType": {
+                      "type": "string",
+                      "defaultValue": "ServicePrincipal",
+                      "allowedValues": [
+                        "Device",
+                        "ForeignGroup",
+                        "Group",
+                        "ServicePrincipal",
+                        "User"
+                      ]
+                    }
+                  },
+                  "resources": [
+                    {
+                      "type": "Microsoft.Authorization/roleAssignments",
+                      "apiVersion": "2022-04-01",
+                      "name": "[guid(resourceGroup().id, parameters('principalId'), parameters('roleDefinitionGuid'))]",
+                      "properties": {
+                        "principalId": "[parameters('principalId')]",
+                        "principalType": "[parameters('principalType')]",
+                        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', parameters('roleDefinitionGuid'))]"
+                      }
+                    }
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Resources/deployments', 'apiApp')]"
               ]
             },
             {
@@ -2337,7 +2778,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "17206168761019900085"
+                      "templateHash": "15055457811505930858"
                     }
                   },
                   "parameters": {
@@ -2434,7 +2875,7 @@
                         "image": {
                           "publisher": "RedHat",
                           "offer": "RHEL",
-                          "sku": "7-LVM",
+                          "sku": "7lvm-gen2",
                           "version": "latest"
                         },
                         "script": {
@@ -2446,7 +2887,7 @@
                         "image": {
                           "publisher": "RedHat",
                           "offer": "RHEL",
-                          "sku": "8-LVM",
+                          "sku": "8-lvm-gen2",
                           "version": "latest"
                         },
                         "script": {
@@ -2458,7 +2899,7 @@
                         "image": {
                           "publisher": "RedHat",
                           "offer": "RHEL",
-                          "sku": "9-LVM",
+                          "sku": "9-lvm-gen2",
                           "version": "latest"
                         },
                         "script": {
@@ -2633,6 +3074,15 @@
                   },
                   "linuxBrokerApiBaseUrl": {
                     "value": "[variables('frontendApiBaseUrl')]"
+                  },
+                  "linuxBrokerApiClientId": {
+                    "value": "[parameters('apiClientId')]"
+                  },
+                  "scriptSourceRoot": {
+                    "value": "[parameters('scriptSourceRoot')]"
+                  },
+                  "avdUsersGroupId": {
+                    "value": "[parameters('avdUsersGroupId')]"
                   }
                 },
                 "template": {
@@ -2642,7 +3092,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "5588312421727355350"
+                      "templateHash": "16448105144039973911"
                     }
                   },
                   "parameters": {
@@ -2676,7 +3126,17 @@
                     },
                     "preferredAppGroupType": {
                       "type": "string",
-                      "defaultValue": "Desktop"
+                      "defaultValue": "RailApplications",
+                      "metadata": {
+                        "description": "App group type the host pool prefers. Users who are assigned to both app groups only see this type."
+                      }
+                    },
+                    "customRdpProperty": {
+                      "type": "string",
+                      "defaultValue": "enablerdsaadauth:i:1;enablecredsspsupport:i:1;redirectclipboard:i:1;audiomode:i:0;redirectwebauthn:i:1;",
+                      "metadata": {
+                        "description": "RDP properties for the host pool. The defaults enable Microsoft Entra single sign-on to the Entra joined session hosts."
+                      }
                     },
                     "sessionHostCount": {
                       "type": "int"
@@ -2749,11 +3209,31 @@
                         "description": "Base URL for the AVD Linux Broker API"
                       }
                     },
-                    "linuxBrokerConfigScriptUri": {
+                    "linuxBrokerApiClientId": {
                       "type": "string",
-                      "defaultValue": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-AVD-Host.ps1",
                       "metadata": {
-                        "description": "URI for the AVD Linux Broker configuration script"
+                        "description": "Client ID of the Linux Broker API app registration. Session hosts request tokens for api://<client-id>."
+                      }
+                    },
+                    "scriptSourceRoot": {
+                      "type": "string",
+                      "defaultValue": "https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main",
+                      "metadata": {
+                        "description": "Root URL the AVD host configuration scripts are downloaded from. The repository layout must be preserved."
+                      }
+                    },
+                    "avdUsersGroupId": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Object ID of the Entra group whose members can launch the Linux Desktop RemoteApp. Leave empty to assign access manually."
+                      }
+                    },
+                    "remoteAppFriendlyName": {
+                      "type": "string",
+                      "defaultValue": "Linux Desktop",
+                      "metadata": {
+                        "description": "Display name of the RemoteApp that connects users to a Linux host."
                       }
                     }
                   },
@@ -2765,6 +3245,10 @@
                         "input": "[format('{0}-{1}', parameters('vmNamePrefix'), padLeft(range(1, parameters('sessionHostCount'))[copyIndex('vmNames')], 2, '0'))]"
                       }
                     ],
+                    "normalizedScriptSourceRoot": "[if(endsWith(parameters('scriptSourceRoot'), '/'), take(parameters('scriptSourceRoot'), sub(length(parameters('scriptSourceRoot')), 1)), parameters('scriptSourceRoot'))]",
+                    "linuxBrokerConfigScriptUri": "[format('{0}/custom_script_extensions/Configure-AVD-Host.ps1', variables('normalizedScriptSourceRoot'))]",
+                    "desktopVirtualizationUserRoleId": "1d18fff3-a72a-46b5-b4a9-0b38a3cd7e63",
+                    "virtualMachineUserLoginRoleId": "fb879df8-f326-4884-b1cf-06f3ad86be52",
                     "osImage": "microsoftwindowsdesktop:Windows-11:win11-24h2-avd:latest",
                     "storageAccountName": "wvdportalstorageblob",
                     "containerName": "galleryartifacts",
@@ -2787,6 +3271,7 @@
                         "preferredAppGroupType": "[parameters('preferredAppGroupType')]",
                         "loadBalancerType": "[parameters('loadBalancerType')]",
                         "maxSessionLimit": "[parameters('maxSessionLimit')]",
+                        "customRdpProperty": "[parameters('customRdpProperty')]",
                         "startVMOnConnect": false,
                         "validationEnvironment": false,
                         "agentUpdate": "[parameters('agentUpdate')]",
@@ -2811,6 +3296,21 @@
                       ]
                     },
                     {
+                      "type": "Microsoft.DesktopVirtualization/applicationGroups",
+                      "apiVersion": "2024-04-03",
+                      "name": "[format('{0}-remoteAppGroup', parameters('hostPoolName'))]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "applicationGroupType": "RemoteApp",
+                        "friendlyName": "[parameters('remoteAppFriendlyName')]",
+                        "hostPoolArmPath": "[resourceId('Microsoft.DesktopVirtualization/hostPools', parameters('hostPoolName'))]"
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.DesktopVirtualization/hostPools', parameters('hostPoolName'))]"
+                      ]
+                    },
+                    {
                       "type": "Microsoft.DesktopVirtualization/workspaces",
                       "apiVersion": "2024-11-01-preview",
                       "name": "[format('{0}-workspace', parameters('hostPoolName'))]",
@@ -2819,11 +3319,28 @@
                       "properties": {
                         "friendlyName": "[format('{0} Workspace', parameters('friendlyName'))]",
                         "applicationGroupReferences": [
-                          "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-desktopAppGroup', parameters('hostPoolName')))]"
+                          "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-desktopAppGroup', parameters('hostPoolName')))]",
+                          "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-remoteAppGroup', parameters('hostPoolName')))]"
                         ]
                       },
                       "dependsOn": [
-                        "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-desktopAppGroup', parameters('hostPoolName')))]"
+                        "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-desktopAppGroup', parameters('hostPoolName')))]",
+                        "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-remoteAppGroup', parameters('hostPoolName')))]"
+                      ]
+                    },
+                    {
+                      "condition": "[not(empty(parameters('avdUsersGroupId')))]",
+                      "type": "Microsoft.Authorization/roleAssignments",
+                      "apiVersion": "2022-04-01",
+                      "scope": "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-remoteAppGroup', parameters('hostPoolName')))]",
+                      "name": "[guid(resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-remoteAppGroup', parameters('hostPoolName'))), parameters('avdUsersGroupId'), variables('desktopVirtualizationUserRoleId'))]",
+                      "properties": {
+                        "principalId": "[parameters('avdUsersGroupId')]",
+                        "principalType": "Group",
+                        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('desktopVirtualizationUserRoleId'))]"
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-remoteAppGroup', parameters('hostPoolName')))]"
                       ]
                     },
                     {
@@ -2835,6 +3352,7 @@
                       "apiVersion": "2024-05-01",
                       "name": "[format('{0}-nic', variables('vmNames')[copyIndex()])]",
                       "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
                       "properties": {
                         "ipConfigurations": [
                           {
@@ -2858,6 +3376,7 @@
                       "apiVersion": "2024-11-01",
                       "name": "[variables('vmNames')[copyIndex()]]",
                       "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
                       "identity": {
                         "type": "SystemAssigned"
                       },
@@ -2990,10 +3509,10 @@
                         "typeHandlerVersion": "1.10",
                         "autoUpgradeMinorVersion": true,
                         "settings": {
-                          "fileUris": "[array(parameters('linuxBrokerConfigScriptUri'))]"
+                          "fileUris": "[array(variables('linuxBrokerConfigScriptUri'))]"
                         },
                         "protectedSettings": {
-                          "commandToExecute": "[format('powershell -ExecutionPolicy Unrestricted -File Configure-AVD-Host.ps1 -LinuxBrokerApiBaseUrl \"{0}\"', parameters('linuxBrokerApiBaseUrl'))]"
+                          "commandToExecute": "[format('powershell -ExecutionPolicy Unrestricted -File Configure-AVD-Host.ps1 -LinuxBrokerApiBaseUrl \"{0}\" -LinuxBrokerApiClientId \"{1}\" -ScriptSourceRoot \"{2}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'), variables('normalizedScriptSourceRoot'))]"
                         }
                       },
                       "dependsOn": [
@@ -3001,6 +3520,46 @@
                         "[resourceId('Microsoft.Compute/virtualMachines/extensions', split(format('{0}/AADLoginForWindows', variables('vmNames')[copyIndex()]), '/')[0], split(format('{0}/AADLoginForWindows', variables('vmNames')[copyIndex()]), '/')[1])]",
                         "[resourceId('Microsoft.Resources/deployments', 'hostPoolRegistrationToken')]",
                         "[resourceId('Microsoft.Compute/virtualMachines', variables('vmNames')[copyIndex()])]"
+                      ]
+                    },
+                    {
+                      "copy": {
+                        "name": "sessionHostUserLogin",
+                        "count": "[length(variables('vmNames'))]"
+                      },
+                      "condition": "[not(empty(parameters('avdUsersGroupId')))]",
+                      "type": "Microsoft.Authorization/roleAssignments",
+                      "apiVersion": "2022-04-01",
+                      "scope": "[resourceId('Microsoft.Compute/virtualMachines', variables('vmNames')[copyIndex()])]",
+                      "name": "[guid(resourceId('Microsoft.Compute/virtualMachines', variables('vmNames')[copyIndex()]), parameters('avdUsersGroupId'), variables('virtualMachineUserLoginRoleId'))]",
+                      "properties": {
+                        "principalId": "[parameters('avdUsersGroupId')]",
+                        "principalType": "Group",
+                        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('virtualMachineUserLoginRoleId'))]"
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Compute/virtualMachines', variables('vmNames')[copyIndex()])]",
+                        "[resourceId('Microsoft.Compute/virtualMachines', variables('vmNames')[copyIndex()])]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.DesktopVirtualization/applicationGroups/applications",
+                      "apiVersion": "2024-04-03",
+                      "name": "[format('{0}/{1}', format('{0}-remoteAppGroup', parameters('hostPoolName')), 'LinuxDesktop')]",
+                      "properties": {
+                        "friendlyName": "[parameters('remoteAppFriendlyName')]",
+                        "description": "Checks out a Linux host from the Linux Broker and opens a remote desktop session to it.",
+                        "applicationType": "InBuilt",
+                        "filePath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                        "commandLineSetting": "Require",
+                        "commandLineArguments": "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\\Temp\\Connect-LinuxBroker.ps1",
+                        "iconPath": "C:\\Windows\\System32\\mstsc.exe",
+                        "iconIndex": 0,
+                        "showInPortal": true
+                      },
+                      "dependsOn": [
+                        "linuxBrokerConfig",
+                        "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-remoteAppGroup', parameters('hostPoolName')))]"
                       ]
                     },
                     {
@@ -3037,6 +3596,9 @@
                           "maxSessionLimit": {
                             "value": "[reference(resourceId('Microsoft.DesktopVirtualization/hostPools', parameters('hostPoolName')), '2024-04-03').maxSessionLimit]"
                           },
+                          "customRdpProperty": {
+                            "value": "[parameters('customRdpProperty')]"
+                          },
                           "startVMOnConnect": {
                             "value": "[reference(resourceId('Microsoft.DesktopVirtualization/hostPools', parameters('hostPoolName')), '2024-04-03').startVMOnConnect]"
                           },
@@ -3054,7 +3616,7 @@
                             "_generator": {
                               "name": "bicep",
                               "version": "0.44.1.10279",
-                              "templateHash": "2461663034710599677"
+                              "templateHash": "3999605586346123900"
                             }
                           },
                           "parameters": {
@@ -3083,6 +3645,13 @@
                             },
                             "maxSessionLimit": {
                               "type": "int"
+                            },
+                            "customRdpProperty": {
+                              "type": "string",
+                              "defaultValue": "",
+                              "metadata": {
+                                "description": "RDP properties to preserve. This module re-PUTs the host pool, so any property it omits is reset."
+                              }
                             },
                             "startVMOnConnect": {
                               "type": "bool"
@@ -3121,6 +3690,7 @@
                                 "loadBalancerType": "[parameters('loadBalancerType')]",
                                 "preferredAppGroupType": "[parameters('preferredAppGroupType')]",
                                 "maxSessionLimit": "[parameters('maxSessionLimit')]",
+                                "customRdpProperty": "[parameters('customRdpProperty')]",
                                 "startVMOnConnect": "[parameters('startVMOnConnect')]",
                                 "validationEnvironment": "[parameters('validationEnvironment')]",
                                 "agentUpdate": "[parameters('agentUpdate')]",
@@ -3142,10 +3712,29 @@
                       "dependsOn": [
                         "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-desktopAppGroup', parameters('hostPoolName')))]",
                         "[resourceId('Microsoft.DesktopVirtualization/hostPools', parameters('hostPoolName'))]",
+                        "[resourceId('Microsoft.DesktopVirtualization/applicationGroups', format('{0}-remoteAppGroup', parameters('hostPoolName')))]",
                         "[resourceId('Microsoft.DesktopVirtualization/workspaces', format('{0}-workspace', parameters('hostPoolName')))]"
                       ]
                     }
-                  ]
+                  ],
+                  "outputs": {
+                    "hostPoolName": {
+                      "type": "string",
+                      "value": "[parameters('hostPoolName')]"
+                    },
+                    "workspaceName": {
+                      "type": "string",
+                      "value": "[format('{0}-workspace', parameters('hostPoolName'))]"
+                    },
+                    "remoteAppGroupName": {
+                      "type": "string",
+                      "value": "[format('{0}-remoteAppGroup', parameters('hostPoolName'))]"
+                    },
+                    "desktopAppGroupName": {
+                      "type": "string",
+                      "value": "[format('{0}-desktopAppGroup', parameters('hostPoolName'))]"
+                    }
+                  }
                 }
               },
               "dependsOn": [
@@ -3193,6 +3782,14 @@
             "virtualNetworkName": {
               "type": "string",
               "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.vnetName.value]"
+            },
+            "linuxHostDomainName": {
+              "type": "string",
+              "value": "[variables('effectiveDomainName')]"
+            },
+            "nfsSharePath": {
+              "type": "string",
+              "value": "[variables('effectiveNfsShare')]"
             }
           }
         }
@@ -3246,6 +3843,14 @@
     "virtualNetworkName": {
       "type": "string",
       "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.virtualNetworkName.value]"
+    },
+    "linuxHostDomainName": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.linuxHostDomainName.value]"
+    },
+    "nfsSharePath": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.nfsSharePath.value]"
     }
   }
 }

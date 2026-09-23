@@ -23,6 +23,16 @@ param sqlAdminPassword string
 param flaskKey string
 param domainName string = ''
 param nfsShare string = ''
+
+@description('Provision a Premium Azure Files NFS share for Linux home directories when nfsShare is empty.')
+param deployNfsShare bool = true
+
+@description('Provisioned size of the NFS share in GiB. Premium file shares have a 100 GiB minimum.')
+@minValue(100)
+param nfsShareQuotaGiB int = 100
+
+@description('Object ID of the Entra group whose members can launch the Linux Desktop RemoteApp. Leave empty to assign access manually.')
+param avdUsersGroupId string = ''
 param linuxHostAdminLoginName string = 'avdadmin'
 @secure()
 param hostAdminPassword string
@@ -116,8 +126,17 @@ var privateEndpointSubnetName = 'snet-private-endpoints'
 var effectiveVmResourceGroup = empty(vmHostResourceGroup) ? resourceGroup().name : vmHostResourceGroup
 var keyVaultSecretsUserRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
 var acrPullRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+// Desktop Virtualization Power On Off Contributor: start, power off, and read VMs, without write or run command.
+var vmPowerRoleDefinitionGuid = '40c5ff49-9181-41f8-ae61-143b0e78555e'
 var databasePasswordSecretName = 'db-password'
 var linuxHostPrivateKeySecretName = 'linux-host'
+// When no domain is supplied, hosts register into a private DNS zone so the API can reach <hostname>.<zone>.
+var hostDnsZoneName = 'linuxbroker.internal'
+var effectiveDomainName = empty(domainName) ? hostDnsZoneName : domainName
+var provisionNfsShare = deployNfsShare && empty(nfsShare) && deployLinuxHosts && linuxHostCount > 0
+var nfsStorageAccountName = take('nfs${sanitizedApp}${suffix}', 24)
+var nfsShareName = 'home'
+var effectiveNfsShare = provisionNfsShare ? '${nfsStorageAccountName}.file.${environment().suffixes.storage}:/${nfsStorageAccountName}/${nfsShareName}' : nfsShare
 
 module networking 'modules/core/networking.bicep' = {
   name: 'networking'
@@ -129,6 +148,21 @@ module networking 'modules/core/networking.bicep' = {
     linuxSubnetName: linuxSubnetName
     avdSubnetName: avdSubnetName
     privateEndpointSubnetName: privateEndpointSubnetName
+    createHostDnsZone: empty(domainName)
+    hostDnsZoneName: hostDnsZoneName
+  }
+}
+
+module nfsStorage 'modules/core/nfs-storage.bicep' = if (provisionNfsShare) {
+  name: 'nfsStorage'
+  params: {
+    location: location
+    tags: tags
+    storageAccountName: nfsStorageAccountName
+    shareName: nfsShareName
+    shareQuotaGiB: nfsShareQuotaGiB
+    virtualNetworkId: networking.outputs.vnetId
+    privateEndpointSubnetId: networking.outputs.privateEndpointSubnetId
   }
 }
 
@@ -333,14 +367,14 @@ var apiSettings = {
   DB_PASSWORD_NAME: databasePasswordSecretName
   DB_SERVER: sql.outputs.sqlServerFullyQualifiedDomainName
   DB_USERNAME: sqlAdminLogin
-  DOMAIN_NAME: domainName
+  DOMAIN_NAME: effectiveDomainName
   GRAPH_API_ENDPOINT: '${resolvedGraphEndpoint}/.default'
   GRAPH_ENDPOINT: resolvedGraphEndpoint
   KEY_NAME: linuxHostPrivateKeySecretName
   LINUX_HOST_ADMIN_LOGIN_NAME: linuxHostAdminLoginName
   LINUX_HOST_GROUP_ID: linuxHostGroupId
   MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: apiClientSecret
-  NFS_SHARE: nfsShare
+  NFS_SHARE: effectiveNfsShare
   OTEL_SERVICE_NAME: apiAppName
   SCM_DO_BUILD_DURING_DEPLOYMENT: 'false'
   STS_ISSUER_HOST: resolvedStsIssuerHost
@@ -397,6 +431,8 @@ module apiApp 'modules/apps/container-web-app.bicep' = {
     healthCheckPath: '/health'
     alwaysOn: true
     useManagedIdentityForRegistry: true
+    // SSH to the Linux hosts goes to private addresses, so the API joins the virtual network.
+    virtualNetworkSubnetId: networking.outputs.appSubnetId
   }
 }
 
@@ -415,6 +451,8 @@ module taskApp 'modules/apps/container-function-app.bicep' = {
     storageConnectionString: storageConnectionString
     appSettings: functionSettings
     useManagedIdentityForRegistry: true
+    // The host connectivity check opens TCP connections to the hosts' private addresses.
+    virtualNetworkSubnetId: networking.outputs.appSubnetId
   }
   dependsOn: [
     storageAccount
@@ -461,6 +499,17 @@ resource apiKeyVaultSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04
   }
 }
 
+// The API starts and stops hosts from the portal and for scaling rules.
+module apiVmPowerRole 'modules/core/resource-group-role-assignment.bicep' = {
+  name: 'apiVmPowerRole'
+  scope: resourceGroup(vmSubscriptionId, effectiveVmResourceGroup)
+  params: {
+    principalId: apiApp.outputs.principalId
+    roleDefinitionGuid: vmPowerRoleDefinitionGuid
+    principalType: 'ServicePrincipal'
+  }
+}
+
 module linuxHosts 'modules/Linux/main.bicep' = if (deployLinuxHosts && linuxHostCount > 0) {
   name: 'linuxHosts'
   params: {
@@ -504,6 +553,9 @@ module avdHosts 'modules/AVD/main.bicep' = if (deployAvdHosts && avdSessionHostC
     adminUsername: linuxHostAdminLoginName
     adminPassword: hostAdminPassword
     linuxBrokerApiBaseUrl: frontendApiBaseUrl
+    linuxBrokerApiClientId: apiClientId
+    scriptSourceRoot: scriptSourceRoot
+    avdUsersGroupId: avdUsersGroupId
   }
 }
 
@@ -517,3 +569,5 @@ output containerRegistryName string = containerRegistryName
 output sqlServerName string = sql.outputs.sqlServerName
 output sqlDatabaseName string = sql.outputs.databaseName
 output virtualNetworkName string = networking.outputs.vnetName
+output linuxHostDomainName string = effectiveDomainName
+output nfsSharePath string = effectiveNfsShare

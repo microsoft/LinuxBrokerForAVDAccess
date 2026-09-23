@@ -6,6 +6,12 @@ param linuxSubnetName string = 'snet-linux-hosts'
 param avdSubnetName string = 'snet-avd-hosts'
 param privateEndpointSubnetName string = 'snet-private-endpoints'
 
+@description('Create a private DNS zone that every VM in the virtual network registers into automatically.')
+param createHostDnsZone bool = true
+
+@description('Name of the private DNS zone the hosts register into. The broker API connects to Linux hosts as <hostname>.<zone>.')
+param hostDnsZoneName string = 'linuxbroker.internal'
+
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' = {
   name: vnetName
   location: location
@@ -69,8 +75,28 @@ resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-0
   }
 }
 
+resource hostDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (createHostDnsZone) {
+  name: hostDnsZoneName
+  location: 'global'
+  tags: tags
+}
+
+resource hostDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createHostDnsZone) {
+  parent: hostDnsZone
+  name: 'link-${vnetName}'
+  location: 'global'
+  tags: tags
+  properties: {
+    registrationEnabled: true
+    virtualNetwork: {
+      id: virtualNetwork.id
+    }
+  }
+}
+
 output vnetName string = virtualNetwork.name
 output vnetId string = virtualNetwork.id
+output hostDnsZoneName string = createHostDnsZone ? hostDnsZoneName : ''
 output appSubnetName string = appSubnet.name
 output appSubnetId string = appSubnet.id
 output linuxSubnetName string = linuxSubnet.name

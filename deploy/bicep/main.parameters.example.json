@@ -80,6 +80,15 @@
     "nfsShare": {
       "value": ""
     },
+    "deployNfsShare": {
+      "value": true
+    },
+    "nfsShareQuotaGiB": {
+      "value": 100
+    },
+    "avdUsersGroupId": {
+      "value": ""
+    },
     "vmHostResourceGroup": {
       "value": ""
     },

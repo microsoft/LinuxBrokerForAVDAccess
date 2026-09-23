@@ -1,3 +1,5 @@
+import types
+
 import pytest
 
 
@@ -15,6 +17,19 @@ def test_coerce_optional_int_handles_nullish_junk_and_clamps(app_module):
     assert coerce("5", minimum=1, maximum=200) == 5
     assert coerce("0", minimum=1, maximum=200) == 1
     assert coerce("999", minimum=1, maximum=200) == 200
+
+
+@pytest.mark.parametrize("stored", [
+    "-----BEGIN OPENSSH PRIVATE KEY-----\\nAAAA\\n-----END OPENSSH PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----\\nAAAA\\n-----END OPENSSH PRIVATE KEY-----\\n",
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----\r\nAAAA\r\n-----END OPENSSH PRIVATE KEY-----\r\n",
+])
+def test_private_key_always_ends_with_a_newline(app_module, stored):
+    """azd trims the trailing newline, and ssh then fails with 'error in libcrypto'."""
+    assert app_module.normalize_private_key(stored) == (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+    )
 
 
 @pytest.mark.parametrize("path,proc,_paged_proc", HISTORY_ENDPOINTS)
@@ -338,3 +353,105 @@ def test_is_member_of_group_still_returns_false_for_a_real_non_member(app_module
     monkeypatch.setattr(app_module.requests, "post", lambda *a, **k: _Ok())
 
     assert app_module.is_member_of_group("user-oid", ["group-a"]) is False
+
+
+LEASE_ID = "8ff6eb09-90ca-4efa-8ea1-695761f950f7"
+
+
+class _RemoteHost:
+    """Stands in for run_remote_command, answering each command with a scripted result."""
+
+    def __init__(self, clear_stdout="__LEASE_ACTION=cleared__\n", clear_returncode=0,
+                 delete_stdout="", delete_returncode=0):
+        self.commands = []
+        self._clear = (clear_returncode, clear_stdout)
+        self._delete = (delete_returncode, delete_stdout)
+
+    def __call__(self, hostname, command, stdin_input=None, timeout=120):
+        self.commands.append(command)
+        returncode, stdout = self._clear if "manage-lease.sh" in command else self._delete
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=""), f"avdadmin@{hostname}"
+
+    @property
+    def deletes(self):
+        return [command for command in self.commands if "userdel" in command]
+
+
+@pytest.mark.parametrize("lease_id,expected_clear", [
+    (LEASE_ID, f"sudo /usr/local/bin/manage-lease.sh clear alice {LEASE_ID}"),
+    (None, "sudo /usr/local/bin/manage-lease.sh clear-any alice"),
+])
+def test_delete_remote_user_clears_the_lease_before_userdel(app_module, monkeypatch, lease_id, expected_clear):
+    """manage-lease.sh unmounts the NFS home, so it must run before userdel -r on both paths.
+
+    Deleting first would let userdel -r remove the roaming profile on the share.
+    """
+    host = _RemoteHost()
+    monkeypatch.setattr(app_module, "run_remote_command", host)
+
+    assert app_module.delete_remote_user("lnxhost-01", "alice", lease_id) is True
+    assert host.commands[0] == expected_clear
+    assert len(host.commands) == 2
+    assert "sudo userdel -r alice" in host.commands[1]
+    # userdel -r must be guarded by a mount check in the same shell.
+    assert host.commands[1].index("mountpoint -q /home/alice") < host.commands[1].index("userdel")
+
+
+@pytest.mark.parametrize("clear_stdout,expected", [
+    ("__LEASE_ACTION=cleared-in-use__\n", False),
+    ("__LEASE_ACTION=mismatch__\n", True),
+    ("__LEASE_ACTION=missing__\n", True),
+])
+def test_delete_remote_user_keeps_the_account_unless_the_lease_was_cleared(app_module, monkeypatch, clear_stdout, expected):
+    """Skipping on a mismatched or missing lease is deliberate, so it counts as success.
+
+    A user who is still signed in counts as a failure, because the account is left behind.
+    """
+    host = _RemoteHost(clear_stdout=clear_stdout)
+    monkeypatch.setattr(app_module, "run_remote_command", host)
+
+    assert app_module.delete_remote_user("lnxhost-01", "alice", LEASE_ID) is expected
+    assert host.deletes == []
+
+
+def test_delete_remote_user_does_not_delete_when_the_lease_cannot_be_cleared(app_module, monkeypatch):
+    """A non-zero exit means manage-lease.sh could not unmount the home."""
+    host = _RemoteHost(clear_stdout="", clear_returncode=1)
+    monkeypatch.setattr(app_module, "run_remote_command", host)
+
+    assert app_module.delete_remote_user("lnxhost-01", "alice", LEASE_ID) is False
+    assert host.deletes == []
+
+
+def test_delete_remote_user_reports_a_home_that_is_still_mounted(app_module, monkeypatch, caplog):
+    host = _RemoteHost(delete_stdout="__HOME_STILL_MOUNTED__\n", delete_returncode=1)
+    monkeypatch.setattr(app_module, "run_remote_command", host)
+
+    assert app_module.delete_remote_user("lnxhost-01", "alice", LEASE_ID) is False
+    assert "home directory is still mounted" in caplog.text
+
+
+def test_failed_checkout_cleans_up_the_host_before_releasing_the_vm(client, fake_db, app_module, monkeypatch):
+    """create-user.sh can fail after it writes the lease, which keeps the NFS home mounted.
+
+    The host must be cleaned up before the VM goes back to the pool, or the next user's
+    checkout could race the cleanup.
+    """
+    fake_db.fetchall_rows["CheckoutVm"] = [
+        {"VMID": 7, "Hostname": "lnxhost-07", "IPAddress": "10.0.0.7", "LeaseId": LEASE_ID}
+    ]
+    steps = []
+    monkeypatch.setattr(app_module, "create_or_update_remote_user", lambda *args: False)
+    monkeypatch.setattr(
+        app_module, "delete_remote_user",
+        lambda hostname, username, lease_id=None: steps.append(("delete", hostname, username, lease_id)) or True
+    )
+    monkeypatch.setattr(
+        app_module, "release_vm_assignment",
+        lambda vmid, lease_id: steps.append(("release", vmid, lease_id)) or True
+    )
+
+    response = client.post("/api/vms/checkout", json={"username": "alice", "avdhost": "avdhost-01"})
+
+    assert response.status_code == 500
+    assert steps == [("delete", "lnxhost-07", "alice", LEASE_ID), ("release", 7, LEASE_ID)]

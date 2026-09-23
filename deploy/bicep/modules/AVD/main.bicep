@@ -8,7 +8,10 @@ param vnetResourceGroup string
 param hostPoolName string
 param friendlyName string = hostPoolName
 param loadBalancerType string = 'BreadthFirst'
-param preferredAppGroupType string = 'Desktop'
+@description('App group type the host pool prefers. Users who are assigned to both app groups only see this type.')
+param preferredAppGroupType string = 'RailApplications'
+@description('RDP properties for the host pool. The defaults enable Microsoft Entra single sign-on to the Entra joined session hosts.')
+param customRdpProperty string = 'enablerdsaadauth:i:1;enablecredsspsupport:i:1;redirectclipboard:i:1;audiomode:i:0;redirectwebauthn:i:1;'
 param sessionHostCount int
 param maxSessionLimit int
 @description('Token validity duration in ISO 8601 format')
@@ -50,8 +53,19 @@ param adminPassword string
 
 @description('Base URL for the AVD Linux Broker API')
 param linuxBrokerApiBaseUrl string
-@description('URI for the AVD Linux Broker configuration script')
-param linuxBrokerConfigScriptUri string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main/custom_script_extensions/Configure-AVD-Host.ps1'
+@description('Client ID of the Linux Broker API app registration. Session hosts request tokens for api://<client-id>.')
+param linuxBrokerApiClientId string
+@description('Root URL the AVD host configuration scripts are downloaded from. The repository layout must be preserved.')
+param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
+@description('Object ID of the Entra group whose members can launch the Linux Desktop RemoteApp. Leave empty to assign access manually.')
+param avdUsersGroupId string = ''
+@description('Display name of the RemoteApp that connects users to a Linux host.')
+param remoteAppFriendlyName string = 'Linux Desktop'
+
+var normalizedScriptSourceRoot = endsWith(scriptSourceRoot, '/') ? take(scriptSourceRoot, length(scriptSourceRoot) - 1) : scriptSourceRoot
+var linuxBrokerConfigScriptUri = '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-AVD-Host.ps1'
+var desktopVirtualizationUserRoleId = '1d18fff3-a72a-46b5-b4a9-0b38a3cd7e63'
+var virtualMachineUserLoginRoleId = 'fb879df8-f326-4884-b1cf-06f3ad86be52'
 
 var osImage = 'microsoftwindowsdesktop:Windows-11:win11-24h2-avd:latest'
 var vmNames = [for i in range(1, sessionHostCount): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
@@ -73,6 +87,7 @@ resource hostPool 'Microsoft.DesktopVirtualization/hostPools@2024-04-03' = {
     preferredAppGroupType: preferredAppGroupType
     loadBalancerType: loadBalancerType
     maxSessionLimit: maxSessionLimit
+    customRdpProperty: customRdpProperty
     startVMOnConnect: false
     validationEnvironment: false
     agentUpdate: agentUpdate
@@ -93,6 +108,19 @@ resource desktopAppGroup 'Microsoft.DesktopVirtualization/applicationGroups@2024
   }
 }
 
+// Users launch the broker connection as a RemoteApp. The full desktop app group stays
+// available for troubleshooting but is not assigned to anyone by the deployment.
+resource remoteAppGroup 'Microsoft.DesktopVirtualization/applicationGroups@2024-04-03' = {
+  name: '${hostPoolName}-remoteAppGroup'
+  location: location
+  tags: tags
+  properties: {
+    applicationGroupType: 'RemoteApp'
+    friendlyName: remoteAppFriendlyName
+    hostPoolArmPath: hostPool.id
+  }
+}
+
 resource workspace 'Microsoft.DesktopVirtualization/workspaces@2024-11-01-preview' = {
   name: '${hostPoolName}-workspace'
   location: location
@@ -101,7 +129,18 @@ resource workspace 'Microsoft.DesktopVirtualization/workspaces@2024-11-01-previe
     friendlyName: '${friendlyName} Workspace'
     applicationGroupReferences: [
       resourceId('Microsoft.DesktopVirtualization/applicationGroups', desktopAppGroup.name)
+      remoteAppGroup.id
     ]
+  }
+}
+
+resource remoteAppGroupUsers 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(avdUsersGroupId)) {
+  name: guid(remoteAppGroup.id, avdUsersGroupId, desktopVirtualizationUserRoleId)
+  scope: remoteAppGroup
+  properties: {
+    principalId: avdUsersGroupId
+    principalType: 'Group'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', desktopVirtualizationUserRoleId)
   }
 }
 
@@ -116,12 +155,14 @@ module hostPoolRegistrationToken 'token.bicep' = {
     loadBalancerType: hostPool.properties.loadBalancerType
     preferredAppGroupType: hostPool.properties.preferredAppGroupType
     maxSessionLimit: hostPool.properties.maxSessionLimit
+    customRdpProperty: customRdpProperty
     startVMOnConnect: hostPool.properties.startVMOnConnect
     validationEnvironment: hostPool.properties.validationEnvironment
     agentUpdate: hostPool.properties.agentUpdate
   }
   dependsOn: [
     desktopAppGroup
+    remoteAppGroup
     workspace
   ]
 }
@@ -140,6 +181,7 @@ resource nic 'Microsoft.Network/networkInterfaces@2024-05-01' = [
   for (name, i) in vmNames: {
     name: '${name}-nic'
     location: location
+    tags: tags
     properties: {
       ipConfigurations: [
         {
@@ -164,6 +206,8 @@ resource vmSessionHost 'Microsoft.Compute/virtualMachines@2024-11-01' = [
   for (name, i) in vmNames: {
     name: name
     location: location
+    // The broker-role tag is how the post-provision hook finds the session hosts to add to the AVD host group.
+    tags: tags
     identity: {
       type: 'SystemAssigned'
     }
@@ -291,7 +335,7 @@ resource linuxBrokerConfig 'Microsoft.Compute/virtualMachines/extensions@2024-11
         fileUris: array(linuxBrokerConfigScriptUri)
       }
       protectedSettings: {
-        commandToExecute: 'powershell -ExecutionPolicy Unrestricted -File Configure-AVD-Host.ps1 -LinuxBrokerApiBaseUrl "${linuxBrokerApiBaseUrl}"'
+        commandToExecute: 'powershell -ExecutionPolicy Unrestricted -File Configure-AVD-Host.ps1 -LinuxBrokerApiBaseUrl "${linuxBrokerApiBaseUrl}" -LinuxBrokerApiClientId "${linuxBrokerApiClientId}" -ScriptSourceRoot "${normalizedScriptSourceRoot}"'
       }
     }
     dependsOn: [
@@ -302,3 +346,42 @@ resource linuxBrokerConfig 'Microsoft.Compute/virtualMachines/extensions@2024-11
     ]
   }
 ]
+
+// Entra joined session hosts only admit users who hold a VM sign-in role on the VM itself.
+resource sessionHostUserLogin 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (name, i) in vmNames: if (!empty(avdUsersGroupId)) {
+    name: guid(vmSessionHost[i].id, avdUsersGroupId, virtualMachineUserLoginRoleId)
+    scope: vmSessionHost[i]
+    properties: {
+      principalId: avdUsersGroupId
+      principalType: 'Group'
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', virtualMachineUserLoginRoleId)
+    }
+  }
+]
+
+// Connect-LinuxBroker.ps1 is staged at C:\Temp by Configure-AVD-Host.ps1, so the application
+// is published only after the configuration extension has run on every session host.
+resource linuxDesktopApp 'Microsoft.DesktopVirtualization/applicationGroups/applications@2024-04-03' = {
+  parent: remoteAppGroup
+  name: 'LinuxDesktop'
+  properties: {
+    friendlyName: remoteAppFriendlyName
+    description: 'Checks out a Linux host from the Linux Broker and opens a remote desktop session to it.'
+    applicationType: 'InBuilt'
+    filePath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+    commandLineSetting: 'Require'
+    commandLineArguments: '-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\\Temp\\Connect-LinuxBroker.ps1'
+    iconPath: 'C:\\Windows\\System32\\mstsc.exe'
+    iconIndex: 0
+    showInPortal: true
+  }
+  dependsOn: [
+    linuxBrokerConfig
+  ]
+}
+
+output hostPoolName string = hostPool.name
+output workspaceName string = workspace.name
+output remoteAppGroupName string = remoteAppGroup.name
+output desktopAppGroupName string = desktopAppGroup.name

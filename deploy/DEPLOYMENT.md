@@ -15,7 +15,7 @@ The supported deployment entrypoint is [azure.yaml](azure.yaml) in the `deploy/`
 
 That means the actual deployment flow is:
 
-1. Bootstrap the azd environment, Entra applications, host groups, and SSH key material.
+1. Bootstrap the azd environment, Entra applications, host groups, the AVD users group, and SSH key material.
 2. Provision Azure infrastructure with Bicep.
 3. Build the container images in Azure Container Registry, restart the apps, initialize SQL, assign the function app role, sync VM group membership, and register Linux hosts in SQL.
 
@@ -49,8 +49,9 @@ You need enough access to do all of the following:
 - Create or update service principals.
 - Create or update Entra security groups.
 - Create Entra app-role assignments from groups to the API service principal.
+- Add members to Entra security groups.
 
-You also need a tenant admin available to grant admin consent after the app registrations are created.
+You also need a tenant admin available to grant admin consent after the app registrations are created. `preprovision` attempts admin consent for both applications and, when AVD hosts are deployed, enables Microsoft Entra authentication for RDP on the tenant's Windows Cloud Login service principal. Both succeed automatically when the operator is a Global Administrator, Privileged Role Administrator, or Cloud Application Administrator; otherwise `preprovision` prints a warning and a tenant admin completes them afterward. See [Manual Steps After azd up](#manual-steps-after-azd-up).
 
 ## What The Deployment Creates
 
@@ -61,9 +62,13 @@ At a high level, the deployment provisions and configures the following:
 - Azure SQL Database and firewall rules.
 - Azure Key Vault.
 - App Service plan, storage account, Application Insights, Log Analytics, and networking.
+- A private DNS zone, `linuxbroker.internal`, linked to the virtual network with auto-registration, so the broker reaches each Linux host as `<hostname>.linuxbroker.internal`. It is skipped when you supply `domainName`.
+- A premium Azure Files NFS share for Linux home directories, reachable only through a private endpoint. It is skipped when you supply `nfsShare`, set `deployNfsShare` to `false`, or deploy no Linux hosts.
 - Optional Linux hosts and optional AVD hosts, depending on azd environment settings.
+- When AVD hosts are deployed, a RemoteApp application group that publishes **Linux Desktop**, which runs `Connect-LinuxBroker.ps1` on the session host to check out a Linux host and open an RDP session to it.
 - Two Entra app registrations: frontend and API.
 - Two Entra security groups for VM authorization: AVD hosts and Linux hosts.
+- When AVD hosts are deployed and `avdUsersGroupId` is not set, a third Entra security group for AVD users, with the deploying user added as a member.
 
 The deployment model now follows these runtime rules:
 
@@ -73,6 +78,9 @@ The deployment model now follows these runtime rules:
 - Key Vault stores only two deployment secrets: `db-password` and `linux-host`.
 - Frontend and API auth secrets are stored in app settings, not in Key Vault.
 - Linux hosts are registered into SQL during `postprovision`. AVD hosts are not.
+- The API and function apps are integrated with the virtual network's app subnet, so the API reaches Linux hosts on their private IP addresses for SSH and the portal's connectivity test.
+- The API managed identity holds **Desktop Virtualization Power On Off Contributor** on the VM resource group, which lets it start and stop hosts for the portal and scaling rules without broader write access. Stopping a host powers it off without deallocating it, so a stopped host still accrues compute charges.
+- Members of the AVD users group hold **Desktop Virtualization User** on the RemoteApp application group and **Virtual Machine User Login** on each session host. Both are required: the first publishes **Linux Desktop** to the user, and the second lets the user sign in to the Microsoft Entra joined session host.
 
 ## Required And Common azd Environment Values
 
@@ -92,12 +100,15 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `avdSessionHostCount`: number of AVD hosts to provision.
 - `linuxHostVmSize`: Linux host VM size.
 - `avdVmSize`: AVD host VM size.
-- `linuxHostOsVersion`: Linux image SKU.
+- `linuxHostOsVersion`: Linux image SKU. The RHEL options (`7-LVM`, `8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires.
 - `linuxHostDisableScreenLock`: `true` or `false`. Disables the GNOME screen saver and screen lock on RHEL hosts. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - `azureCloudName`: `AzurePublic`, `AzureUSGovernment`, or `AzureCustom`. See [Choosing The Target Azure Cloud](#choosing-the-target-azure-cloud).
-- `scriptSourceRoot`: root URL the Linux host bootstrap scripts are downloaded from.
-- `domainName`: domain suffix used by the broker when connecting to Linux hosts.
-- `nfsShare`: NFS share path if required by your Linux host configuration.
+- `scriptSourceRoot`: root URL the Linux host and AVD host bootstrap scripts are downloaded from.
+- `domainName`: DNS suffix the broker appends to Linux host names when it connects over SSH. Leave empty to use the deployment's private DNS zone, `linuxbroker.internal`. If you set it, you are responsible for DNS records that resolve `<hostname>.<domainName>` from the API's virtual network.
+- `nfsShare`: an existing NFS share, in `<server>:/<export>` form, to mount for Linux home directories. Leave empty to have the deployment provision one.
+- `deployNfsShare`: `true` or `false`. Provisions a premium Azure Files NFS share when `nfsShare` is empty. Defaults to `true`.
+- `nfsShareQuotaGiB`: provisioned size of that share in GiB. Premium shares have a 100 GiB minimum, and cost is based on the provisioned size. Defaults to `100`.
+- `avdUsersGroupId`: object ID of an existing Entra group whose members can launch **Linux Desktop**. Leave empty to have `preprovision` create `<appName>-<environmentName>-avd-users-sg` and add you to it.
 - `vmHostResourceGroup`: override if managed VMs live in a different resource group.
 
 ### Values that are usually auto-generated
@@ -108,6 +119,7 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - frontend and API client secrets
 - frontend and API client IDs if the app registrations do not already exist
 - AVD and Linux host group IDs
+- the AVD users group ID, when `avdUsersGroupId` is not supplied
 
 When `AZURE_LOCATION` is not already set, `azd up` will prompt you to select an Azure region before provisioning starts. The selected value is saved into the azd environment automatically. You can also pre-set it with `azd env set AZURE_LOCATION <region>` to skip the prompt.
 
@@ -168,7 +180,15 @@ The resolved values flow into the frontend, API, and task app settings as `AZURE
 
 ### Linux host bootstrap source
 
-Linux hosts download their agent scripts from `scriptSourceRoot`, which defaults to this repository on GitHub. Government and air-gapped environments usually cannot reach `raw.githubusercontent.com`, so point it at a reachable mirror such as a storage account or internal Git host:
+Linux hosts download their agent scripts from `scriptSourceRoot`, which defaults to the `main` branch of this repository on GitHub. The AVD session host extension downloads `Configure-AVD-Host.ps1` and `Connect-LinuxBroker.ps1` from the same root.
+
+When you deploy from a branch or fork that changes those scripts, push it first and point `scriptSourceRoot` at the published commit. Otherwise the hosts run the scripts from `main`, which may not accept the parameters the templates pass. A commit SHA is more reliable than a branch name, because `raw.githubusercontent.com` caches branch content for a few minutes:
+
+```powershell
+azd env set scriptSourceRoot https://raw.githubusercontent.com/<owner>/LinuxBrokerForAVDAccess/<commit-sha>
+```
+
+Government and air-gapped environments usually cannot reach `raw.githubusercontent.com`, so point it at a reachable mirror such as a storage account or internal Git host:
 
 ```powershell
 azd env set scriptSourceRoot https://<your-mirror>/LinuxBrokerForAVDAccess/main
@@ -320,6 +340,9 @@ It currently does all of the following:
 - Creates service principals for those applications if needed.
 - Creates or reuses the AVD host and Linux host Entra security groups.
 - Assigns the `AvdHost` and `LinuxHost` app roles from the API application to those groups.
+- When AVD hosts are deployed and `avdUsersGroupId` is empty, creates or reuses the AVD users group and adds the signed-in user to it.
+- Attempts tenant-wide admin consent for the API and frontend applications.
+- When AVD hosts are deployed, enables Microsoft Entra authentication for RDP on the Windows Cloud Login service principal if it is not already enabled. The host pool turns on Entra single sign-on, which depends on this tenant-wide setting. `preprovision` never disables it.
 - Creates or reuses frontend and API client secrets.
 - Generates or reuses Linux host SSH keys.
 - Writes resolved values back into the azd environment in both uppercase and camelCase forms expected by the deployment.
@@ -338,6 +361,10 @@ Important deployment characteristics:
 - The frontend and API App Services enable App Service health checks on `/health`.
 - The frontend and API apps are instrumented with Azure Monitor OpenTelemetry and receive `APPLICATIONINSIGHTS_CONNECTION_STRING` and `OTEL_SERVICE_NAME` through app settings.
 - Linux host auth defaults to `SSH`.
+- Linux hosts register their names in the `linuxbroker.internal` private DNS zone unless `domainName` is set, and the API's `DOMAIN_NAME` setting points at whichever suffix is in effect.
+- The API's `NFS_SHARE` setting points at the provisioned Azure Files share unless `nfsShare` is set. The storage account disables public network access and shared key access, and it allows non-HTTPS traffic because NFS does not use HTTPS; the private endpoint is the only path to it.
+- RHEL hosts use Generation 2 images so they can run with Trusted Launch.
+- The AVD host pool prefers RemoteApp and sets RDP properties that enable Microsoft Entra single sign-on to the Microsoft Entra joined session hosts.
 - RHEL hosts have the GNOME screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - Key Vault stores `db-password` and `linux-host`.
 - The API app receives Key Vault Secrets User access so it can read those secrets at runtime.
@@ -348,20 +375,20 @@ Important deployment characteristics:
 
 It currently runs, in order:
 
-1. [Build-ContainerImages.ps1](Build-ContainerImages.ps1)
-2. [Initialize-Database.ps1](Initialize-Database.ps1)
-3. [Assign-FunctionAppApiRole.ps1](Assign-FunctionAppApiRole.ps1)
+1. [Assign-FunctionAppApiRole.ps1](Assign-FunctionAppApiRole.ps1)
+2. [Build-ContainerImages.ps1](Build-ContainerImages.ps1)
+3. [Initialize-Database.ps1](Initialize-Database.ps1)
 4. [Assign-VmApiRoles.ps1](Assign-VmApiRoles.ps1)
 5. [Register-LinuxHostSqlRecords.ps1](Register-LinuxHostSqlRecords.ps1)
 
 That means `postprovision` does all of the following:
 
+- Assigns the `ScheduledTask` app role to the function app managed identity. This runs before the images are built because the function app requests an API token as soon as its image starts, and the managed identity service caches that token for up to 24 hours.
 - Builds `frontend:latest`, `api:latest`, and `task:latest` in ACR.
 - Restarts the frontend app, API app, and function app after the new images are pushed.
 - Applies all SQL scripts from [../sql_queries](../sql_queries) through ADO.NET.
 - Makes the SQL bootstrap rerunnable by handling `GO` batches and converting procedure creation to `CREATE OR ALTER`.
-- Assigns the `ScheduledTask` app role to the function app managed identity.
-- Adds AVD and Linux VM managed identities to the corresponding Entra groups.
+- Adds AVD and Linux VM managed identities to the corresponding Entra groups, retrying while new identities replicate, and fails the hook if a membership still cannot be confirmed.
 - Registers Linux hosts into `dbo.VirtualMachines` through `dbo.RegisterLinuxHostVm`.
 
 ### Front End Build Requirements
@@ -432,14 +459,24 @@ The migration additionally installs `dconf` and, where available, `xprintidle`. 
 
 ## Manual Steps After `azd up`
 
-The deployment does not grant tenant-wide admin consent automatically.
+### Admin consent
 
-After the preprovision hook has created the app registrations, a tenant admin still needs to grant consent for:
+`preprovision` attempts tenant-wide admin consent for both app registrations. It succeeds when the operator can grant consent, and prints a warning otherwise. If you saw that warning, have a tenant admin grant consent for:
 
 - Frontend delegated permissions such as `User.Read`, `profile`, `email`, `offline_access`, `openid`, and the API delegated scope.
 - API application permissions to Microsoft Graph used for group and directory reads.
 
 Without admin consent, deployment can still complete, but sign-in and Graph-backed authorization checks will not work correctly.
+
+### Microsoft Entra authentication for RDP
+
+If `preprovision` warned that it could not enable Microsoft Entra authentication for RDP, have a tenant admin turn it on for the **Windows Cloud Login** service principal (`270efc09-cd0d-444b-a71f-39af4910ec45`) under **Microsoft Entra ID** > **Devices** > **Remote connection configuration**, as described in [Configure single sign-on for Azure Virtual Desktop](https://learn.microsoft.com/azure/virtual-desktop/configure-single-sign-on#enable-microsoft-entra-authentication-for-rdp). Until it is enabled, connections to the session hosts fail.
+
+The first time a user connects to a session host, Windows asks them to allow the remote desktop connection. To hide that prompt, add the session hosts to a device group listed under the service principal's target device groups.
+
+### AVD user access
+
+Add the users who should reach Linux hosts to the AVD users group, `<appName>-<environmentName>-avd-users-sg` or the group you supplied in `avdUsersGroupId`. They then see **Linux Desktop** in Windows App or the AVD web client. The deploying user is added automatically when `preprovision` creates the group.
 
 ## Validation Checklist
 
@@ -471,6 +508,9 @@ Verify that the expected resources exist in the target resource group:
 - Key Vault
 - SQL server and database
 - optional Linux and AVD VMs
+- the `linuxbroker.internal` private DNS zone with an A record for each Linux host, unless `domainName` was supplied
+- the NFS storage account, its `home` share, and its private endpoint, unless `nfsShare` was supplied or `deployNfsShare` is `false`
+- for AVD, the host pool, the desktop and RemoteApp application groups, the workspace, and the **Linux Desktop** application
 
 ### Key Vault
 
@@ -507,6 +547,8 @@ Confirm that:
 - the AVD host group has the `AvdHost` API app role
 - the Linux host group has the `LinuxHost` API app role
 - VM managed identities are members of the correct Entra groups
+- the AVD users group holds **Desktop Virtualization User** on the RemoteApp application group and **Virtual Machine User Login** on each session host
+- the API app's managed identity holds **Desktop Virtualization Power On Off Contributor** on the VM resource group
 
 ### Application health
 
@@ -515,6 +557,8 @@ Confirm that:
 - the frontend and API apps restarted after the ACR builds
 - the function app restarted after the image build
 - frontend sign-in works after admin consent is granted
+- the portal's connectivity test succeeds for each Linux host, which confirms DNS resolution and SSH from the API
+- a user in the AVD users group can open **Linux Desktop** and land on a Linux desktop, and their home directory is on the NFS share (`df -h ~` on the Linux host)
 - AVD checkout and Linux host release operations work end to end
 
 ## Rerunning Parts Of The Deployment
@@ -562,6 +606,81 @@ Admin consent was likely not granted yet for the frontend delegated permissions 
 ### Linux hosts were provisioned but do not appear in SQL
 
 Rerun [Post-Provision.ps1](Post-Provision.ps1) after confirming SQL connectivity. Linux host SQL registration is intentionally limited to Linux hosts only.
+
+### The portal's connectivity test or a checkout fails to reach a Linux host
+
+The API connects to `<LINUX_HOST_ADMIN_LOGIN_NAME>@<hostname>.<DOMAIN_NAME>` over SSH from inside the virtual network. With the default configuration, confirm that the host has an A record in the `linuxbroker.internal` private DNS zone and that the zone is linked to the virtual network. If you supplied `domainName`, confirm that `<hostname>.<domainName>` resolves from the API's virtual network. Also confirm that the API app shows virtual network integration with the `snet-appsvc` subnet.
+
+If the API log shows `Load key "/tmp/private_key.pem": error in libcrypto` followed by `Permission denied (publickey)`, the API image is older than version 0.160. The private key loses its trailing newline on the way into Key Vault, and OpenSSH will not load a key without one; 0.160 restores it. Rebuild the images as described in [Rebuild container images and restart apps](#rebuild-container-images-and-restart-apps).
+
+### Linux Desktop does not appear for a user
+
+Confirm that the user is a member of the AVD users group. The group must hold **Desktop Virtualization User** on the RemoteApp application group; that assignment is created only when `avdUsersGroupId` has a value during provisioning, so rerun `azd provision` after setting it.
+
+### Linux Desktop opens but sign-in to the session host fails
+
+Confirm that Microsoft Entra authentication for RDP is enabled on the Windows Cloud Login service principal (see [Microsoft Entra authentication for RDP](#microsoft-entra-authentication-for-rdp)) and that the user holds **Virtual Machine User Login** on the session host through the AVD users group.
+
+### The AVD session host is not joined to Microsoft Entra ID
+
+Users cannot sign in to a session host that is not joined, even though the `AADLoginForWindows` extension reports success. On the host, `dsregcmd /status` shows `AzureAdJoined : NO`, and the **Microsoft-Windows-User Device Registration/Admin** event log shows `error_hostname_duplicate` ("Another object with the same value for property hostnames already exists").
+
+A device object left over from an earlier deployment that used the same VM name blocks the join. In Microsoft Entra ID, find the devices with the session host's name, confirm from the Azure resource ID on the device that its VM no longer exists, and delete that device. The host retries the join on its own, typically within 15 minutes.
+
+### Linux Desktop opens but reports that no Linux host is available
+
+`Connect-LinuxBroker.ps1` shows this when checkout does not return a host. Check the **LinuxBrokerScript** source in the session host's Application event log. A `403` from the API means the session host's managed identity is not yet in the AVD host group; rerun `azd hooks run postprovision`. Otherwise, confirm in the portal that at least one Linux host is available.
+
+### Released Linux hosts never return to Available
+
+The function app returns released hosts to the pool. If hosts stay **Released** and the API log shows `Access denied: insufficient scope or role permissions or group membership.` at the start of every minute, the function app's API token does not carry the `ScheduledTask` role.
+
+This happens when the function app requested a token before the role was assigned, which earlier versions of [Post-Provision.ps1](Post-Provision.ps1) allowed on a new deployment. The managed identity service caches the token for up to 24 hours, so restarting the function app does not help. Either wait for the token to expire, or give the function app a new identity. Stop the app first, so it cannot request a token before the role is in place:
+
+```powershell
+az functionapp stop --name <task-app> --resource-group <resource-group>
+$old = az functionapp identity show --name <task-app> --resource-group <resource-group> --query principalId --output tsv
+az functionapp identity remove --name <task-app> --resource-group <resource-group>
+$new = az functionapp identity assign --name <task-app> --resource-group <resource-group> --query principalId --output tsv
+
+# Move the registry pull assignment to the new identity under the same name, so the
+# next azd provision updates it instead of failing.
+$acrId = az acr show --name <registry> --query id --output tsv
+$name = az role assignment list --scope $acrId --role AcrPull --query "[?principalId=='$old'].name" --output tsv
+az role assignment delete --ids "$acrId/providers/Microsoft.Authorization/roleAssignments/$name"
+az role assignment create --name $name --assignee-object-id $new --assignee-principal-type ServicePrincipal --role AcrPull --scope $acrId
+
+.\Assign-FunctionAppApiRole.ps1 -ResourceGroupName <resource-group> -TaskAppName <task-app> -ApiClientId <api-client-id>
+Start-Sleep -Seconds 120
+az functionapp start --name <task-app> --resource-group <resource-group>
+```
+
+### The Linux host deployment failed with a Trusted Launch error
+
+Trusted Launch requires Generation 2 images. The RHEL options map to Gen2 SKUs; if you customized the image, choose a Gen2 SKU.
+
+### A VM deployment failed with `SkuNotAvailable`
+
+The requested size is restricted for your subscription in that region, which is common for popular sizes. List the sizes your subscription can use with `az vm list-skus --location <region> --resource-type virtualMachines --output table` (sizes with `NotAvailableForSubscription` are blocked), then choose another size and rerun `azd provision`:
+
+```powershell
+azd env set linuxHostVmSize Standard_D2as_v5
+azd env set avdVmSize Standard_D8as_v4
+```
+
+`avdVmSize` accepts only the sizes listed in `main.bicep`, and both host types use Trusted Launch, so pick a Gen2-capable size.
+
+### Home directories are not on the NFS share
+
+Linux hosts mount the share when the broker first creates a user. Confirm that `NFS_SHARE` is set on the API app, that `<account>.file.core.windows.net` resolves to a private IP address from the Linux host, and that the storage account's private endpoint is approved.
+
+If the share is reachable but `df -h ~` inside a session shows the local disk, check `/var/log/release-session.log` for `Attempting to unmount /home/<user>` a few seconds after the checkout. Older release agents unmounted the home whenever the user was not signed in, and the broker's own SSH login at checkout wakes the agent, so the home was usually unmounted before the user arrived. The session then ran on the local disk, and that data was deleted when the broker returned the host. Update the host scripts with [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1).
+
+Current hosts keep the home mounted while the host holds the user's lease, which lasts from checkout until the broker returns the host. At return, `manage-lease.sh` unmounts the home before the broker runs `userdel -r`, so only the empty local mount point is removed and the profile stays on the share. The API also refuses to run `userdel -r` while the home is still mounted, and logs `home directory is still mounted` instead. If a checkout fails after the host has written the lease, the API runs the same cleanup before it puts the host back in the pool.
+
+### `xpra.service` is disabled on a RHEL 9 host
+
+The system proxy service installed by the upstream xpra 6.5 packages exits during startup on RHEL 9. Its unit binds a QUIC socket, and the `aioquic` module it needs is not packaged for RHEL 9. Left enabled, the failed unit would mark the host as degraded, so the bootstrap disables `xpra.socket` and `xpra.service` and logs a warning. xrdp, which the **Linux Desktop** app uses, is not affected.
 
 ### A RHEL session is stuck on a lock screen that will not accept the password
 

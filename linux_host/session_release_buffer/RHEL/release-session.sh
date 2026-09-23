@@ -643,7 +643,14 @@ check_unmount_user_homes() {
         if [[ "$mountpoint" =~ ^/home/[^/]+$ ]]; then
             username=$(basename "$mountpoint")
 
-            if ! array_contains "$username" "${logged_in_users[@]}"; then
+            # The broker mounts the home at checkout, before the user signs in, and the SSH
+            # login it uses wakes the logind watcher. Unmounting whenever the user is not
+            # signed in would pull the profile out from under nearly every new session, so
+            # the home stays mounted until the broker returns the host. manage-lease.sh
+            # unmounts it then, before the account is deleted.
+            if [ -f "$LEASE_DIRECTORY/$username.lease" ]; then
+                log "User $username holds a lease on this host. Keeping $mountpoint mounted."
+            elif ! array_contains "$username" "${logged_in_users[@]}"; then
                 log "User $username is not logged in. Attempting to unmount $mountpoint"
 
                 if umount -l "$mountpoint"; then

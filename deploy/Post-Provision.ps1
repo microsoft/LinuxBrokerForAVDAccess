@@ -124,6 +124,15 @@ if ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhite
     throw 'Post-provision inputs could not be fully resolved from parameters or azd environment values.'
 }
 
+# The role must exist before the task image first starts. The function app asks for an API
+# token as soon as it runs, and the managed identity service caches that token for up to
+# 24 hours, so a token issued before the assignment would be rejected until it expires.
+& "$PSScriptRoot/Assign-FunctionAppApiRole.ps1" `
+    -ResourceGroupName $ResourceGroupName `
+    -TaskAppName $TaskAppName `
+    -ApiClientId $ApiClientId `
+    -GraphEndpoint (Get-AzdEnvValue -Key 'graphEndpoint')
+
 & "$PSScriptRoot/Build-ContainerImages.ps1" `
     -EnvironmentName $EnvironmentName
 
@@ -133,12 +142,6 @@ if ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhite
     -SqlAdminLogin $SqlAdminLogin `
     -SqlAdminPassword $SqlAdminPassword `
     -ScriptsPath $ScriptsPath
-
-& "$PSScriptRoot/Assign-FunctionAppApiRole.ps1" `
-    -ResourceGroupName $ResourceGroupName `
-    -TaskAppName $TaskAppName `
-    -ApiClientId $ApiClientId `
-    -GraphEndpoint (Get-AzdEnvValue -Key 'graphEndpoint')
 
 & "$PSScriptRoot/Assign-VmApiRoles.ps1" `
     -ResourceGroupName $ResourceGroupName `

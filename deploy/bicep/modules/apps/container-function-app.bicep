@@ -9,6 +9,8 @@ param applicationInsightsConnectionString string
 param storageConnectionString string
 param appSettings object = {}
 param useManagedIdentityForRegistry bool = true
+@description('Delegated subnet for regional VNet integration. Leave empty to keep the app off the virtual network.')
+param virtualNetworkSubnetId string = ''
 
 resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   name: appName
@@ -21,6 +23,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   properties: {
     serverFarmId: serverFarmId
     httpsOnly: true
+    // Only private (RFC 1918) traffic is routed into the VNet, which is what the host connectivity check needs.
+    virtualNetworkSubnetId: empty(virtualNetworkSubnetId) ? null : virtualNetworkSubnetId
     siteConfig: {
       acrUseManagedIdentityCreds: useManagedIdentityForRegistry
       alwaysOn: true
