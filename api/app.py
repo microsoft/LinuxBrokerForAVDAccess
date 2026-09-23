@@ -1741,4 +1741,6 @@ password_refresh_thread = threading.Thread(target=refresh_db_password, args=(360
 password_refresh_thread.start()
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Debug mode stays off unless FLASK_DEBUG=1 is set. The container runs gunicorn,
+    # so this block is only used for local runs.
+    app.run()
