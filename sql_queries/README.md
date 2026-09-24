@@ -92,6 +92,33 @@ The scripts do not contain `USE <database>` statements. The target database come
 - `037_create_procedure-GetVmHistoryPaged.sql`: returns paged VM history rows with `TotalCount`
 - `038_create_procedure-GetScalingActivityLogPaged.sql`: returns paged scaling activity rows with `TotalCount`
 - `039_create_procedure-GetVmScalingRulesHistoryPaged.sql`: returns paged scaling rule history rows with `TotalCount`
+- `040_add_lifecycle_columns_to_virtual_machines.sql`: adds release cleanup and power-state transition tracking to `dbo.VirtualMachines`
+- `041_alter_procedure-ReleaseVm.sql`: sets `ReleasedDate` when an active checkout is released
+- `042_alter_procedure-CheckoutVm.sql`: clears `ReleasedDate` on reuse and avoids cleanup-pending hosts for new checkouts. When no host is free it commits instead of rolling back: the rollback also unwound the transaction pymssql wraps around every call, so SQL Server raised error 266 and the API answered 500 instead of 409
+- `043_alter_procedure-ReturnVm.sql`: returns assigned VMs while claiming Linux-side cleanup metadata
+- `044_alter_procedure-ReturnReleasedVms.sql`: expires released leases and claims eligible cleanup retries
+- `045_create_procedure-CompleteVmCleanup.sql`: clears cleanup-pending state after lease-safe Linux cleanup succeeds
+- `046_create_procedure-BeginVmCleanupRetry.sql`: marks an operator-requested cleanup retry attempt
+- `047_alter_procedure-UpdateVmAttributes.sql`: performs no-op-safe admin repairs with lifecycle invariant handling
+- `048_create_procedure-SetVmNetworkStatus.sql`: updates VM network status only when it changes
+- `049_create_procedure-SetVmMaintenance.sql`: toggles unassigned hosts between Available and Maintenance
+- `050_alter_procedure-GetVms.sql`: returns VM lifecycle and cleanup columns in the VM list
+- `051_alter_procedure-GetVmDetails.sql`: returns VM lifecycle and cleanup columns for one VM
+- `052_alter_procedure-GetVmSummary.sql`: adds cleanup-pending and excludes those hosts from Ready
+- `053_add_stop_mode_to_vm_scaling_rules.sql`: adds scaling `StopMode` and write-time scaling rule constraints
+- `054_alter_procedure-GetScalingRules.sql`: returns `StopMode` and `IsActive` for scaling rules
+- `055_alter_procedure-GetScalingRuleDetails.sql`: returns `StopMode` and `IsActive` for one scaling rule
+- `056_alter_procedure-CreateScalingRule.sql`: serializes rule creation and enforces a single active rule
+- `057_alter_procedure-UpdateScalingRule.sql`: updates scaling rules including `StopMode` without returning rows
+- `058_alter_procedure-GetVmScalingRulesHistoryPaged.sql`: includes `StopMode` in paged rule history
+- `059_alter_procedure-TriggerScalingLogic.sql`: implements serialized Phase 1 scaling decisions and action logging
+- `060_create_procedure-SyncVmPowerStates.sql`: reconciles VM power state from JSON provider data
+- `061_create_procedure-AppendScalingActivityNote.sql`: appends notes to a scaling activity row
+- `062_create_sequence-vm_user_uid.sql`: creates the VM user uid sequence seeded from existing users
+- `063_create_procedure-GetOrCreateVmUserUid.sql`: allocates unique Linux user ids from the sequence, retrying a duplicate-key collision against a savepoint when called inside the caller's transaction
+- `064_add_preserve_sessions_to_linux_host_settings.sql`: adds the preserve-sessions host setting and constraint
+- `065_alter_procedure-GetLinuxHostSettings.sql`: returns `PreserveSessionsOnDisconnect`
+- `066_alter_procedure-UpdateLinuxHostSettings.sql`: updates `PreserveSessionsOnDisconnect` and bumps versions only on change
 
 `033` exists as its own file rather than being folded into `014` because `014` runs before `029` adds those columns, and SQL Server validates column references against existing tables when a procedure is created.
 
@@ -113,6 +140,12 @@ Two current behaviors are worth calling out:
 
 - `dbo.VmUsers` is required by the API path that creates and tracks Linux-side user IDs.
 - `dbo.RegisterLinuxHostVm` is the procedure used by post-provision automation to register Linux hosts automatically.
+- Released VM lifecycle now uses `ReleasedDate` plus the global grace and reconcile settings. Returned or expired assigned hosts are marked `CleanupPending` with the returned username and lease until Linux-side cleanup completes.
+- `dbo.CheckoutVm` never assigns a cleanup-pending host as a new checkout; `dbo.CompleteVmCleanup` clears the pending state only for the matching lease and optional username.
+- Scaling is serialized with `sp_getapplock`, treats corrected legacy rule values defensively, logs every acquired run, and emits action rows with `ActionType` exactly `PowerOn` or `PowerOff`.
+- Scaling stop behavior is controlled by `StopMode` (`PowerOff` or `Deallocate`), and booting hosts count as serviceable without being selected for stop.
+- Linux user ids are allocated through `dbo.VmUserUidSequence`, seeded at the greater of 2000 or the current maximum user id plus one, and collision-skipped for legacy inserts.
+- Host settings include `PreserveSessionsOnDisconnect`, which cannot be enabled at the same time as `ScreenLockEnabled`.
 
 Linux host settings are a single fleet-wide profile:
 
@@ -183,6 +216,28 @@ Get-ChildItem -Path .\sql_queries -Filter *.sql |
 
 Manual execution is useful, but it does not automatically perform the newer post-provision Linux host registration unless you run that step separately.
 
+
+## Testing
+
+The integration harness under `sql_queries/tests/` applies every top-level SQL script using the same filename sort, `GO` splitting, CRLF normalization, and procedure rewrite rules as `deploy/Initialize-Database.ps1`. It applies the full script set twice to prove rerunnability, creates a throwaway database with `READ_COMMITTED_SNAPSHOT ON`, and resets test data between scenarios.
+
+Local run example:
+
+```powershell
+docker run -d --name lb-sqltest -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=<strong-password> -p 14330:1433 mcr.microsoft.com/mssql/server:2022-latest
+python -m venv sql_queries\tests\.venv
+.\sql_queries\tests\.venv\Scripts\python -m pip install -r sql_queries\tests\requirements.txt
+$env:SQL_TEST_SERVER = 'localhost:14330'
+$env:SQL_TEST_USER = 'sa'
+$env:SQL_TEST_PASSWORD = '<strong-password>'
+.\sql_queries\tests\.venv\Scripts\python -m pytest sql_queries\tests -q
+docker rm -f lb-sqltest
+```
+
+CI runs the same pytest command on `ubuntu-latest` with Python 3.13 against a `mcr.microsoft.com/mssql/server:2022-latest` service container, and then runs the Broker API against that database (`api/tests_integration`), which exercises every procedure through the real pymssql driver the way production does. See [../api/README.md](../api/README.md#local-development-and-tests).
+
+pymssql runs every statement inside its own transaction. A procedure that rolls back on a normal path unwinds that transaction too, and SQL Server raises error 266 when the procedure returns, so the API's commit fails. Commit what the procedure opened, or roll back to a savepoint when `@@TRANCOUNT > 0`.
+
 ## Verification
 
 After bootstrap, verify both tables and procedures.
@@ -228,7 +283,14 @@ WHERE name IN (
     'GetVmSummary',
     'GetVmHistoryPaged',
     'GetScalingActivityLogPaged',
-    'GetVmScalingRulesHistoryPaged'
+    'GetVmScalingRulesHistoryPaged',
+    'CompleteVmCleanup',
+    'BeginVmCleanupRetry',
+    'SetVmNetworkStatus',
+    'SetVmMaintenance',
+    'SyncVmPowerStates',
+    'AppendScalingActivityNote',
+    'GetOrCreateVmUserUid'
 )
 ORDER BY name;
 ```

@@ -6,7 +6,7 @@ from flask import jsonify
 
 from function_authentication import login_required
 from function_api import api_get, api_post
-from function_bff import API_PREFIX, broker_endpoint, history_page, json_body, require
+from function_bff import API_PREFIX, BadRequest, broker_endpoint, history_page, json_body, require
 
 logger = logging.getLogger(__name__)
 
@@ -71,5 +71,11 @@ def register_route_scaling_management(app):
 
 
 def _rule_payload(payload):
-    """The broker validates and coerces these, so they are forwarded as sent."""
-    return {field: payload[field] for field in RULE_FIELDS}
+    """Forward rule values, validating the optional stop mode contract."""
+    data = {field: payload[field] for field in RULE_FIELDS}
+    if 'stopmode' in payload and payload.get('stopmode') not in (None, ''):
+        stopmode = str(payload.get('stopmode')).strip()
+        if stopmode not in ('PowerOff', 'Deallocate'):
+            raise BadRequest("stopmode must be PowerOff or Deallocate.")
+        data['stopmode'] = stopmode
+    return data

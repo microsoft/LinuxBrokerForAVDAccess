@@ -1,8 +1,10 @@
+import type { ReactNode } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { AppShell } from './components/layout/AppShell';
+import { ButtonAnchor } from './components/ui/Button';
 import { ErrorPanel, LoadingPanel } from './components/ui/Feedback';
-import { SessionContext, useSessionQuery } from './hooks/useSession';
+import { SessionContext, useSession, useSessionQuery } from './hooks/useSession';
 import { errorMessage } from './lib/api';
 import type { SessionInfo } from './types/broker';
 
@@ -28,6 +30,34 @@ import { HostSettingsPage } from './pages/settings/HostSettings';
  * Routes deliberately mirror the URLs the Jinja portal served, so existing
  * bookmarks and links in runbooks keep resolving after the rewrite.
  */
+function NoAccessPage() {
+  return (
+    <ErrorPanel
+      title="No access"
+      message="Your account needs the Reader, Operator or Admin role for the Linux Broker API. Ask an administrator to assign a portal role."
+      action={
+        <ButtonAnchor href="/logout" variant="primary" icon="box-arrow-right">
+          Sign out
+        </ButtonAnchor>
+      }
+    />
+  );
+}
+
+export function NoPermissionPanel({ action = 'use this page' }: { action?: string }) {
+  return (
+    <ErrorPanel
+      title="Permission required"
+      message={`Your current Linux Broker API role does not allow you to ${action}.`}
+    />
+  );
+}
+
+function RequireAdmin({ children }: { children: ReactNode }) {
+  const session = useSession();
+  return session.permissions.admin ? <>{children}</> : <NoPermissionPanel />;
+}
+
 function AuthenticatedRoutes() {
   return (
     <Routes>
@@ -35,17 +65,17 @@ function AuthenticatedRoutes() {
       <Route path="/profile" element={<Profile />} />
 
       <Route path="/vms" element={<VmList />} />
-      <Route path="/vms/add" element={<AddVm />} />
-      <Route path="/vms/checkout" element={<CheckoutVm />} />
+      <Route path="/vms/add" element={<RequireAdmin><AddVm /></RequireAdmin>} />
+      <Route path="/vms/checkout" element={<RequireAdmin><CheckoutVm /></RequireAdmin>} />
       <Route path="/vms/history" element={<VmHistory />} />
       <Route path="/vms/:vmid" element={<VmDetails />} />
-      <Route path="/vms/:vmid/update" element={<UpdateVmAttributes />} />
+      <Route path="/vms/:vmid/update" element={<RequireAdmin><UpdateVmAttributes /></RequireAdmin>} />
 
       <Route path="/scaling/rules" element={<RuleList />} />
-      <Route path="/scaling/rules/create" element={<CreateRule />} />
+      <Route path="/scaling/rules/create" element={<RequireAdmin><CreateRule /></RequireAdmin>} />
       <Route path="/scaling/rules/history" element={<RuleHistory />} />
       <Route path="/scaling/rules/:ruleid" element={<RuleDetails />} />
-      <Route path="/scaling/rules/:ruleid/update" element={<UpdateRule />} />
+      <Route path="/scaling/rules/:ruleid/update" element={<RequireAdmin><UpdateRule /></RequireAdmin>} />
       <Route path="/scaling/log" element={<ActivityLog />} />
 
       <Route path="/settings/hosts" element={<HostSettingsPage />} />
@@ -85,7 +115,19 @@ export function App() {
   return (
     <SessionContext.Provider value={session as SessionInfo}>
       <AppShell>
-        {session.authenticated ? (
+        {session.authenticated && session.permissionsUnavailable ? (
+          <ErrorPanel
+            title="Permissions unavailable"
+            message="The portal could not verify your Linux Broker API roles. Try again; if this persists, ask an administrator to check the Broker API."
+            action={
+              <button type="button" className="lb-btn px-3.5 py-2 text-sm" onClick={() => void refetch()}>
+                Retry
+              </button>
+            }
+          />
+        ) : session.authenticated && !session.permissions.read ? (
+          <NoAccessPage />
+        ) : session.authenticated ? (
           <AuthenticatedRoutes />
         ) : (
           // Everything collapses to the landing page while signed out, rather than

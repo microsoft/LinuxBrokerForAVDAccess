@@ -3,10 +3,12 @@ import { Link } from 'react-router-dom';
 
 import { DataTable } from '../../components/data/DataTable';
 import type { Column } from '../../components/data/DataTable';
+import { Badge } from '../../components/ui/Badge';
 import { Button, ButtonLink } from '../../components/ui/Button';
-import { EmptyState, ErrorPanel, LoadingPanel, PageHeader } from '../../components/ui/Feedback';
+import { EmptyState, ErrorPanel, LoadingPanel, Notice, PageHeader } from '../../components/ui/Feedback';
 import { useToast } from '../../components/ui/Toast';
 import { useConfirm } from '../../hooks/useConfirm';
+import { useCan } from '../../hooks/useSession';
 import { useDeleteScalingRule, useScalingRules } from '../../hooks/useBroker';
 import { errorMessage } from '../../lib/api';
 import type { ScalingRule } from '../../types/broker';
@@ -16,6 +18,7 @@ export function RuleList() {
   const { showToast } = useToast();
   const { confirm, dialog } = useConfirm();
   const { data: rules, isPending, error } = useScalingRules();
+  const can = useCan();
   const deleteRule = useDeleteScalingRule();
 
   const columns: Array<Column<ScalingRule>> = [
@@ -30,6 +33,20 @@ export function RuleList() {
           {rule.RuleID}
         </Link>
       ),
+    },
+    {
+      key: 'active',
+      header: 'Active',
+      sort: 'text',
+      value: (rule) => (rule.IsActive ? 'Active' : ''),
+      render: (rule) => rule.IsActive ? <Badge tone="ok" icon="check-circle">Active</Badge> : <span className="text-subtle">&mdash;</span>,
+    },
+    {
+      key: 'stopmode',
+      header: 'Stop mode',
+      sort: 'text',
+      value: (rule) => rule.StopMode ?? 'PowerOff',
+      render: (rule) => rule.StopMode === 'Deallocate' ? 'Deallocate' : 'Power off',
     },
     {
       key: 'min',
@@ -94,20 +111,23 @@ export function RuleList() {
           >
             Details
           </Button>
-          <Button
-            size="sm"
-            icon="pencil"
-            onClick={() => navigate(`/scaling/rules/${rule.RuleID}/update`)}
-            aria-label={`Edit rule ${rule.RuleID}`}
-          >
-            Edit
-          </Button>
-          <Button
-            size="sm"
-            variant="danger"
-            icon="trash"
-            aria-label={`Delete rule ${rule.RuleID}`}
-            onClick={() =>
+          {can.admin ? (
+            <Button
+              size="sm"
+              icon="pencil"
+              onClick={() => navigate(`/scaling/rules/${rule.RuleID}/update`)}
+              aria-label={`Edit rule ${rule.RuleID}`}
+            >
+              Edit
+            </Button>
+          ) : null}
+          {can.admin ? (
+            <Button
+              size="sm"
+              variant="danger"
+              icon="trash"
+              aria-label={`Delete rule ${rule.RuleID}`}
+              onClick={() =>
               confirm({
                 title: 'Delete scaling rule?',
                 body: `Delete scaling rule #${rule.RuleID}? This cannot be undone.`,
@@ -126,6 +146,7 @@ export function RuleList() {
           >
             Delete
           </Button>
+          ) : null}
         </div>
       ),
     },
@@ -139,9 +160,11 @@ export function RuleList() {
         icon="sliders"
         actions={
           <>
-            <ButtonLink to="/scaling/rules/create" size="sm" variant="primary" icon="plus">
-              Add rule
-            </ButtonLink>
+            {can.admin && (!rules || rules.length === 0) ? (
+              <ButtonLink to="/scaling/rules/create" size="sm" variant="primary" icon="plus">
+                Add rule
+              </ButtonLink>
+            ) : null}
             <ButtonLink to="/scaling/log" size="sm" icon="activity">
               Activity log
             </ButtonLink>
@@ -158,15 +181,23 @@ export function RuleList() {
         <ErrorPanel message={errorMessage(error, 'Unable to retrieve scaling rules.')} />
       ) : null}
 
+      {rules && rules.length > 1 ? (
+        <Notice tone="warning" className="mb-4">
+          More than one scaling rule exists. Only the active rule is applied; delete the others.
+        </Notice>
+      ) : null}
+
       {rules && rules.length === 0 ? (
         <EmptyState
           title="No scaling rules found"
           message="Create a rule to define how Linux Broker powers VMs on and off."
           icon="sliders"
           action={
-            <ButtonLink to="/scaling/rules/create" variant="primary" icon="plus">
-              Create scaling rule
-            </ButtonLink>
+            can.admin ? (
+              <ButtonLink to="/scaling/rules/create" variant="primary" icon="plus">
+                Create scaling rule
+              </ButtonLink>
+            ) : undefined
           }
         />
       ) : null}

@@ -112,7 +112,26 @@ export function useReturnVm() {
   const invalidate = useVmInvalidation();
 
   return useMutation({
-    mutationFn: (vmid: number) => apiPost<unknown>(`/vms/${vmid}/return`),
+    mutationFn: (vmid: number) => apiPost<{ CleanupPending?: boolean; message?: string }>(`/vms/${vmid}/return`),
+    onSuccess: invalidate,
+  });
+}
+
+export function useCleanupVm() {
+  const invalidate = useVmInvalidation();
+
+  return useMutation({
+    mutationFn: (vmid: number) => apiPost<{ message?: string }>(`/vms/${vmid}/cleanup`),
+    onSuccess: invalidate,
+  });
+}
+
+export function useSetVmMaintenance() {
+  const invalidate = useVmInvalidation();
+
+  return useMutation({
+    mutationFn: (input: { vmid: number; enabled: boolean }) =>
+      apiPost<{ message?: string; Result?: string }>(`/vms/${input.vmid}/maintenance`, { enabled: input.enabled }),
     onSuccess: invalidate,
   });
 }

@@ -35,3 +35,7 @@ flask_session
 node_modules
 **/node_modules
 front_end/static/dist
+
+# Test suites are not needed at runtime.
+**/tests
+**/tests_integration

@@ -78,18 +78,38 @@ unmount_user_home() {
     done
 }
 
+terminate_leftover_processes() {
+    local attempts=0
+
+    # A user who is no longer signed in has no interactive session to preserve. Any
+    # remaining processes would keep the account usable and make the broker's userdel -r
+    # fail, so end them before the home is unmounted and the lease is released.
+    loginctl terminate-user "$USERNAME" >/dev/null 2>&1 || true
+    pkill -KILL -u "$USERNAME" >/dev/null 2>&1 || true
+
+    while pgrep -u "$USERNAME" >/dev/null 2>&1; do
+        if [ "$attempts" -ge 5 ]; then
+            echo "Processes are still running for $USERNAME." >&2
+            return 1
+        fi
+
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+}
+
 release_lease() {
     if user_is_signed_in; then
         # Unmounting or deleting the account would pull the home out from under a live
-        # session, so leave both. Without the lease, the RHEL release agent unmounts the
-        # home once the user signs out. The Ubuntu agent never unmounts homes.
-        rm -f "$LEASE_FILE"
-        echo "__LEASE_ACTION=cleared-in-use__"
+        # session, so leave both. The broker keeps the host in CleanupPending and retries
+        # cleanup; the lease must survive so release agents keep the home mounted meanwhile.
+        echo "__LEASE_ACTION=in-use__"
         return
     fi
 
     # Keep the lease on failure, so the release agent leaves the home alone and the broker
     # does not run userdel -r against it.
+    terminate_leftover_processes || exit 1
     unmount_user_home || exit 1
 
     rm -f "$LEASE_FILE"

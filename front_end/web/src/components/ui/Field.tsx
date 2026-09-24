@@ -194,9 +194,10 @@ export interface CheckboxProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
   className?: string;
+  disabled?: boolean;
 }
 
-export function Checkbox({ label, help, checked, onChange, className }: CheckboxProps) {
+export function Checkbox({ label, help, checked, onChange, className, disabled }: CheckboxProps) {
   const id = useId();
 
   return (
@@ -205,9 +206,10 @@ export function Checkbox({ label, help, checked, onChange, className }: Checkbox
         id={id}
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.checked)}
         aria-describedby={help ? `${id}-help` : undefined}
-        className="mt-0.5 size-4 shrink-0 cursor-pointer accent-[var(--lb-brand)]"
+        className="mt-0.5 size-4 shrink-0 cursor-pointer accent-[var(--lb-brand)] disabled:cursor-not-allowed disabled:opacity-60"
       />
       <div className="min-w-0">
         <label htmlFor={id} className="cursor-pointer text-sm text-ink">

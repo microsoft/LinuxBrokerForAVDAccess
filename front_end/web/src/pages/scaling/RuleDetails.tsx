@@ -1,16 +1,19 @@
 import { useParams } from 'react-router-dom';
 
 import { Breadcrumbs, DetailList } from '../../components/layout/Breadcrumbs';
+import { Badge } from '../../components/ui/Badge';
 import { ButtonLink } from '../../components/ui/Button';
 import { ErrorPanel, LoadingPanel, PageHeader } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
 import { useScalingRule } from '../../hooks/useBroker';
+import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
 import { valueOrDash } from '../../lib/format';
 
 export function RuleDetails() {
   const { ruleid } = useParams<{ ruleid: string }>();
   const { data: rule, isPending, error } = useScalingRule(ruleid);
+  const can = useCan();
 
   if (isPending) {
     return <LoadingPanel label="Loading scaling rule" />;
@@ -47,14 +50,16 @@ export function RuleDetails() {
             <ButtonLink to="/scaling/rules" size="sm" icon="chevron-left">
               Back to rules
             </ButtonLink>
-            <ButtonLink
-              to={`/scaling/rules/${rule.RuleID}/update`}
-              size="sm"
-              variant="primary"
-              icon="pencil"
-            >
-              Update rule
-            </ButtonLink>
+            {can.admin ? (
+              <ButtonLink
+                to={`/scaling/rules/${rule.RuleID}/update`}
+                size="sm"
+                variant="primary"
+                icon="pencil"
+              >
+                Update rule
+              </ButtonLink>
+            ) : null}
           </>
         }
       />
@@ -62,6 +67,8 @@ export function RuleDetails() {
       <GlassCard className="max-w-3xl p-5">
         <DetailList
           items={[
+            { label: 'Active', value: rule.IsActive ? <Badge tone="ok" icon="check-circle">Active</Badge> : 'No' },
+            { label: 'Stop mode', value: rule.StopMode === 'Deallocate' ? 'Deallocate' : 'Power off' },
             { label: 'Minimum VMs', value: valueOrDash(rule.MinVMs) },
             { label: 'Maximum VMs', value: valueOrDash(rule.MaxVMs) },
             { label: 'Scale up ratio', value: `${valueOrDash(rule.ScaleUpRatio)}%` },

@@ -10,7 +10,7 @@ import type { SessionInfo } from '../types/broker';
 
 export const TEST_SESSION: SessionInfo = {
   authenticated: true,
-  version: '0.114',
+  version: '0.115',
   csrfToken: 'test-csrf-token',
   user: {
     name: 'Test Operator',
@@ -18,6 +18,10 @@ export const TEST_SESSION: SessionInfo = {
     objectId: '0000-1111',
     tenantId: '2222-3333',
   },
+  roles: ['FullAccess'],
+  permissions: { read: true, operate: true, admin: true },
+  legacyAccess: false,
+  permissionsUnavailable: false,
 };
 
 interface Options extends Omit<RenderOptions, 'wrapper'> {

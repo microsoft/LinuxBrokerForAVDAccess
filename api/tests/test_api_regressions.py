@@ -108,6 +108,7 @@ def test_vm_summary_returns_integer_zeroes_when_procedure_has_no_row(client, fak
         "PoweredOff": 0,
         "Unreachable": 0,
         "Ready": 0,
+        "CleanupPending": 0,
     }
     assert all(isinstance(value, int) for value in response.get_json().values())
 
@@ -152,7 +153,7 @@ class _JwksResponse:
 
 
 def _call_token_required(app_module, monkeypatch, payload=None, decode_exception=None, header="Bearer token", group_member=True):
-    monkeypatch.setattr(app_module.requests, "get", lambda url: _JwksResponse())
+    monkeypatch.setattr(app_module.requests, "get", lambda url, **kwargs: _JwksResponse())
     monkeypatch.setattr(app_module.jwt, "get_unverified_header", lambda token: {"kid": "test-kid"})
 
     observed = {}
@@ -178,10 +179,10 @@ def _call_token_required(app_module, monkeypatch, payload=None, decode_exception
 
 
 @pytest.mark.parametrize("payload", [
-    {"oid": "user-oid", "scp": "Allowed Other"},
     {"oid": "user-oid", "roles": ["Allowed"]},
+    {"oid": "user-oid", "roles": ["Other", "Allowed"], "scp": "access_as_user"},
 ])
-def test_token_required_accepts_matching_scope_or_role(app_module, monkeypatch, payload):
+def test_token_required_accepts_a_matching_role(app_module, monkeypatch, payload):
     result, observed = _call_token_required(app_module, monkeypatch, payload=payload, group_member=False)
     response, status = result
     assert status == 200
@@ -192,6 +193,15 @@ def test_token_required_accepts_matching_scope_or_role(app_module, monkeypatch, 
         f"{app_module.AUTHORITY_HOST}/{app_module.TENANT_ID}/",
         f"{app_module.STS_ISSUER_HOST}/{app_module.TENANT_ID}/",
     ]
+
+
+def test_token_required_no_longer_accepts_a_delegated_scope_as_a_permission(app_module, monkeypatch):
+    """Every portal user holds access_as_user, so it cannot tell a reader from an admin."""
+    result, _observed = _call_token_required(
+        app_module, monkeypatch, payload={"oid": "user-oid", "scp": "Allowed access_as_user"}, group_member=False
+    )
+    _response, status = result
+    assert status == 403
 
 
 @pytest.mark.parametrize("exception_cls,message", [
@@ -292,7 +302,7 @@ def test_group_check_failure_is_not_cached_as_a_denial(app_module, monkeypatch):
         raise app_module.GroupCheckUnavailable("Graph API returned 429.")
 
     monkeypatch.setattr(app_module, "is_member_of_group", exploding_graph)
-    monkeypatch.setattr(app_module.requests, "get", lambda url: _JwksResponse())
+    monkeypatch.setattr(app_module.requests, "get", lambda url, **kwargs: _JwksResponse())
     monkeypatch.setattr(app_module.jwt, "get_unverified_header", lambda token: {"kid": "test-kid"})
     monkeypatch.setattr(app_module.jwt.algorithms.RSAAlgorithm, "from_jwk", staticmethod(lambda key: "key"))
     monkeypatch.setattr(app_module.jwt, "decode", lambda *a, **k: {"oid": "user-oid"})
@@ -431,11 +441,11 @@ def test_delete_remote_user_reports_a_home_that_is_still_mounted(app_module, mon
     assert "home directory is still mounted" in caplog.text
 
 
-def test_failed_checkout_cleans_up_the_host_before_releasing_the_vm(client, fake_db, app_module, monkeypatch):
+def test_failed_checkout_holds_the_vm_until_the_host_is_cleaned_up(client, fake_db, app_module, monkeypatch):
     """create-user.sh can fail after it writes the lease, which keeps the NFS home mounted.
 
-    The host must be cleaned up before the VM goes back to the pool, or the next user's
-    checkout could race the cleanup.
+    The VM is returned CleanupPending, so the next user's checkout cannot pick it before
+    the previous user has been removed from the host; the cleanup runs straight after.
     """
     fake_db.fetchall_rows["CheckoutVm"] = [
         {"VMID": 7, "Hostname": "lnxhost-07", "IPAddress": "10.0.0.7", "LeaseId": LEASE_ID}
@@ -443,18 +453,24 @@ def test_failed_checkout_cleans_up_the_host_before_releasing_the_vm(client, fake
     steps = []
     monkeypatch.setattr(app_module, "create_or_update_remote_user", lambda *args: False)
     monkeypatch.setattr(
-        app_module, "delete_remote_user",
-        lambda hostname, username, lease_id=None: steps.append(("delete", hostname, username, lease_id)) or True
+        app_module, "release_vm_assignment",
+        lambda vmid, lease_id: steps.append(("return", vmid, lease_id)) or {
+            "VMID": vmid, "Hostname": "lnxhost-07", "ReturnedUsername": "alice",
+            "ReturnedLeaseId": LEASE_ID, "CleanupPending": True,
+        }
     )
     monkeypatch.setattr(
-        app_module, "release_vm_assignment",
-        lambda vmid, lease_id: steps.append(("release", vmid, lease_id)) or True
+        app_module, "clean_up_returned_user",
+        lambda vmid, hostname, username, lease_id, timeout=120: steps.append(
+            ("cleanup", vmid, hostname, username, lease_id)
+        ) or app_module.CLEANUP_COMPLETED
     )
 
     response = client.post("/api/vms/checkout", json={"username": "alice", "avdhost": "avdhost-01"})
 
     assert response.status_code == 500
-    assert steps == [("delete", "lnxhost-07", "alice", LEASE_ID), ("release", 7, LEASE_ID)]
+    assert steps == [("return", 7, LEASE_ID), ("cleanup", 7, "lnxhost-07", "alice", LEASE_ID)]
+    assert "password" not in response.get_data(as_text=True)
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +492,11 @@ def test_failed_checkout_cleans_up_the_host_before_releasing_the_vm(client, fake
 def test_successful_deletes_and_rule_updates_answer_with_json(client, fake_db, path, body, proc, row, expected):
     if row is not None:
         fake_db.fetchone_rows[proc] = row
+    # Rule updates are validated against the rule they produce, so the current rule is read first.
+    fake_db.fetchone_rows["GetScalingRuleDetails"] = {
+        "RuleID": 7, "MinVMs": 2, "MaxVMs": 10, "ScaleUpRatio": 70.0, "ScaleUpIncrement": 2,
+        "ScaleDownRatio": 30.0, "ScaleDownIncrement": 1, "StopMode": "PowerOff", "IsActive": True,
+    }
 
     response = client.post(path, json=body)
 

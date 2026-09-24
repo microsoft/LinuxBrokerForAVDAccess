@@ -15,6 +15,7 @@ import {
 import { GlassCard } from '../../components/ui/GlassCard';
 import { useToast } from '../../components/ui/Toast';
 import { useApplyHostSettings, useHostSettings, useSaveHostSettings } from '../../hooks/useBroker';
+import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
 import { valueOrDash } from '../../lib/format';
 import type { HostSettings, Vm } from '../../types/broker';
@@ -62,7 +63,7 @@ const IDLE_FIELDS: NumberFieldSpec[] = [
   {
     key: 'IdleTimeoutSeconds',
     label: 'Idle timeout (seconds)',
-    help: 'Disconnect a connected user after this much inactivity. The session stays alive, so the reconnect grace period above still applies and the user can resume. Enter 0 to disable, otherwise at least 300.',
+    help: 'Disconnect a connected user after this much inactivity. If keep-sessions-alive is on, reconnect resumes open applications during the grace period; otherwise the user receives a fresh desktop on the same host. Enter 0 to disable, otherwise at least 300.',
     min: 0,
     max: 86400,
   },
@@ -103,6 +104,7 @@ export function HostSettingsPage() {
   const { data, isPending, error } = useHostSettings();
   const saveSettings = useSaveHostSettings();
   const applySettings = useApplyHostSettings();
+  const can = useCan();
 
   const [form, setForm] = useState<FormState | null>(null);
 
@@ -139,7 +141,7 @@ export function HostSettingsPage() {
 
   async function save(event: React.FormEvent) {
     event.preventDefault();
-    if (!form) {
+    if (!form || !can.admin) {
       return;
     }
 
@@ -159,6 +161,9 @@ export function HostSettingsPage() {
   }
 
   async function apply(hostname?: string) {
+    if (!can.operate) {
+      return;
+    }
     try {
       const result = await applySettings.mutateAsync(hostname);
       showToast(result.message, result.tone);
@@ -209,6 +214,19 @@ export function HostSettingsPage() {
           <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
             {LIFECYCLE_FIELDS.map(numberField)}
           </div>
+          <div className="mt-4">
+            <Checkbox
+              label="Keep sessions alive during the grace period"
+              help={
+                boolValue('ScreenLockEnabled')
+                  ? 'Cannot be combined with screen lock: a resumed locked xrdp session cannot be unlocked because users never know their rotating password.'
+                  : 'Disconnected desktops stay running until the grace period expires so reconnect resumes open applications and idle disconnects become resumable. Sessions hold memory while disconnected. Hosts must run the updated agent (deploy/Migrate-LinuxHostReleaseAgent.ps1), otherwise they show as pending.'
+              }
+              checked={boolValue('PreserveSessionsOnDisconnect')}
+              disabled={boolValue('ScreenLockEnabled')}
+              onChange={(checked) => setValue('PreserveSessionsOnDisconnect', checked)}
+            />
+          </div>
 
           <hr className="my-6 border-[var(--lb-hairline)]" />
 
@@ -242,8 +260,13 @@ export function HostSettingsPage() {
             />
             <Checkbox
               label="Lock the screen when the screensaver activates"
-              help="Off by default, for the reason above."
+              help={
+                boolValue('PreserveSessionsOnDisconnect')
+                  ? 'Cannot be combined with keep-sessions-alive: a resumed session behind a lock screen cannot be unlocked because users never know their rotating password.'
+                  : 'Off by default, for the reason above.'
+              }
               checked={boolValue('ScreenLockEnabled')}
+              disabled={boolValue('PreserveSessionsOnDisconnect')}
               onChange={(checked) => setValue('ScreenLockEnabled', checked)}
             />
 
@@ -264,7 +287,7 @@ export function HostSettingsPage() {
               type="submit"
               variant="primary"
               icon="check-circle"
-              disabled={saveSettings.isPending}
+              disabled={saveSettings.isPending || !can.admin}
             >
               {saveSettings.isPending ? 'Saving…' : 'Save settings'}
             </Button>
@@ -277,7 +300,7 @@ export function HostSettingsPage() {
         <Button
           icon="refresh"
           size="sm"
-          disabled={applySettings.isPending}
+          disabled={applySettings.isPending || !can.operate}
           onClick={() => void apply()}
         >
           {applySettings.isPending ? 'Applying…' : 'Apply now to all hosts'}
@@ -289,6 +312,7 @@ export function HostSettingsPage() {
         currentVersion={settings.SettingsVersion}
         onApply={(hostname) => void apply(hostname)}
         busy={applySettings.isPending}
+        canApply={can.operate}
       />
     </>
   );
@@ -299,11 +323,13 @@ function DriftTable({
   currentVersion,
   onApply,
   busy,
+  canApply,
 }: {
   hosts: Vm[];
   currentVersion: number;
   onApply: (hostname: string) => void;
   busy: boolean;
+  canApply: boolean;
 }) {
   if (hosts.length === 0) {
     return (
@@ -379,14 +405,16 @@ function DriftTable({
       headerClassName: 'text-right',
       className: 'text-right',
       render: (host) => (
-        <Button
-          size="sm"
-          disabled={busy}
-          onClick={() => onApply(host.Hostname)}
-          aria-label={`Apply settings now to ${host.Hostname}`}
-        >
-          Apply now
-        </Button>
+        canApply ? (
+          <Button
+            size="sm"
+            disabled={busy}
+            onClick={() => onApply(host.Hostname)}
+            aria-label={`Apply settings now to ${host.Hostname}`}
+          >
+            Apply now
+          </Button>
+        ) : null
       ),
     },
   ];

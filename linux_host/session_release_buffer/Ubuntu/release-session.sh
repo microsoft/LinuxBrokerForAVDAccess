@@ -28,6 +28,7 @@ GRACE_PERIOD_SECONDS=1200
 IDLE_TIMEOUT_SECONDS=0
 IDLE_WARNING_SECONDS=120
 SETTINGS_VERSION=0
+PRESERVE_SESSIONS_ON_DISCONNECT=false
 
 RUN_MODE="manual"
 
@@ -51,6 +52,9 @@ log() {
 
 ensure_state_files() {
     mkdir -p "$STATE_DIRECTORY"
+    # Temporary files are written here so the final mv is an atomic rename, and API
+    # responses and lease state must not be readable by the users signed in to the host.
+    chmod 700 "$STATE_DIRECTORY"
     touch "$LOG_FILE" "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE" "$IDLE_WARNED_USERS_FILE"
     chmod 600 "$LOG_FILE" "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE" "$IDLE_WARNED_USERS_FILE"
 }
@@ -144,7 +148,7 @@ tsv_upsert() {
     local tmp_file
 
     touch "$file"
-    tmp_file=$(mktemp)
+    tmp_file="$STATE_DIRECTORY/$(basename "$file").$$.tmp"
     awk -F '\t' -v user="$username" '$1 != user' "$file" > "$tmp_file"
     printf '%s\t%s\n' "$username" "$value" >> "$tmp_file"
     mv "$tmp_file" "$file"
@@ -158,7 +162,7 @@ tsv_clear() {
 
     [ -f "$file" ] || return 0
 
-    tmp_file=$(mktemp)
+    tmp_file="$STATE_DIRECTORY/$(basename "$file").$$.tmp"
     awk -F '\t' -v user="$username" '$1 != user' "$file" > "$tmp_file"
     mv "$tmp_file" "$file"
     chmod 600 "$file"
@@ -177,6 +181,7 @@ load_settings() {
     IDLE_TIMEOUT_SECONDS="${LINUXBROKER_IDLE_TIMEOUT_SECONDS:-$IDLE_TIMEOUT_SECONDS}"
     IDLE_WARNING_SECONDS="${LINUXBROKER_IDLE_WARNING_SECONDS:-$IDLE_WARNING_SECONDS}"
     SETTINGS_VERSION="${LINUXBROKER_SETTINGS_VERSION:-$SETTINGS_VERSION}"
+    PRESERVE_SESSIONS_ON_DISCONNECT="${LINUXBROKER_PRESERVE_SESSIONS_ON_DISCONNECT:-$PRESERVE_SESSIONS_ON_DISCONNECT}"
 }
 
 # Pull side of settings delivery. Every failure path here is non-fatal: reconciliation is
@@ -208,7 +213,7 @@ refresh_settings() {
         return 0
     fi
 
-    response_file=$(mktemp)
+    response_file="$STATE_DIRECTORY/settings-response.$$.json"
 
     http_status=$(/usr/bin/curl -s -m 20 -w "%{http_code}" -o "$response_file" -X GET "$settings_url" \
         -H "Authorization: Bearer $access_token" \
@@ -279,6 +284,18 @@ acknowledge_settings() {
     fi
 }
 
+xorg_processes_for_user() {
+    local username="$1"
+
+    ps h -C Xorg -o pid=,user=,comm= 2>/dev/null | awk -v user="$username" '$2 == user {print $1 ":" $3}'
+}
+
+xorg_processes_remaining() {
+    local username="$1"
+
+    [ -n "$(xorg_processes_for_user "$username")" ]
+}
+
 terminate_session_processes() {
     local username="$1"
     local found_process="false"
@@ -294,9 +311,7 @@ terminate_session_processes() {
         else
             log "ERROR: Failed to terminate $process_name process $pid for user $username."
         fi
-    done < <(
-        ps h -C Xorg -o pid=,user=,comm= 2>/dev/null | awk -v user="$username" '$2 == user {print $1 ":" $3}'
-    )
+    done < <(xorg_processes_for_user "$username")
 
     if [ "$found_process" != "true" ]; then
         log "No XRDP session process found for user $username."
@@ -361,7 +376,7 @@ release_vm() {
         request_body=$(/usr/bin/jq -cn --arg username "$username" '{username: $username}')
     fi
 
-    response_file=$(mktemp)
+    response_file="$STATE_DIRECTORY/release-response.$$.json"
 
     http_status=$(/usr/bin/curl -s -w "%{http_code}" -o "$response_file" -X POST "$release_vm_url" \
         -H "Authorization: Bearer $access_token" \
@@ -397,7 +412,11 @@ release_vm() {
 
     cat "$response_file" >> "$LOG_FILE"
 
-    terminate_session_processes "$username"
+    if [ "$PRESERVE_SESSIONS_ON_DISCONNECT" != "true" ]; then
+        terminate_session_processes "$username"
+    else
+        log "PreserveSessionsOnDisconnect is enabled. Leaving Xorg processes for user $username running after release."
+    fi
 
     rm -f "$response_file"
 
@@ -435,6 +454,13 @@ reconcile_disconnected_user() {
     if [ "$elapsed" -ge "$GRACE_PERIOD_SECONDS" ]; then
         log "User $username remained disconnected for $elapsed seconds. Terminating remaining sessions."
         terminate_logind_sessions "$username"
+        terminate_session_processes "$username"
+
+        if xorg_processes_remaining "$username"; then
+            log "ERROR: Xorg processes remain for user $username after grace-period cleanup. Keeping disconnect timestamp for retry."
+            return
+        fi
+
         clear_disconnect_timestamp "$username"
         return
     fi
@@ -658,8 +684,11 @@ main() {
     local status
     local disconnected_at
     local prev_user
+    local active_pid
     local current_users=()
     local previous_users=()
+    declare -A user_status=()
+    declare -A user_active_pids=()
 
     ensure_state_files
     ensure_jq_installed
@@ -688,21 +717,36 @@ main() {
         pid=$(echo "$line" | awk '{print $1}')
         username=$(echo "$line" | awk '{print $2}')
         start_time=$(echo "$line" | awk '{print $3}')
-        status=$(echo "$line" | awk '{print $NF}' | xargs)
+        status=$(echo "$line" | awk '{print $NF}' | sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' | xargs)
 
         if [ -z "$username" ] || [ "$pid" = "PID" ]; then
             continue
         fi
 
-        current_users+=("$username")
+        if ! array_contains "$username" "${current_users[@]}"; then
+            current_users+=("$username")
+        fi
 
         if ! [[ -z "$start_time" || "$start_time" == *"START_TIME"* ]]; then
             log "PID: $pid, Username: $username, Start Time: $start_time, Status: $status"
         fi
 
+        if [[ "$status" == *"active"* ]]; then
+            user_status["$username"]="active"
+            user_active_pids["$username"]+="$pid "
+        elif [[ "$status" == *"disconnected"* ]]; then
+            if [ "${user_status[$username]:-}" != "active" ]; then
+                user_status["$username"]="disconnected"
+            fi
+        else
+            log "User $username reported unexpected session status '$status'."
+        fi
+    done < "$CURRENT_USERS_DETAILS"
+
+    for username in "${current_users[@]}"; do
         disconnected_at=$(get_disconnect_timestamp "$username")
 
-        if [[ "$status" == *"active"* ]]; then
+        if [ "${user_status[$username]:-}" = "active" ]; then
             if [ -n "$disconnected_at" ]; then
                 log "User $username reconnected. Clearing pending grace period."
                 clear_disconnect_timestamp "$username"
@@ -710,8 +754,10 @@ main() {
                 log "User $username is active. No action to perform."
             fi
 
-            enforce_idle_session "$username" "$pid"
-        elif [[ "$status" == *"disconnected"* ]]; then
+            for active_pid in ${user_active_pids[$username]:-}; do
+                enforce_idle_session "$username" "$active_pid"
+            done
+        elif [ "${user_status[$username]:-}" = "disconnected" ]; then
             if [ -z "$disconnected_at" ]; then
                 log "User $username is disconnected. Releasing VM and starting grace period."
 
@@ -723,10 +769,8 @@ main() {
             else
                 reconcile_disconnected_user "$username" "$disconnected_at" "$now"
             fi
-        else
-            log "User $username reported unexpected session status '$status'."
         fi
-    done < "$CURRENT_USERS_DETAILS"
+    done
 
     for prev_user in "${previous_users[@]}"; do
         [ -z "$prev_user" ] && continue
@@ -750,8 +794,10 @@ main() {
     log "Script completed."
 }
 
-acquire_reconcile_lock
-log "Script started."
-trap "release_reconcile_lock; log 'Script exiting.'" EXIT INT TERM
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    acquire_reconcile_lock
+    log "Script started."
+    trap "release_reconcile_lock; log 'Script exiting.'" EXIT INT TERM
 
-main
+    main
+fi

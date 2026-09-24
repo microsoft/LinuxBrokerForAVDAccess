@@ -7,6 +7,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App } from './App';
 import { ToastProvider } from './components/ui/Toast';
 import { setCsrfToken } from './lib/api';
+import type { SessionInfo } from './types/broker';
 
 /*
  * Integration cover for the whole client: session bootstrap, the app shell, the
@@ -17,9 +18,9 @@ import { setCsrfToken } from './lib/api';
  * used incorrectly. This does.
  */
 
-const SESSION = {
+const SESSION: SessionInfo = {
   authenticated: true,
-  version: '0.114',
+  version: '0.115',
   csrfToken: 'test-csrf-token',
   user: {
     name: 'Test Operator',
@@ -27,12 +28,16 @@ const SESSION = {
     objectId: '0000-1111',
     tenantId: '2222-3333',
   },
+  roles: ['FullAccess'],
+  permissions: { read: true, operate: true, admin: true },
+  legacyAccess: false,
+  permissionsUnavailable: false,
 };
 
 const DASHBOARD = {
   stats: {
     total: 9, available: 4, checked_out: 3, maintenance: 1, released: 1, other: 0,
-    unreachable: 2, powered_on: 7, powered_off: 2, ready: 3, attention: 3,
+    unreachable: 2, powered_on: 7, powered_off: 2, ready: 3, cleanup_pending: 0, attention: 3,
     utilization: 33,
     pct: { available: 44.44, checked_out: 33.33, released: 11.11, maintenance: 11.11, other: 0 },
   },
@@ -51,20 +56,20 @@ const VMS = [
     VMID: 1, Hostname: 'linux-host-01', IPAddress: '10.0.0.4', PowerState: 'On',
     NetworkStatus: 'Reachable', VmStatus: 'Available', Username: null, AvdHost: null,
     Description: 'Pool host', LastUpdateDate: '2026-08-01 10:00:00',
-    CreateDate: '2026-07-01 10:00:00', SysStartTime: '2026-08-01 10:00:00', SysEndTime: null,
+    CreateDate: '2026-07-01 10:00:00', SysStartTime: '2026-08-01 10:00:00', SysEndTime: null, CleanupPending: false, ReleasedDate: null, CleanupUsername: null, PowerStateChangedDate: null,
   },
   {
     VMID: 2, Hostname: 'linux-host-02', IPAddress: '10.0.0.5', PowerState: 'On',
     NetworkStatus: 'Reachable', VmStatus: 'CheckedOut', Username: 'alice@contoso.com',
     AvdHost: 'avd-01', Description: '', LastUpdateDate: '2026-08-02 11:00:00',
-    CreateDate: '2026-07-01 10:00:00', SysStartTime: '2026-08-02 11:00:00', SysEndTime: null,
+    CreateDate: '2026-07-01 10:00:00', SysStartTime: '2026-08-02 11:00:00', SysEndTime: null, CleanupPending: false, ReleasedDate: null, CleanupUsername: null, PowerStateChangedDate: null,
   },
 ];
 
 const RULES = [
   {
     RuleID: 1, MinVMs: 2, MaxVMs: 20, ScaleUpRatio: 80, ScaleUpIncrement: 2,
-    ScaleDownRatio: 30, ScaleDownIncrement: 1,
+    ScaleDownRatio: 30, ScaleDownIncrement: 1, StopMode: 'PowerOff', IsActive: true,
   },
 ];
 
@@ -73,7 +78,7 @@ const HOST_SETTINGS = {
     GracePeriodSeconds: 1200, ReconcileIntervalSeconds: 60, WatcherDebounceSeconds: 10,
     WatcherSettleSeconds: 2, IdleTimeoutSeconds: 0, IdleWarningSeconds: 120,
     ScreenLockEnabled: false, DisableLockScreen: true, ScreenIdleDelaySeconds: 0,
-    ScreenLockDelaySeconds: 0, ScreenLockSettingsLocked: true, SettingsVersion: 3,
+    ScreenLockDelaySeconds: 0, ScreenLockSettingsLocked: true, PreserveSessionsOnDisconnect: false, SettingsVersion: 3,
   },
   hosts: VMS,
 };
@@ -88,8 +93,7 @@ function jsonResponse(body: unknown, status = 200) {
   } as Response;
 }
 
-let session: typeof SESSION | { authenticated: false; version: string; csrfToken: string; user: null } =
-  SESSION;
+let session: typeof SESSION = SESSION;
 const requests: string[] = [];
 
 function stubFetch() {
@@ -152,7 +156,7 @@ describe('App', () => {
     expect(await screen.findByText('33% of the pool in use')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Pool overview', level: 1 })).toBeInTheDocument();
     expect(screen.getByText('On, reachable and unassigned')).toBeInTheDocument();
-    expect(screen.getByText('2 unreachable \u00b7 1 maintenance')).toBeInTheDocument();
+    expect(screen.getByText('2 unreachable \u00b7 1 maintenance \u00b7 0 cleanup pending')).toBeInTheDocument();
     expect(screen.getByText('Pool composition')).toBeInTheDocument();
     // The activity panel rendered too, with its action badge.
     expect(screen.getByText('Scale up')).toBeInTheDocument();
@@ -175,7 +179,7 @@ describe('App', () => {
   });
 
   it('shows the sign-in landing page when signed out', async () => {
-    session = { authenticated: false, version: '0.114', csrfToken: 'anon-token', user: null };
+    session = { ...SESSION, authenticated: false, version: '0.115', csrfToken: 'anon-token', user: null, roles: [], permissions: { read: false, operate: false, admin: false }, legacyAccess: false, permissionsUnavailable: false };
     renderApp('/');
 
     // The footer carries the same wording, so match the page heading specifically.
@@ -188,7 +192,7 @@ describe('App', () => {
   });
 
   it('redirects a signed-out visitor away from a deep link', async () => {
-    session = { authenticated: false, version: '0.114', csrfToken: 'anon-token', user: null };
+    session = { ...SESSION, authenticated: false, version: '0.115', csrfToken: 'anon-token', user: null, roles: [], permissions: { read: false, operate: false, admin: false }, legacyAccess: false, permissionsUnavailable: false };
     renderApp('/vms');
 
     // Rendering a page frame that cannot load any data would be worse than the
@@ -233,6 +237,49 @@ describe('App', () => {
   ])('mounts %s', async (route, heading) => {
     renderApp(route);
     expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
+  });
+
+
+
+  it('shows no-access page for authenticated users without read permission', async () => {
+    session = { ...SESSION, roles: [], permissions: { read: false, operate: false, admin: false } };
+    renderApp('/');
+
+    expect(await screen.findByText('No access')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'Sign out' }).some((link) => link.getAttribute('href') === '/logout')).toBe(true);
+    expect(requests.every((url) => url.startsWith('/api/ui/session'))).toBe(true);
+  });
+
+  it('shows a retry panel when permissions are unavailable', async () => {
+    session = { ...SESSION, permissionsUnavailable: true, permissions: { read: false, operate: false, admin: false } };
+    renderApp('/');
+
+    expect(await screen.findByText('Permissions unavailable')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('shows read-only and legacy access banners', async () => {
+    session = { ...SESSION, legacyAccess: true, roles: ['Reader'], permissions: { read: true, operate: false, admin: false } };
+    renderApp('/profile');
+
+    expect(await screen.findByText(/Read-only access/)).toBeInTheDocument();
+    expect(screen.getByText(/legacy scope setting/)).toBeInTheDocument();
+  });
+
+  it('gates VM actions for reader and operator roles', async () => {
+    session = { ...SESSION, roles: ['Reader'], permissions: { read: true, operate: false, admin: false } };
+    const { unmount } = renderApp('/vms');
+    await screen.findByRole('heading', { name: 'Virtual machines' });
+    expect(screen.queryByRole('button', { name: 'Release linux-host-02' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete linux-host-01' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Add VM' })).not.toBeInTheDocument();
+    unmount();
+
+    session = { ...SESSION, roles: ['Operator'], permissions: { read: true, operate: true, admin: false } };
+    renderApp('/vms');
+    expect(await screen.findByRole('button', { name: 'Release linux-host-02' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete linux-host-01' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Add VM' })).not.toBeInTheDocument();
   });
 
   it('renders the not-found state for an unknown client route', async () => {

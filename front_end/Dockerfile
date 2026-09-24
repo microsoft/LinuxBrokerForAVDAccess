@@ -39,4 +39,8 @@ COPY --from=web /static/dist ./static/dist
 
 EXPOSE 8000
 
+# Several requests are served at once, and Apply Now can wait up to APPLY_TIMEOUT_SECONDS
+# on the Broker API. Override with a GUNICORN_CMD_ARGS app setting.
+ENV GUNICORN_CMD_ARGS="--workers 2 --threads 4 --timeout 120 --graceful-timeout 30 --keep-alive 5"
+
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]

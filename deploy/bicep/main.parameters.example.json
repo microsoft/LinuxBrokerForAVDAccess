@@ -65,6 +65,12 @@
     "sqlAdminPassword": {
       "value": "<sql-admin-password>"
     },
+    "sqlDatabaseSkuName": {
+      "value": "Basic"
+    },
+    "allowLegacyScopeAccess": {
+      "value": false
+    },
     "flaskKey": {
       "value": "<flask-session-secret>"
     },

@@ -13,6 +13,9 @@ export function Profile() {
     { label: 'Username', value: valueOrDash(user?.username) },
     { label: 'Object ID', value: valueOrDash(user?.objectId) },
     { label: 'Tenant ID', value: valueOrDash(user?.tenantId) },
+    { label: 'Roles', value: session.roles.length ? session.roles.join(', ') : 'None' },
+    { label: 'Effective permissions', value: ['read', 'operate', 'admin'].filter((key) => session.permissions[key as keyof typeof session.permissions]).join(', ') || 'None' },
+    { label: 'Legacy access', value: session.legacyAccess ? 'Yes' : 'No' },
   ];
 
   return (

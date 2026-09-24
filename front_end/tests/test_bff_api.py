@@ -358,11 +358,11 @@ def test_add_vm_forwards_the_full_payload(signed_in_client, broker_api):
 
     sent = broker_api.posts[-1]["json"]
     assert sent["hostname"] == "linux-host-09"
-    # Optional fields are sent as empty strings rather than omitted, matching what
-    # the form used to submit.
-    assert sent["username"] == ""
-    assert sent["avdhost"] == ""
-    assert sent["description"] == ""
+    # Blank optional fields are sent as null. The broker only checks out hosts whose
+    # Username is NULL, so an empty string used to leave a newly added host unusable.
+    assert sent["username"] is None
+    assert sent["avdhost"] is None
+    assert sent["description"] is None
 
 
 def test_add_vm_names_the_missing_fields(signed_in_client):
@@ -597,3 +597,69 @@ def test_deleted_templates_are_not_referenced():
         text = module.read_text(encoding="utf-8")
         assert "render_template" not in text, f"{module.name} still renders a template"
         assert "flash(" not in text, f"{module.name} still uses flash messages"
+
+
+
+def test_session_endpoint_includes_permissions(signed_in_client):
+    payload = signed_in_client.get(f"{API}/session").get_json()
+
+    assert payload["roles"] == ["FullAccess"]
+    assert payload["permissions"] == {"read": True, "operate": True, "admin": True}
+    assert payload["legacyAccess"] is False
+    assert payload["permissionsUnavailable"] is False
+
+
+def test_anonymous_session_has_empty_permissions(client):
+    payload = client.get(f"{API}/session").get_json()
+
+    assert payload["roles"] == []
+    assert payload["permissions"] == {"read": False, "operate": False, "admin": False}
+    assert payload["legacyAccess"] is False
+    assert payload["permissionsUnavailable"] is False
+
+
+def test_checkout_response_removes_sensitive_fields(signed_in_client):
+    response = post(signed_in_client, f"{API}/vms/checkout", {"username": "u", "avdhost": "h"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert "password" not in payload
+    assert "LeaseId" not in payload
+
+
+def test_vm_cleanup_endpoint_forwards_to_api(signed_in_client, broker_api):
+    response = post(signed_in_client, f"{API}/vms/1/cleanup", {})
+
+    assert response.status_code == 200
+    assert broker_api.posts[-1]["url"].endswith("/vms/1/cleanup")
+
+
+def test_vm_maintenance_requires_boolean(signed_in_client):
+    response = post(signed_in_client, f"{API}/vms/1/maintenance", {"enabled": "yes"})
+
+    assert response.status_code == 400
+    assert "enabled" in response.get_json()["error"]
+
+
+def test_vm_maintenance_forwards_boolean(signed_in_client, broker_api):
+    response = post(signed_in_client, f"{API}/vms/1/maintenance", {"enabled": True})
+
+    assert response.status_code == 200
+    assert broker_api.posts[-1]["url"].endswith("/vms/1/maintenance")
+    assert broker_api.posts[-1]["json"] == {"enabled": True}
+
+
+def test_scaling_rule_forwards_stopmode(signed_in_client, broker_api):
+    body = {"minvms": "1", "maxvms": "4", "scaleupratio": "80", "scaleupincrement": "1", "scaledownratio": "20", "scaledownincrement": "1", "stopmode": "Deallocate"}
+    response = post(signed_in_client, f"{API}/scaling/rules", body)
+
+    assert response.status_code == 201
+    assert broker_api.posts[-1]["json"]["stopmode"] == "Deallocate"
+
+
+def test_scaling_rule_rejects_invalid_stopmode(signed_in_client):
+    body = {"minvms": "1", "maxvms": "4", "scaleupratio": "80", "scaleupincrement": "1", "scaledownratio": "20", "scaledownincrement": "1", "stopmode": "Hibernate"}
+    response = post(signed_in_client, f"{API}/scaling/rules", body)
+
+    assert response.status_code == 400
+    assert "stopmode" in response.get_json()["error"]

@@ -11,11 +11,21 @@ export interface SessionUser {
   tenantId: string | null;
 }
 
+export interface Permissions {
+  read: boolean;
+  operate: boolean;
+  admin: boolean;
+}
+
 export interface SessionInfo {
   authenticated: boolean;
   version: string;
   csrfToken: string;
   user: SessionUser | null;
+  roles: string[];
+  permissions: Permissions;
+  legacyAccess: boolean;
+  permissionsUnavailable: boolean;
 }
 
 export type VmStatus = 'Available' | 'CheckedOut' | 'Maintenance' | 'Released';
@@ -43,6 +53,10 @@ export interface Vm {
   SysEndTime: string | null;
   SettingsVersion?: number | null;
   SettingsAppliedDate?: string | null;
+  ReleasedDate?: string | null;
+  CleanupPending?: boolean | null;
+  CleanupUsername?: string | null;
+  PowerStateChangedDate?: string | null;
 }
 
 export interface ScalingRule {
@@ -53,6 +67,8 @@ export interface ScalingRule {
   ScaleUpIncrement: number;
   ScaleDownRatio: number;
   ScaleDownIncrement: number;
+  StopMode?: 'PowerOff' | 'Deallocate' | null;
+  IsActive?: boolean | null;
   SysStartTime?: string | null;
   SysEndTime?: string | null;
 }
@@ -82,6 +98,7 @@ export interface HostSettings {
   ScreenIdleDelaySeconds: number;
   ScreenLockDelaySeconds: number;
   ScreenLockSettingsLocked: boolean;
+  PreserveSessionsOnDisconnect: boolean;
   SettingsVersion: number;
 }
 
@@ -97,6 +114,7 @@ export interface ApplySettingsResult {
   unreachable: string[];
   message: string;
   tone: 'success' | 'warning' | 'info';
+  notAttempted?: string[];
 }
 
 export interface SaveSettingsResult {
@@ -125,6 +143,7 @@ export interface DashboardStats {
   powered_on: number;
   powered_off: number;
   ready: number;
+  cleanup_pending: number;
   attention: number;
   utilization: number;
   pct: PoolComposition;
@@ -177,4 +196,5 @@ export interface ScalingRuleInput {
   scaleupincrement: string;
   scaledownratio: string;
   scaledownincrement: string;
+  stopmode: 'PowerOff' | 'Deallocate';
 }

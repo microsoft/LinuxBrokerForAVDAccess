@@ -12,7 +12,7 @@ from flask import Flask, jsonify, request, send_from_directory, session
 from flask_session import Session
 from flask_wtf.csrf import CSRFProtect, CSRFError, generate_csrf
 
-from function_api import NotAuthenticated, api_post, fetch_vm_summary
+from function_api import NotAuthenticated, api_get, api_post, fetch_vm_summary
 from function_authentication import login_required
 from function_bff import API_PREFIX, json_error
 from route_authentication import register_route_authentication
@@ -26,7 +26,7 @@ from route_host_settings import register_route_host_settings
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('FLASK_KEY')
 app.config['SESSION_TYPE'] = 'filesystem'
-app.config['VERSION'] = '0.114'
+app.config['VERSION'] = '0.115'
 # Tokens stay valid for the life of the session rather than expiring after an
 # hour, so a long-lived management page does not start rejecting submissions.
 app.config['WTF_CSRF_TIME_LIMIT'] = None
@@ -106,6 +106,40 @@ def favicon():
 # Session and dashboard
 
 
+def _empty_permissions():
+    return {"read": False, "operate": False, "admin": False}
+
+
+def _session_permissions(authenticated):
+    if not authenticated:
+        return [], _empty_permissions(), False, False
+
+    permissions = session.get('permissions')
+    roles = session.get('roles')
+    if not isinstance(permissions, dict) or not isinstance(roles, list):
+        try:
+            me = api_get('/me')
+            roles = me.get('roles') or []
+            permissions = me.get('permissions') or {}
+            session['roles'] = roles
+            session['permissions'] = permissions
+            session['legacy_access'] = bool(me.get('legacyScopeAccess'))
+            session.pop('permissions_unavailable', None)
+        except Exception as e:
+            logger.warning("Unable to refresh broker permissions for UI session: %s", e)
+            session['permissions_unavailable'] = True
+            roles = [] if not isinstance(roles, list) else roles
+            permissions = _empty_permissions()
+
+    normalized = _empty_permissions()
+    if isinstance(permissions, dict):
+        for key in normalized:
+            normalized[key] = bool(permissions.get(key))
+
+    return (roles if isinstance(roles, list) else [], normalized,
+            bool(session.get('legacy_access')), bool(session.get('permissions_unavailable')))
+
+
 @app.route(f'{API_PREFIX}/session')
 def ui_session():
     """Bootstrap payload for the SPA.
@@ -120,6 +154,8 @@ def ui_session():
     claims = user if isinstance(user, dict) else {}
     authenticated = bool(claims) and bool(session.get('access_token'))
 
+    roles, permissions, legacy_access, permissions_unavailable = _session_permissions(authenticated)
+
     return jsonify({
         "authenticated": authenticated,
         "version": app.config['VERSION'],
@@ -131,6 +167,10 @@ def ui_session():
             "objectId": claims.get('oid'),
             "tenantId": claims.get('tid'),
         } if authenticated else None,
+        "roles": roles,
+        "permissions": permissions,
+        "legacyAccess": legacy_access,
+        "permissionsUnavailable": permissions_unavailable,
     })
 
 

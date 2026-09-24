@@ -5,11 +5,17 @@ on:
     paths:
       - 'front_end/**'
       - 'api/**'
+      - 'task/**'
+      - 'sql_queries/**'
+      - 'linux_host/**'
       - '.github/workflows/front-end-tests.yml'
   push:
     paths:
       - 'front_end/**'
       - 'api/**'
+      - 'task/**'
+      - 'sql_queries/**'
+      - 'linux_host/**'
       - '.github/workflows/front-end-tests.yml'
 
 jobs:
@@ -117,3 +123,94 @@ jobs:
           MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: provider-secret
           NFS_SHARE: /mnt/test
         run: pytest
+
+  sql-test:
+    name: SQL scripts and Broker API against SQL Server
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    # A throwaway server for this job only; the password is not a secret.
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'LinuxBroker-CI-Only-1!'
+        ports:
+          - 1433:1433
+
+    env:
+      SQL_TEST_SERVER: localhost:1433
+      SQL_TEST_USER: sa
+      SQL_TEST_PASSWORD: 'LinuxBroker-CI-Only-1!'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python version
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sql_queries/tests/requirements.txt -r api/requirements.txt -r api/requirements-dev.txt
+
+      - name: Wait for SQL Server
+        run: |
+          python -c "
+          import time, pymssql
+          for attempt in range(90):
+              try:
+                  pymssql.connect(server='localhost', port=1433, user='sa', password='LinuxBroker-CI-Only-1!', database='master').close()
+                  break
+              except Exception:
+                  time.sleep(2)
+          else:
+              raise SystemExit('SQL Server did not accept connections in time.')
+          "
+
+      # Applies every script twice, with READ_COMMITTED_SNAPSHOT on as in Azure SQL.
+      - name: Run the SQL contract tests
+        run: pytest sql_queries/tests -q
+
+      - name: Run the Broker API against SQL Server
+        working-directory: api
+        run: pytest tests_integration -q
+
+  host-scripts:
+    name: Linux host scripts
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the host script tests
+        run: bash linux_host/tests/run.sh
+
+  task-test:
+    name: Scheduled task function
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python version
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r task/requirements.txt -r task/requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest task/tests -q

@@ -7,6 +7,35 @@ param administratorLogin string
 param administratorPassword string
 param allowedClientIp string = ''
 
+@description('SKU name, for example Basic, S0, S1 or GP_S_Gen5_1. The tier is derived from the name.')
+param skuName string = 'Basic'
+
+// DTU SKU names map to a tier; vCore names such as GP_S_Gen5_1 carry it in the name.
+var dtuTiers = {
+  Basic: 'Basic'
+  S0: 'Standard'
+  S1: 'Standard'
+  S2: 'Standard'
+  S3: 'Standard'
+  S4: 'Standard'
+  S6: 'Standard'
+  S7: 'Standard'
+  S9: 'Standard'
+  S12: 'Standard'
+  P1: 'Premium'
+  P2: 'Premium'
+  P4: 'Premium'
+  P6: 'Premium'
+  P11: 'Premium'
+  P15: 'Premium'
+}
+var databaseSku = contains(dtuTiers, skuName) ? {
+  name: skuName
+  tier: dtuTiers[skuName]
+} : {
+  name: skuName
+}
+
 resource sqlServer 'Microsoft.Sql/servers@2023-08-01-preview' = {
   name: sqlServerName
   location: location
@@ -23,10 +52,7 @@ resource database 'Microsoft.Sql/servers/databases@2023-08-01-preview' = {
   parent: sqlServer
   name: databaseName
   location: location
-  sku: {
-    name: 'Basic'
-    tier: 'Basic'
-  }
+  sku: databaseSku
   properties: {
     collation: 'SQL_Latin1_General_CP1_CI_AS'
   }

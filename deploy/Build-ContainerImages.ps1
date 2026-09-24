@@ -135,16 +135,18 @@ try {
         }
     }
 
-    Invoke-AzCommandWithRetry -Description "restart frontend app '$FrontendAppName'" -Command {
-        az webapp restart --name $FrontendAppName --resource-group $ResourceGroupName --only-show-errors --output none
-    }
-
+    # The API restarts first, so the portal and the task never start ahead of the endpoints
+    # they call.
     Invoke-AzCommandWithRetry -Description "restart API app '$ApiAppName'" -Command {
         az webapp restart --name $ApiAppName --resource-group $ResourceGroupName --only-show-errors --output none
     }
 
     Invoke-AzCommandWithRetry -Description "restart task app '$TaskAppName'" -Command {
         az functionapp restart --name $TaskAppName --resource-group $ResourceGroupName --only-show-errors --output none
+    }
+
+    Invoke-AzCommandWithRetry -Description "restart frontend app '$FrontendAppName'" -Command {
+        az webapp restart --name $FrontendAppName --resource-group $ResourceGroupName --only-show-errors --output none
     }
 }
 finally {

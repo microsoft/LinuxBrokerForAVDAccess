@@ -70,7 +70,7 @@ a path that serves the SPA shell.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/ui/session` | Bootstrap: `authenticated`, `user`, `version`, `csrfToken`. Not behind `@login_required`, because the signed-out landing page needs a `200`. |
+| GET | `/api/ui/session` | Bootstrap: `authenticated`, `user`, `version`, `csrfToken`, `roles`, `permissions`, `legacyAccess`, `permissionsUnavailable`. Not behind `@login_required`, because the signed-out landing page needs a `200`. |
 | GET | `/api/ui/dashboard` | `{stats, recentActivity, apiError}`. |
 | GET | `/api/ui/vms` | |
 | GET | `/api/ui/vms/<vmid>` | |
@@ -79,7 +79,9 @@ a path that serves the SPA shell.
 | POST | `/api/ui/vms/<vmid>/delete` | |
 | POST | `/api/ui/vms/<hostname>/release` | Keyed by **hostname**, matching the broker. |
 | POST | `/api/ui/vms/<vmid>/return` | Keyed by **VMID**, matching the broker. |
-| POST | `/api/ui/vms/checkout` | |
+| POST | `/api/ui/vms/<vmid>/cleanup` | Retries cleanup for a pending previous assignment. |
+| POST | `/api/ui/vms/<vmid>/maintenance` | Body `{enabled: boolean}`. |
+| POST | `/api/ui/vms/checkout` | Strips `password` and `LeaseId` before returning the broker response. |
 | GET | `/api/ui/vms/history` | Paged. Filters in the query string. |
 | GET | `/api/ui/scaling/rules` | |
 | GET | `/api/ui/scaling/rules/<ruleid>` | |
@@ -90,10 +92,29 @@ a path that serves the SPA shell.
 | GET | `/api/ui/scaling/rules/history` | Paged. |
 | GET | `/api/ui/hosts/settings` | `{settings, hosts}`. |
 | POST | `/api/ui/hosts/settings` | |
-| POST | `/api/ui/hosts/settings/apply` | Returns a `message` and `tone` the client shows verbatim. |
+| POST | `/api/ui/hosts/settings/apply` | Returns a `message` and `tone` the client shows verbatim; uses `APPLY_TIMEOUT_SECONDS`. |
 
 Server-rendered routes that are **not** JSON: `/login`, `/getAToken`, `/logout`, `/health`,
 `/favicon.ico`.
+
+
+### Session permissions
+
+`/api/ui/session` mirrors the Broker API `/api/me` result after sign-in and lazily refreshes it
+when the Flask session lacks cached permissions. Anonymous sessions always return `roles: []`,
+`permissions: {read:false, operate:false, admin:false}`, `legacyAccess:false`, and
+`permissionsUnavailable:false`. Authenticated sessions return:
+
+- `roles`: Broker API app roles (`Reader`, `Operator`, `FullAccess`) seen in the token.
+- `permissions`: effective booleans for `read`, `operate`, and `admin`. The API remains the
+  security boundary; the SPA only hides or explains actions, and broker `403` responses pass
+  through the BFF unchanged.
+- `legacyAccess`: true when the API granted access via the legacy delegated scope toggle.
+- `permissionsUnavailable`: true when `/me` could not be fetched; the shell shows a retry panel.
+
+Gating convention: `read` can view pages, `operate` can run VM lifecycle actions and Apply Now,
+and `admin` can create/delete/edit broker records or save settings. Authenticated users without
+`read` see the No access page.
 
 ### Error contract
 
@@ -250,6 +271,8 @@ npm run dev
 
 Then open <http://localhost:5173>.
 
+`APPLY_TIMEOUT_SECONDS` controls the BFF timeout for `/api/ui/hosts/settings/apply` and defaults to `110` seconds.
+
 The app reads environment variables directly; it does not load `.env` files by itself. For Azure
 US Government set `AZURE_CLOUD_NAME=AzureUSGovernment`. For custom or sovereign clouds without a
 built-in profile set `AZURE_CLOUD_NAME=AzureCustom` and provide `AZURE_AUTHORITY_HOST`.
@@ -321,10 +344,11 @@ page.
 5. Create the page under `web/src/pages/`, and register it in the route table in `web/src/App.tsx`.
    Add a matching row to the route table in `web/src/App.test.tsx` so the page is mounted for real
    by the integration test.
-6. Use `PageHeader` for the title and actions, `GlassCard` for panels, and `DataTable` for tables.
-7. For a destructive action, use `useConfirm` so the operator sees the specific resource named.
-8. Report the outcome with `useToast`, using the `error` string from the BFF on failure.
-9. If the page belongs to a nav section, make sure its path is matched by `NAV_ITEMS` in
+6. Gate actions with `useCan()` and mirror the Broker API role requirement (`read`, `operate`, or `admin`). Routes the user cannot use should render the reusable permission panel instead of relying on hidden controls.
+7. Use `PageHeader` for the title and actions, `GlassCard` for panels, and `DataTable` for tables.
+8. For a destructive action, use `useConfirm` so the operator sees the specific resource named.
+9. Report the outcome with `useToast`, using the `error` string from the BFF on failure.
+10. If the page belongs to a nav section, make sure its path is matched by `NAV_ITEMS` in
    `web/src/components/layout/NavBar.tsx`, or the active highlight will be wrong.
 
 ## What the Rewrite Changed

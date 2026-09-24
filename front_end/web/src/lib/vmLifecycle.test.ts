@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canRelease, canReturn, isReady } from '../lib/vmLifecycle';
+import { canRelease, canRetryCleanup, canReturn, canToggleMaintenance, isReady } from '../lib/vmLifecycle';
 
 /*
  * These four hosts mirror the fixtures in front_end/tests/conftest.py, and the
@@ -46,5 +46,25 @@ describe('isReady', () => {
     { VmStatus: 'Available', PowerState: 'On', NetworkStatus: 'Unreachable' },
   ])('rejects %o', (vm) => {
     expect(isReady(vm)).toBe(false);
+  });
+});
+
+
+describe('cleanup and maintenance lifecycle actions', () => {
+  it('hides release and return while cleanup is pending', () => {
+    expect(canRelease({ VmStatus: 'CheckedOut', CleanupPending: true })).toBe(false);
+    expect(canReturn({ VmStatus: 'Released', CleanupPending: true })).toBe(false);
+  });
+
+  it('offers cleanup retry only while cleanup is pending', () => {
+    expect(canRetryCleanup({ CleanupPending: true })).toBe(true);
+    expect(canRetryCleanup({ CleanupPending: false })).toBe(false);
+  });
+
+  it('allows maintenance toggles only for unassigned available or maintenance hosts', () => {
+    expect(canToggleMaintenance({ VmStatus: 'Available', Username: null, AvdHost: null })).toBe(true);
+    expect(canToggleMaintenance({ VmStatus: 'Maintenance', Username: null, AvdHost: null })).toBe(true);
+    expect(canToggleMaintenance({ VmStatus: 'Available', Username: 'user', AvdHost: null })).toBe(false);
+    expect(canToggleMaintenance({ VmStatus: 'CheckedOut', Username: null, AvdHost: null })).toBe(false);
   });
 });

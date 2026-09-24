@@ -71,6 +71,8 @@ $apiScopeId = '58db6e6d-38d5-4ce2-bf0a-7fd9cfd5f00a'
 $frontendScopeId = '9afc8711-1fe8-4b8d-9178-44235aa93b4a'
 $apiRoleIds = @{
     FullAccess = '4b2d5f7f-7cc1-4303-8d4b-bd7d2cfe2ca6'
+    Reader = '73d69433-4ff1-4918-bf30-acfd0b792807'
+    Operator = 'd1510542-4e17-41f2-9d21-b975a9ff5553'
     ScheduledTask = 'd11a6ed0-ee5e-4305-a2a2-252a8107d84f'
     AvdHost = '2dd7deea-1e20-4f32-a733-c6f6ec1d2519'
     LinuxHost = '29a8a5a0-2090-4e94-a49d-3386640f0058'
@@ -954,6 +956,22 @@ function Ensure-ApiApplication {
             value = 'FullAccess'
         }
         @{
+            allowedMemberTypes = @('User')
+            description = 'Read-only access to the Linux Broker management portal and APIs.'
+            displayName = 'Reader'
+            id = $apiRoleIds.Reader
+            isEnabled = $true
+            value = 'Reader'
+        }
+        @{
+            allowedMemberTypes = @('User')
+            description = 'Operate Linux Broker hosts: release, return, retry cleanup, maintenance, and apply host settings.'
+            displayName = 'Operator'
+            id = $apiRoleIds.Operator
+            isEnabled = $true
+            value = 'Operator'
+        }
+        @{
             allowedMemberTypes = @('Application')
             description = 'Allows the scheduled task function app to call maintenance endpoints.'
             displayName = 'ScheduledTask'
@@ -1044,6 +1062,8 @@ Ensure-DefaultEnvValue -Key 'avdMaxSessionLimit' -ValueFactory { '5' } | Out-Nul
 Ensure-DefaultEnvValue -Key 'vmSubscriptionId' -ValueFactory { $subscription.id } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlAdminLogin' -ValueFactory { 'brokeradmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlDatabaseName' -ValueFactory { 'LinuxBroker' } | Out-Null
+Ensure-DefaultEnvValue -Key 'sqlDatabaseSkuName' -ValueFactory { 'Basic' } | Out-Null
+Ensure-DefaultEnvValue -Key 'allowLegacyScopeAccess' -ValueFactory { 'false' } | Out-Null
 Ensure-DefaultEnvValue -Key 'appServicePlanSku' -ValueFactory { 'P2mv3' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostAdminLoginName' -ValueFactory { 'avdadmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'domainName' -ValueFactory { '' } | Out-Null
@@ -1105,6 +1125,22 @@ if ($deploymentUser) {
 Ensure-GroupAppRoleAssignment -CloudContext $cloudContext -GroupId $avdGroup.id -ResourceServicePrincipalId $apiServicePrincipal.id -AppRoleId $apiRoleIds.AvdHost
 Ensure-GroupAppRoleAssignment -CloudContext $cloudContext -GroupId $linuxGroup.id -ResourceServicePrincipalId $apiServicePrincipal.id -AppRoleId $apiRoleIds.LinuxHost
 
+# Optional groups for the portal roles. Assigning an app role to a group needs Microsoft
+# Entra ID P1 or P2; without it, assign the roles to users directly.
+$portalRoleGroups = [ordered]@{
+    brokerReaderGroupId = @{ Role = 'Reader'; Id = $apiRoleIds.Reader }
+    brokerOperatorGroupId = @{ Role = 'Operator'; Id = $apiRoleIds.Operator }
+    brokerAdminGroupId = @{ Role = 'FullAccess'; Id = $apiRoleIds.FullAccess }
+}
+$portalRoleSummary = @()
+foreach ($entry in $portalRoleGroups.GetEnumerator()) {
+    $groupId = Get-AzdEnvValue -Key $entry.Key
+    if (-not [string]::IsNullOrWhiteSpace($groupId)) {
+        Ensure-GroupAppRoleAssignment -CloudContext $cloudContext -GroupId $groupId.Trim() -ResourceServicePrincipalId $apiServicePrincipal.id -AppRoleId $entry.Value.Id
+        $portalRoleSummary += "$($entry.Value.Role) -> $($groupId.Trim())"
+    }
+}
+
 $avdUsersGroupSummary = 'not configured (AVD hosts are not deployed)'
 if ((Get-AzdEnvValue -Key 'deployAvdHosts') -eq 'true') {
     $avdUsersGroupId = Get-AzdEnvValue -Key 'avdUsersGroupId'
@@ -1148,6 +1184,12 @@ Write-Host "API application: $($apiApp.displayName) ($($apiApp.appId))"
 Write-Host "Frontend application: $($frontendApp.displayName) ($($frontendApp.appId))"
 Write-Host "AVD host group: $($avdGroup.displayName) ($($avdGroup.id))"
 Write-Host "Linux host group: $($linuxGroup.displayName) ($($linuxGroup.id))"
+if ($portalRoleSummary.Count -gt 0) {
+    Write-Host "Portal role groups: $($portalRoleSummary -join '; ')"
+}
+else {
+    Write-Host 'Portal role groups: none configured. Assign the Reader, Operator or FullAccess app roles to administrators in Microsoft Entra ID.'
+}
 Write-Host "AVD users group: $avdUsersGroupSummary"
 Write-Host 'Automatic admin consent was attempted for the configured application permissions. If consent was not granted, complete it manually in Microsoft Entra ID.'
 
@@ -1173,6 +1215,8 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdUsersGroupId' -Value (Get-AzdEnvValue -Key 'avdUsersGroupId')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'sqlAdminLogin' -Value (Get-RequiredAzdEnvValue -Key 'sqlAdminLogin')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'sqlAdminPassword' -Value (Get-RequiredAzdEnvValue -Key 'sqlAdminPassword')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'sqlDatabaseSkuName' -Value (Get-RequiredAzdEnvValue -Key 'sqlDatabaseSkuName')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'allowLegacyScopeAccess' -Value (ConvertTo-BoolParameterValue -Key 'allowLegacyScopeAccess' -DefaultValue $false)
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'flaskKey' -Value (Get-RequiredAzdEnvValue -Key 'flaskKey')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'domainName' -Value (Get-AzdEnvValue -Key 'domainName')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'nfsShare' -Value (Get-AzdEnvValue -Key 'nfsShare')

@@ -237,3 +237,24 @@ def test_csrf_token_is_available_from_the_session_endpoint(signed_in_client):
     """The client has no form to read a hidden field from, so the token has to
     come from the bootstrap payload."""
     assert csrf_token(signed_in_client)
+
+
+
+def test_preserve_sessions_boolean_is_forwarded(signed_in_client, broker_api):
+    save_settings(signed_in_client, {"preservesessionsondisconnect": True})
+
+    payload = update_payload(broker_api)
+    assert payload["PreserveSessionsOnDisconnect"] is True
+
+
+def test_apply_mentions_not_attempted_hosts(signed_in_client, broker_api):
+    broker_api.apply_result = {
+        "SettingsVersion": 3, "TargetCount": 3, "SucceededCount": 1,
+        "Results": [{"Hostname": "linux-host-01", "Applied": True, "Message": "Applied."}],
+        "NotAttempted": ["linux-host-02", "linux-host-03"],
+    }
+    payload = post(signed_in_client, APPLY_PATH, {}).get_json()
+
+    assert payload["tone"] == "warning"
+    assert payload["notAttempted"] == ["linux-host-02", "linux-host-03"]
+    assert "2 host(s) were not attempted" in payload["message"]

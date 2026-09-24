@@ -16,6 +16,7 @@ import { StatCard } from '../components/ui/StatCard';
 import { Icon } from '../components/Icon';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import { useDashboard } from '../hooks/useBroker';
+import { useCan } from '../hooks/useSession';
 import { errorMessage } from '../lib/api';
 import { formatNumber, valueOrDash } from '../lib/format';
 import type { DashboardStats } from '../types/broker';
@@ -31,6 +32,7 @@ const SEGMENTS = [
 export function Dashboard() {
   const autoRefresh = useAutoRefresh(30);
   const { data, isPending, isFetching, error, refetch } = useDashboard(autoRefresh.intervalMs);
+  const can = useCan();
 
   const stats = data?.stats ?? null;
   const unavailable = Boolean(data?.apiError) || (data !== undefined && stats === null);
@@ -61,9 +63,11 @@ export function Dashboard() {
               <Icon name="refresh" size={14} />
               Refresh
             </button>
-            <ButtonLink to="/vms/checkout" variant="primary" size="sm" icon="person">
-              Checkout VM
-            </ButtonLink>
+            {can.admin ? (
+              <ButtonLink to="/vms/checkout" variant="primary" size="sm" icon="person">
+                Checkout VM
+              </ButtonLink>
+            ) : null}
           </>
         }
       />
@@ -111,7 +115,7 @@ export function Dashboard() {
             <StatCard
               label="Needs attention"
               value={stats.attention}
-              hint={`${stats.unreachable} unreachable \u00b7 ${stats.maintenance} maintenance`}
+              hint={`${stats.unreachable} unreachable \u00b7 ${stats.maintenance} maintenance \u00b7 ${stats.cleanup_pending} cleanup pending`}
               icon="alert-triangle"
               tone={stats.attention ? 'warn' : 'neutral'}
               to="/vms"
@@ -130,7 +134,7 @@ export function Dashboard() {
               description="View, add, update and release the Linux hosts in the pool."
               links={[
                 { to: '/vms', label: 'All VMs', primary: true },
-                { to: '/vms/add', label: 'Add VM' },
+                ...(can.admin ? [{ to: '/vms/add', label: 'Add VM' }] : []),
                 { to: '/vms/history', label: 'History' },
               ]}
             />

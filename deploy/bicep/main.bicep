@@ -49,6 +49,12 @@ param sqlAdminLogin string = 'brokeradmin'
 @description('SQL administrator password.')
 param sqlAdminPassword string = ''
 
+@description('Azure SQL Database SKU name, for example Basic, S0, S1 or GP_S_Gen5_1. Basic suits small pools; use S1 or higher when many hosts and portal users call the broker at once.')
+param sqlDatabaseSkuName string = 'Basic'
+
+@description('Temporarily let any portal user with the access_as_user scope act as FullAccess, as releases before role enforcement did. Use only while you assign the Reader, Operator and FullAccess app roles during an upgrade, then turn it off.')
+param allowLegacyScopeAccess bool = false
+
 @secure()
 @description('Flask session key for the frontend app.')
 param flaskKey string = ''
@@ -201,6 +207,8 @@ module resources 'main.resources.bicep' = {
     linuxHostGroupId: linuxHostGroupId
     sqlAdminLogin: sqlAdminLogin
     sqlAdminPassword: sqlAdminPassword
+    sqlDatabaseSkuName: sqlDatabaseSkuName
+    allowLegacyScopeAccess: allowLegacyScopeAccess
     flaskKey: flaskKey
     domainName: domainName
     nfsShare: nfsShare

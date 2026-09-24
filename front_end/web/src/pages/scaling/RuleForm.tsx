@@ -1,5 +1,6 @@
 import { Button, ButtonLink } from '../../components/ui/Button';
-import { TextField } from '../../components/ui/Field';
+import { SelectField, TextField } from '../../components/ui/Field';
+import { Notice } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
 import type { ScalingRuleInput } from '../../types/broker';
 
@@ -10,6 +11,7 @@ export const EMPTY_RULE: ScalingRuleInput = {
   scaleupincrement: '',
   scaledownratio: '',
   scaledownincrement: '',
+  stopmode: 'PowerOff',
 };
 
 interface FieldSpec {
@@ -24,7 +26,7 @@ const FIELDS: FieldSpec[] = [
   {
     key: 'minvms',
     label: 'Minimum VMs',
-    help: 'Keep at least this many VMs powered on for baseline capacity.',
+    help: 'Keep at least this many VMs powered on for baseline capacity. Must be at least 1.',
   },
   {
     key: 'maxvms',
@@ -91,7 +93,7 @@ export function RuleForm({
               label={field.label}
               help={field.help}
               type="number"
-              min={0}
+              min={field.key === 'minvms' ? 1 : 0}
               max={field.max}
               step={field.step}
               required
@@ -99,7 +101,33 @@ export function RuleForm({
               onChange={(event) => onChange({ ...value, [field.key]: event.target.value })}
             />
           ))}
+
+          <SelectField
+            label="When scaling down"
+            help="Choose what the scaler asks Azure to do with idle hosts."
+            options={[
+              { value: 'PowerOff', label: 'Power off' },
+              { value: 'Deallocate', label: 'Deallocate' },
+            ]}
+            value={value.stopmode}
+            onChange={(event) =>
+              onChange({ ...value, stopmode: event.target.value as ScalingRuleInput['stopmode'] })
+            }
+          />
         </div>
+
+        {value.stopmode === 'Deallocate' ? (
+          <Notice tone="warning" className="mt-5">
+            Deallocate stops compute billing, but disks and IPs can still bill. Starts take longer,
+            capacity-constrained regions or sizes can fail with AllocationFailed and retry later,
+            and the temporary resource disk is wiped. Private IP addresses and host names are kept.
+          </Notice>
+        ) : (
+          <Notice tone="info" className="mt-5">
+            Powered-off VMs keep their compute allocation and continue to be billed for compute;
+            they start quickly.
+          </Notice>
+        )}
 
         <div className="mt-6 flex flex-wrap gap-2">
           <Button type="submit" variant="primary" icon="check-circle" disabled={busy}>

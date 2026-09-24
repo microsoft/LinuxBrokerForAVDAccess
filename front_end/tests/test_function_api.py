@@ -30,6 +30,7 @@ def test_summarize_vms_ready_requires_available_on_reachable():
     assert summary["checked_out"] == 1
     assert summary["powered_on"] == 3
     assert summary["unreachable"] == 1
+    assert summary["cleanup_pending"] == 0
     assert summary["utilization"] == 20
 
 
@@ -118,3 +119,16 @@ def test_pagination_clamps_hostile_values():
 
 def test_pagination_caps_per_page_so_one_request_cannot_pull_everything():
     assert pagination_from_args({"per_page": "100000"}) == (1, 200)
+
+
+
+def test_summarize_vms_cleanup_pending_affects_ready_and_attention():
+    vms = [
+        {"VmStatus": "Available", "PowerState": "On", "NetworkStatus": "Reachable", "CleanupPending": True},
+        {"VmStatus": "Maintenance", "PowerState": "On", "NetworkStatus": "Reachable", "CleanupPending": False},
+    ]
+    summary = summarize_vms(vms)
+
+    assert summary["cleanup_pending"] == 1
+    assert summary["ready"] == 0
+    assert summary["attention"] == 2
