@@ -61,6 +61,25 @@ HOST_SETTINGS = {"GracePeriodSeconds": 1200, "ReconcileIntervalSeconds": 60,
 # Every JSON endpoint the React portal calls.
 API = "/api/ui"
 
+HOST_HEALTH = {
+    "ExpectedAgentVersion": "1.0.0", "CurrentSettingsVersion": 3, "StaleAfterSeconds": 180,
+    "Summary": {"Total": 2, "PoweredOn": 2, "Reporting": 1, "Healthy": 1, "Attention": 1, "Off": 0,
+                "NoHeartbeat": 1, "Stale": 0, "XrdpDown": 0, "NfsUnreachable": 0, "LowDisk": 0,
+                "AgentOutdated": 0, "SettingsDrift": 0},
+    "Hosts": [
+        {"VMID": 1, "Hostname": "linux-host-01", "Status": "healthy", "Flags": [], "AgentVersion": "1.0.0",
+         "HeartbeatAgeSeconds": 30, "Sessions": []},
+        {"VMID": 2, "Hostname": "linux-host-02", "Status": "attention", "Flags": ["no-heartbeat"],
+         "AgentVersion": None, "HeartbeatAgeSeconds": None, "Sessions": []},
+    ],
+}
+
+AUDIT_ENTRY = {
+    "AuditId": 1, "OccurredAtUtc": "2026-09-24T12:00:00.000Z", "ActorOid": "oid-alice",
+    "ActorName": "alice@contoso.com", "ActorType": "user", "Action": "vm.stop", "TargetType": "vm",
+    "TargetId": "linux-host-01", "Outcome": "success", "Detail": {"status": 202}, "CorrelationId": "abc",
+}
+
 # The three history endpoints behave identically apart from the broker path they
 # read from, so they are parametrised together throughout the suite.
 HISTORY_PATHS = [f"{API}/vms/history", f"{API}/scaling/log", f"{API}/scaling/rules/history"]
@@ -99,6 +118,7 @@ class FakeResponse:
 class FakeBrokerApi:
     def __init__(self):
         self.posts = []
+        self.gets = []
         # Number of rows the history endpoints report.
         self.history_total = 120
         self.scaling_log_payload = [
@@ -111,6 +131,8 @@ class FakeBrokerApi:
                                          {"Hostname": "linux-host-02", "Applied": True, "Message": "Applied."}]}
         self.raise_get_paths = set()
         self.raise_post_paths = set()
+        # Status and body to answer a POST whose path ends with the key, instead of the default.
+        self.post_replies = {}
 
         # Mirrors GetVmSummary for the four seeded VMs in VMS: one Available (on,
         # reachable -> ready), one CheckedOut, one Maintenance (off, unreachable),
@@ -118,7 +140,7 @@ class FakeBrokerApi:
         self.vm_summary = {
             "TotalVMs": 4, "Available": 1, "CheckedOut": 1, "Maintenance": 1,
             "Released": 1, "PoweredOn": 3, "PoweredOff": 1, "Unreachable": 1,
-            "Ready": 1, "CleanupPending": 0,
+            "Ready": 1, "CleanupPending": 0, "Draining": 0,
         }
         # Set to 404/405/500 to simulate an API that predates /vms/summary.
         self.summary_status = None
@@ -127,8 +149,14 @@ class FakeBrokerApi:
         # bare list regardless of page/per_page.
         self.legacy_history = False
 
+        self.host_health = dict(HOST_HEALTH)
+        self.settings_history = [dict(HOST_SETTINGS, UpdatedBy="op@contoso.com", IsCurrent=True,
+                                      ValidFromUtc="2026-08-01T10:00:00Z", ValidToUtc=None)]
+        self.audit_items = [dict(AUDIT_ENTRY, AuditId=i) for i in range(1, 4)]
+
     def get(self, url, **kwargs):
         import requests
+        self.gets.append({"url": url, "params": kwargs.get("params"), "timeout": kwargs.get("timeout")})
         if any(url.endswith(path) for path in self.raise_get_paths):
             raise requests.exceptions.RequestException("broker unavailable")
         if url.endswith("/me"):
@@ -139,6 +167,12 @@ class FakeBrokerApi:
             return FakeResponse(self.vm_summary)
         if url.endswith("/hosts/settings"):
             return FakeResponse(self.host_settings)
+        if url.endswith("/hosts/settings/history"):
+            return FakeResponse(self.settings_history)
+        if url.endswith("/hosts/health"):
+            return FakeResponse(self.host_health)
+        if url.endswith("/audit"):
+            return self._history(self.audit_items, kwargs.get("params") or {})
         if re.search(r"/vms/\d+$", url):
             vmid = int(url.rsplit("/", 1)[1])
             return FakeResponse(next((vm for vm in VMS if vm["VMID"] == vmid), VMS[0]))
@@ -153,9 +187,26 @@ class FakeBrokerApi:
     def post(self, url, **kwargs):
         import requests
         params = kwargs.get("params") or {}
-        self.posts.append({"url": url, "json": kwargs.get("json"), "params": params})
+        self.posts.append({"url": url, "json": kwargs.get("json"), "params": params, "timeout": kwargs.get("timeout")})
         if any(url.endswith(path) for path in self.raise_post_paths):
             raise requests.exceptions.RequestException("broker unavailable")
+        for path, (status, body) in self.post_replies.items():
+            if url.endswith(path):
+                return FakeResponse(body, status_code=status)
+        match = re.search(r"/vms/(\d+)/(start|stop|restart)$", url)
+        if match:
+            return FakeResponse({"VMID": int(match.group(1)), "Hostname": "linux-host-01",
+                                 "Action": match.group(2).capitalize(), "EndedAssignment": False,
+                                 "message": f"{match.group(2).capitalize()} requested for linux-host-01."},
+                                status_code=202)
+        match = re.search(r"/vms/(\d+)/(drain|undrain)$", url)
+        if match:
+            result = "Draining" if match.group(2) == "drain" else "ReturnedToService"
+            return FakeResponse({"VMID": int(match.group(1)), "Hostname": "linux-host-01", "Result": result,
+                                 "DrainRequested": result == "Draining", "message": f"linux-host-01: {result}."})
+        if url.endswith("/vms/sync"):
+            return FakeResponse({"PowerStateCorrections": [], "PowerSyncFailed": False,
+                                 "message": "Every host's recorded power state already matches Azure."})
         if url.endswith("/hosts/settings/update"):
             return FakeResponse(self.host_settings)
         if url.endswith("/hosts/settings/apply"):

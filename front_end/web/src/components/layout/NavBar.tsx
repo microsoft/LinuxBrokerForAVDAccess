@@ -20,6 +20,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/vms', label: 'VM Management', icon: 'server' },
   { to: '/scaling/rules', label: 'Scaling Management', icon: 'sliders', match: ['/scaling'] },
   { to: '/settings/hosts', label: 'Host Settings', icon: 'wrench' },
+  { to: '/audit', label: 'Audit', icon: 'shield' },
 ];
 
 /**

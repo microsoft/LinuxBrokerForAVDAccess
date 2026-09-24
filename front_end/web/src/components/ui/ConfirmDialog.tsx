@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { Icon } from '../Icon';
@@ -21,6 +21,12 @@ export interface ConfirmDialogProps {
   confirmLabel?: string;
   variant?: ButtonVariant;
   busy?: boolean;
+  /**
+   * Text the operator must type before the action can be confirmed, such as the
+   * hostname of a host a user is signed in to. Matching ignores case and spaces at
+   * either end.
+   */
+  requireText?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -39,12 +45,18 @@ export function ConfirmDialog({
   confirmLabel = 'Confirm',
   variant = 'danger',
   busy = false,
+  requireText,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const typedRef = useRef<HTMLInputElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
+  const typedId = useId();
+  const [typed, setTyped] = useState('');
+
+  const matches = !requireText || typed.trim().toLowerCase() === requireText.trim().toLowerCase();
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -90,7 +102,14 @@ export function ConfirmDialog({
     }
 
     previouslyFocused.current = document.activeElement as HTMLElement | null;
-    confirmRef.current?.focus();
+    setTyped('');
+    // With a required confirmation the confirm button starts disabled, so the input
+    // takes focus instead.
+    if (requireText) {
+      typedRef.current?.focus();
+    } else {
+      confirmRef.current?.focus();
+    }
 
     const { overflow } = document.body.style;
     document.body.style.overflow = 'hidden';
@@ -101,7 +120,7 @@ export function ConfirmDialog({
       // top of the document after confirming a row action.
       previouslyFocused.current?.focus?.();
     };
-  }, [open]);
+  }, [open, requireText]);
 
   if (!open) {
     return null;
@@ -143,11 +162,37 @@ export function ConfirmDialog({
           {body}
         </p>
 
+        {requireText ? (
+          <form
+            className="mt-4 flex flex-col gap-1.5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (matches && !busy) {
+                onConfirm();
+              }
+            }}
+          >
+            <label htmlFor={typedId} className="text-sm font-medium text-ink">
+              Type <span className="font-mono">{requireText}</span> to confirm
+            </label>
+            <input
+              id={typedId}
+              ref={typedRef}
+              className="lb-field font-mono"
+              autoComplete="off"
+              spellCheck={false}
+              value={typed}
+              disabled={busy}
+              onChange={(event) => setTyped(event.target.value)}
+            />
+          </form>
+        ) : null}
+
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="secondary" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
-          <Button ref={confirmRef} variant={variant} onClick={onConfirm} disabled={busy}>
+          <Button ref={confirmRef} variant={variant} onClick={onConfirm} disabled={busy || !matches}>
             {busy ? 'Working…' : confirmLabel}
           </Button>
         </div>

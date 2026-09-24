@@ -38,3 +38,32 @@ export function isReady(vm: Pick<Vm, 'VmStatus' | 'PowerState' | 'NetworkStatus'
     vm.VmStatus === 'Available' && vm.PowerState === 'On' && vm.NetworkStatus === 'Reachable'
   );
 }
+
+/*
+ * Host actions. A host is in use while a user is assigned to it, and stopping or
+ * restarting it then ends that user's session, so the broker only allows it for an
+ * administrator who types the hostname. The portal hides what the broker would refuse.
+ */
+
+type ActionVm = Pick<Vm, 'VmStatus' | 'Username' | 'PowerState' | 'DrainRequested'>;
+
+export function isAssigned(vm: Pick<Vm, 'VmStatus' | 'Username'>): boolean {
+  return Boolean(vm.Username) || vm.VmStatus === 'CheckedOut' || vm.VmStatus === 'Released';
+}
+
+export function canStart(vm: Pick<Vm, 'PowerState'>): boolean {
+  return vm.PowerState !== 'On';
+}
+
+/** Stop and restart apply to a running host; one that is in use needs an administrator. */
+export function canStopOrRestart(vm: ActionVm, isAdmin: boolean): boolean {
+  return vm.PowerState === 'On' && (isAdmin || !isAssigned(vm));
+}
+
+export function canDrain(vm: ActionVm): boolean {
+  return !vm.DrainRequested && vm.VmStatus !== 'Maintenance';
+}
+
+export function canReturnToService(vm: ActionVm): boolean {
+  return Boolean(vm.DrainRequested) || (vm.VmStatus === 'Maintenance' && !vm.Username);
+}

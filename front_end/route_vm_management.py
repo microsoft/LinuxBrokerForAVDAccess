@@ -15,6 +15,17 @@ from function_bff import API_PREFIX, BadRequest, broker_endpoint, history_page, 
 
 logger = logging.getLogger(__name__)
 
+STOP_MODES = ('PowerOff', 'Deallocate')
+SYNC_TIMEOUT_SECONDS = 60
+
+
+def _confirmation(payload):
+    """The hostname the operator typed to confirm acting on a host that is in use."""
+    confirm = payload.get('confirm')
+    if isinstance(confirm, str) and confirm.strip():
+        return {'confirm': confirm.strip()[:255]}
+    return {}
+
 
 def register_route_vm_management(app):
     @app.route(f'{API_PREFIX}/vms')
@@ -104,6 +115,52 @@ def register_route_vm_management(app):
         if 'enabled' not in payload or not isinstance(payload.get('enabled'), bool):
             raise BadRequest("enabled must be a boolean.")
         return jsonify(api_post(f'/vms/{vmid}/maintenance', {"enabled": payload['enabled']}))
+
+    # Real power actions. A host with a user assigned is only stopped or restarted when the
+    # request names it in `confirm`; the broker enforces that, and the Admin role, itself.
+    @app.route(f'{API_PREFIX}/vms/<int:vmid>/start', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to start the VM. Please try again later.")
+    def ui_start_vm(vmid):
+        return jsonify(api_post(f'/vms/{vmid}/start'))
+
+    @app.route(f'{API_PREFIX}/vms/<int:vmid>/stop', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to stop the VM. Please try again later.")
+    def ui_stop_vm(vmid):
+        payload = json_body()
+        body = _confirmation(payload)
+        mode = payload.get('mode')
+        if mode not in (None, ''):
+            if mode not in STOP_MODES:
+                raise BadRequest("mode must be PowerOff or Deallocate.")
+            body['mode'] = mode
+        return jsonify(api_post(f'/vms/{vmid}/stop', body))
+
+    @app.route(f'{API_PREFIX}/vms/<int:vmid>/restart', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to restart the VM. Please try again later.")
+    def ui_restart_vm(vmid):
+        return jsonify(api_post(f'/vms/{vmid}/restart', _confirmation(json_body())))
+
+    @app.route(f'{API_PREFIX}/vms/<int:vmid>/drain', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to drain the VM. Please try again later.")
+    def ui_drain_vm(vmid):
+        return jsonify(api_post(f'/vms/{vmid}/drain'))
+
+    @app.route(f'{API_PREFIX}/vms/<int:vmid>/undrain', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to return the VM to service. Please try again later.")
+    def ui_undrain_vm(vmid):
+        return jsonify(api_post(f'/vms/{vmid}/undrain'))
+
+    @app.route(f'{API_PREFIX}/vms/sync', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to sync power states from Azure. Please try again later.")
+    def ui_sync_power_states():
+        # The broker reads every host's power state from Azure, in parallel, within 30 seconds.
+        return jsonify(api_post('/vms/sync', timeout=SYNC_TIMEOUT_SECONDS))
 
     @app.route(f'{API_PREFIX}/vms/checkout', methods=['POST'])
     @login_required

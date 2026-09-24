@@ -11,13 +11,15 @@ import {
   LoadingPanel,
   Notice,
   PageHeader,
+  Spinner,
 } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
 import { useToast } from '../../components/ui/Toast';
-import { useApplyHostSettings, useHostSettings, useSaveHostSettings } from '../../hooks/useBroker';
+import { useApplyHostSettings, useHostSettings, useHostSettingsHistory, useSaveHostSettings } from '../../hooks/useBroker';
 import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
-import { valueOrDash } from '../../lib/format';
+import { formatUtc, valueOrDash } from '../../lib/format';
+import { settingsHistoryChanges } from '../../lib/settingsDiff';
 import type { HostSettings, Vm } from '../../types/broker';
 
 interface NumberFieldSpec {
@@ -314,6 +316,71 @@ export function HostSettingsPage() {
         busy={applySettings.isPending}
         canApply={can.operate}
       />
+
+      <SettingsHistory />
+    </>
+  );
+}
+
+function SettingsHistory() {
+  const { data, isPending, error } = useHostSettingsHistory();
+  const entries = data ? settingsHistoryChanges(data) : [];
+
+  return (
+    <>
+      <h2 className="mt-10 mb-4 text-lg">Version history</h2>
+
+      {isPending ? <Spinner label="Loading version history" /> : null}
+
+      {error ? (
+        <Notice tone="warning">{errorMessage(error, 'Unable to retrieve the version history.')}</Notice>
+      ) : null}
+
+      {data && entries.length === 0 ? (
+        <p className="text-sm text-muted">No saved versions yet.</p>
+      ) : null}
+
+      {entries.length > 0 ? (
+        <GlassCard className="px-5 py-1">
+          <ol className="m-0 list-none divide-y divide-[var(--lb-hairline)] p-0">
+            {entries.map(({ version, changes }) => (
+              <li key={`${version.SettingsVersion}-${version.ValidFromUtc}`} className="py-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="flex items-center gap-2">
+                    <strong>Version {version.SettingsVersion}</strong>
+                    {version.IsCurrent ? (
+                      <Badge tone="ok" icon="check-circle">
+                        Current
+                      </Badge>
+                    ) : null}
+                  </span>
+                  <span className="text-xs text-muted">
+                    {version.UpdatedBy ? `Saved by ${version.UpdatedBy}` : 'Saved before changes were attributed'}
+                    {' \u00b7 '}
+                    <span className="font-mono">{formatUtc(version.ValidFromUtc)}</span>
+                  </span>
+                </div>
+
+                {changes === null ? (
+                  <p className="mt-1 mb-0 text-xs text-muted">The earliest version kept.</p>
+                ) : changes.length === 0 ? (
+                  <p className="mt-1 mb-0 text-xs text-muted">No setting changed in this version.</p>
+                ) : (
+                  <ul className="mt-2 mb-0 flex list-none flex-col gap-1 p-0 text-sm">
+                    {changes.map((change) => (
+                      <li key={change.field}>
+                        <span className="text-muted">{change.label}:</span> {change.from}{' '}
+                        <span aria-hidden>{'\u2192'}</span>
+                        <span className="sr-only">changed to</span> <strong>{change.to}</strong>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ol>
+        </GlassCard>
+      ) : null}
     </>
   );
 }

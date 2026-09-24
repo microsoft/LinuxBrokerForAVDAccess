@@ -19,7 +19,7 @@ import { useDashboard } from '../hooks/useBroker';
 import { useCan } from '../hooks/useSession';
 import { errorMessage } from '../lib/api';
 import { formatNumber, valueOrDash } from '../lib/format';
-import type { DashboardStats } from '../types/broker';
+import type { DashboardStats, FleetHealthSummary } from '../types/broker';
 
 const SEGMENTS = [
   { key: 'checked_out', label: 'Checked out', colour: 'var(--lb-accent-fg)' },
@@ -115,12 +115,14 @@ export function Dashboard() {
             <StatCard
               label="Needs attention"
               value={stats.attention}
-              hint={`${stats.unreachable} unreachable \u00b7 ${stats.maintenance} maintenance \u00b7 ${stats.cleanup_pending} cleanup pending`}
+              hint={`${stats.unreachable} unreachable \u00b7 ${stats.maintenance} maintenance \u00b7 ${stats.cleanup_pending} cleanup pending${stats.draining ? ` \u00b7 ${stats.draining} draining` : ''}`}
               icon="alert-triangle"
               tone={stats.attention ? 'warn' : 'neutral'}
               to="/vms"
             />
           </div>
+
+          {data?.fleetHealth ? <FleetHealthStrip health={data.fleetHealth} /> : null}
 
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <PoolComposition stats={stats} />
@@ -152,6 +154,49 @@ export function Dashboard() {
         </>
       ) : null}
     </>
+  );
+}
+
+function FleetHealthStrip({ health }: { health: FleetHealthSummary }) {
+  const issues: Array<{ key: string; count: number; label: string }> = [
+    { key: 'no-heartbeat', count: health.NoHeartbeat, label: 'no heartbeat' },
+    { key: 'stale', count: health.Stale, label: 'stale' },
+    { key: 'xrdp-down', count: health.XrdpDown, label: 'xrdp down' },
+    { key: 'nfs-unreachable', count: health.NfsUnreachable, label: 'NFS unreachable' },
+    { key: 'low-disk', count: health.LowDisk, label: 'low disk' },
+    { key: 'agent-outdated', count: health.AgentOutdated, label: 'agent outdated' },
+    { key: 'settings-drift', count: health.SettingsDrift, label: 'settings drift' },
+  ].filter((issue) => issue.count > 0);
+
+  return (
+    <GlassCard className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 text-sm">
+      <strong className="flex items-center gap-2">
+        <Icon name="activity" size={16} className="text-muted" />
+        Fleet health
+      </strong>
+      <span className="text-muted">
+        {health.Reporting} of {health.PoweredOn} powered-on hosts reporting
+      </span>
+      {issues.length ? (
+        <ul className="m-0 flex list-none flex-wrap gap-x-3 gap-y-1 p-0">
+          {issues.map((issue) => (
+            <li key={issue.key}>
+              <Link to={`/vms/health?show=${issue.key}`} className="text-[var(--lb-warn-fg)] no-underline hover:underline">
+                {issue.count} {issue.label}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span className="flex items-center gap-1.5 text-[var(--lb-ok-fg)]">
+          <Icon name="check-circle" size={14} />
+          No host needs attention
+        </span>
+      )}
+      <Link to="/vms/health" className="ml-auto text-xs no-underline hover:underline">
+        View fleet health
+      </Link>
+    </GlassCard>
   );
 }
 

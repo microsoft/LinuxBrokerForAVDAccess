@@ -38,4 +38,8 @@ export const queryKeys = {
   ruleHistory: (search: string) => ['scaling', 'rules', 'history', search] as const,
   activityLog: (search: string) => ['scaling', 'log', search] as const,
   hostSettings: ['hosts', 'settings'] as const,
+  hostSettingsHistory: ['hosts', 'settings', 'history'] as const,
+  fleetHealth: ['hosts', 'health'] as const,
+  hostHealth: (hostname: string) => ['hosts', 'health', hostname] as const,
+  audit: (search: string) => ['audit', search] as const,
 };

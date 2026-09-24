@@ -8,6 +8,8 @@ export interface ConfirmRequest {
   body: string;
   confirmLabel?: string;
   variant?: ButtonVariant;
+  /** Text the operator must type to enable the confirm button. */
+  requireText?: string;
   onConfirm: () => void | Promise<void>;
 }
 
@@ -50,6 +52,7 @@ export function useConfirm() {
       body={request?.body ?? ''}
       confirmLabel={request?.confirmLabel}
       variant={request?.variant}
+      requireText={request?.requireText}
       busy={busy}
       onConfirm={() => void accept()}
       onCancel={cancel}

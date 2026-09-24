@@ -57,6 +57,147 @@ export interface Vm {
   CleanupPending?: boolean | null;
   CleanupUsername?: string | null;
   PowerStateChangedDate?: string | null;
+  /** The host takes no new users and moves to maintenance when its assignment ends. */
+  DrainRequested?: boolean | null;
+  DrainRequestedDate?: string | null;
+}
+
+/** What a start, stop or restart request returned. The Azure operation runs on. */
+export interface PowerActionResult {
+  VMID: number;
+  Hostname: string;
+  Action: 'Start' | 'Stop' | 'Restart';
+  Mode?: 'PowerOff' | 'Deallocate';
+  EndedAssignment?: boolean;
+  message: string;
+}
+
+export interface DrainResult {
+  VMID: number;
+  Hostname: string;
+  VmStatus: string | null;
+  DrainRequested: boolean;
+  Result: 'Draining' | 'Drained' | 'ReturnedToService' | 'Unchanged';
+  message: string;
+}
+
+export interface PowerSyncResult {
+  PowerStateCorrections: Array<{ Hostname: string; PowerState: string }>;
+  PowerSyncFailed: boolean;
+  message: string;
+}
+
+export type HealthFlag =
+  | 'no-heartbeat'
+  | 'stale'
+  | 'xrdp-down'
+  | 'nfs-unreachable'
+  | 'low-disk'
+  | 'agent-outdated'
+  | 'settings-drift';
+
+export interface HostSession {
+  username: string;
+  state: 'active' | 'disconnected' | 'unknown';
+  sessionStart?: number | null;
+  disconnectedSince?: number | null;
+  idleSeconds?: number | null;
+}
+
+/** One host in GET /api/hosts/health: its latest heartbeat and what needs attention. */
+export interface HostHealth {
+  VMID: number;
+  Hostname: string;
+  PowerState: string | null;
+  NetworkStatus: string | null;
+  VmStatus: string | null;
+  DrainRequested: boolean;
+  CleanupPending: boolean;
+  Username: string | null;
+  Status: 'healthy' | 'attention' | 'off';
+  Flags: HealthFlag[];
+  Reporting: boolean;
+  LastHeartbeatUtc: string | null;
+  HeartbeatAgeSeconds: number | null;
+  AgentVersion: string | null;
+  ScriptVersions: Record<string, string | null> | null;
+  AppliedSettingsVersion: number | null;
+  CurrentSettingsVersion: number | null;
+  OsId: string | null;
+  OsVersion: string | null;
+  OsName: string | null;
+  KernelVersion: string | null;
+  Desktop: string | null;
+  XrdpVersion: string | null;
+  XrdpActive: boolean | null;
+  NfsReachable: boolean | null;
+  NfsMountCount: number | null;
+  LoadAverage: number | null;
+  CpuCount: number | null;
+  MemoryAvailableMb: number | null;
+  MemoryTotalMb: number | null;
+  RootDiskFreePct: number | null;
+  UptimeSeconds: number | null;
+  SessionCount: number | null;
+  Sessions: HostSession[];
+}
+
+export interface FleetHealthSummary {
+  Total: number;
+  PoweredOn: number;
+  Reporting: number;
+  Healthy: number;
+  Attention: number;
+  Off: number;
+  NoHeartbeat: number;
+  Stale: number;
+  XrdpDown: number;
+  NfsUnreachable: number;
+  LowDisk: number;
+  AgentOutdated: number;
+  SettingsDrift: number;
+}
+
+export interface FleetHealth {
+  ExpectedAgentVersion: string;
+  CurrentSettingsVersion: number | null;
+  StaleAfterSeconds: number;
+  Summary: FleetHealthSummary;
+  Hosts: HostHealth[];
+}
+
+export type AuditOutcome = 'success' | 'failure' | 'denied';
+
+export interface AuditEntry {
+  AuditId: number;
+  OccurredAtUtc: string;
+  ActorOid: string | null;
+  ActorName: string | null;
+  ActorType: 'user' | 'service' | 'system';
+  Action: string;
+  TargetType: string | null;
+  TargetId: string | null;
+  Outcome: AuditOutcome;
+  Detail: Record<string, unknown> | unknown[] | null;
+  CorrelationId: string | null;
+}
+
+/** The audit page's filters, held in the URL like the history filters. */
+export interface AuditFilterValues {
+  from: string;
+  to: string;
+  actor: string;
+  action: string;
+  target: string;
+  outcome: '' | AuditOutcome;
+}
+
+/** One saved version of the host settings profile. */
+export interface HostSettingsVersion extends HostSettings {
+  UpdatedBy: string | null;
+  ValidFromUtc: string | null;
+  ValidToUtc: string | null;
+  IsCurrent: boolean;
 }
 
 export interface ScalingRule {
@@ -144,6 +285,8 @@ export interface DashboardStats {
   powered_off: number;
   ready: number;
   cleanup_pending: number;
+  /** Absent from BFF builds that predate drain. */
+  draining?: number;
   attention: number;
   utilization: number;
   pct: PoolComposition;
@@ -152,6 +295,8 @@ export interface DashboardStats {
 export interface Dashboard {
   stats: DashboardStats | null;
   recentActivity: ActivityLogEntry[];
+  /** Null when the broker API predates host heartbeats or could not report them. */
+  fleetHealth?: (FleetHealthSummary & { ExpectedAgentVersion?: string | null }) | null;
   apiError: boolean;
 }
 

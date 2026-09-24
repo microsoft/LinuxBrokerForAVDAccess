@@ -29,8 +29,8 @@ def auth_headers():
     return {"Authorization": "Bearer " + access_token}
 
 
-def api_get(path, timeout=DEFAULT_TIMEOUT):
-    response = requests.get(f"{API_URL}{path}", headers=auth_headers(), timeout=timeout)
+def api_get(path, timeout=DEFAULT_TIMEOUT, params=None):
+    response = requests.get(f"{API_URL}{path}", headers=auth_headers(), params=params, timeout=timeout)
     response.raise_for_status()
     return response.json()
 
@@ -161,7 +161,7 @@ VM_STATUSES = ("Available", "CheckedOut", "Maintenance", "Released")
 
 
 def _build_stats(total, available, checked_out, maintenance, released,
-                 unreachable, powered_on, ready, cleanup_pending=0):
+                 unreachable, powered_on, ready, cleanup_pending=0, draining=0):
     """Shape the dashboard counters from raw counts."""
     other = max(0, total - available - checked_out - maintenance - released)
 
@@ -177,6 +177,7 @@ def _build_stats(total, available, checked_out, maintenance, released,
         "powered_off": max(0, total - powered_on),
         "ready": ready,
         "cleanup_pending": cleanup_pending,
+        "draining": draining,
         "attention": maintenance + unreachable + cleanup_pending,
         "utilization": round((checked_out / total) * 100) if total else 0,
         "pct": {
@@ -212,6 +213,7 @@ def summary_from_api(payload):
         powered_on=count("PoweredOn"),
         ready=count("Ready"),
         cleanup_pending=count("CleanupPending"),
+        draining=count("Draining"),
     )
 
 
@@ -253,6 +255,7 @@ def summarize_vms(vms):
     unreachable = count("NetworkStatus", "Unreachable")
     powered_on = count("PowerState", "On")
     cleanup_pending = sum(1 for vm in vms if (vm or {}).get("CleanupPending"))
+    draining = sum(1 for vm in vms if (vm or {}).get("DrainRequested"))
 
     # A VM is "ready" only when it is powered on, reachable and unassigned --
     # the same condition the API uses to pick a host for checkout.
@@ -263,6 +266,7 @@ def summarize_vms(vms):
         and (vm or {}).get("PowerState") == "On"
         and (vm or {}).get("NetworkStatus") == "Reachable"
         and not (vm or {}).get("CleanupPending")
+        and not (vm or {}).get("DrainRequested")
     )
 
     return _build_stats(
@@ -275,4 +279,5 @@ def summarize_vms(vms):
         powered_on=powered_on,
         ready=ready,
         cleanup_pending=cleanup_pending,
+        draining=draining,
     )
