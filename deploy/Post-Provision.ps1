@@ -133,15 +133,18 @@ if ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhite
     -ApiClientId $ApiClientId `
     -GraphEndpoint (Get-AzdEnvValue -Key 'graphEndpoint')
 
-& "$PSScriptRoot/Build-ContainerImages.ps1" `
-    -EnvironmentName $EnvironmentName
-
+# The schema goes first so new images never start against procedures they cannot call. The
+# scripts are additive and keep every existing parameter and result column, so the images
+# still running meanwhile keep working.
 & "$PSScriptRoot/Initialize-Database.ps1" `
     -SqlServerFqdn $SqlServerFqdn `
     -DatabaseName $DatabaseName `
     -SqlAdminLogin $SqlAdminLogin `
     -SqlAdminPassword $SqlAdminPassword `
     -ScriptsPath $ScriptsPath
+
+& "$PSScriptRoot/Build-ContainerImages.ps1" `
+    -EnvironmentName $EnvironmentName
 
 & "$PSScriptRoot/Assign-VmApiRoles.ps1" `
     -ResourceGroupName $ResourceGroupName `

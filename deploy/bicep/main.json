@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "6702220923033346297"
+      "templateHash": "8661975720375439198"
     }
   },
   "parameters": {
@@ -109,6 +109,20 @@
       "defaultValue": "",
       "metadata": {
         "description": "SQL administrator password."
+      }
+    },
+    "sqlDatabaseSkuName": {
+      "type": "string",
+      "defaultValue": "Basic",
+      "metadata": {
+        "description": "Azure SQL Database SKU name, for example Basic, S0, S1 or GP_S_Gen5_1. Basic suits small pools; use S1 or higher when many hosts and portal users call the broker at once."
+      }
+    },
+    "allowLegacyScopeAccess": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Temporarily let any portal user with the access_as_user scope act as FullAccess, as releases before role enforcement did. Use only while you assign the Reader, Operator and FullAccess app roles during an upgrade, then turn it off."
       }
     },
     "flaskKey": {
@@ -427,6 +441,12 @@
           "sqlAdminPassword": {
             "value": "[parameters('sqlAdminPassword')]"
           },
+          "sqlDatabaseSkuName": {
+            "value": "[parameters('sqlDatabaseSkuName')]"
+          },
+          "allowLegacyScopeAccess": {
+            "value": "[parameters('allowLegacyScopeAccess')]"
+          },
           "flaskKey": {
             "value": "[parameters('flaskKey')]"
           },
@@ -531,7 +551,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "2311462574901901206"
+              "templateHash": "1069093875186774374"
             }
           },
           "parameters": {
@@ -584,6 +604,20 @@
             },
             "sqlAdminPassword": {
               "type": "securestring"
+            },
+            "sqlDatabaseSkuName": {
+              "type": "string",
+              "defaultValue": "Basic",
+              "metadata": {
+                "description": "Azure SQL Database SKU name."
+              }
+            },
+            "allowLegacyScopeAccess": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Temporarily treat the access_as_user scope as FullAccess while roles are assigned during an upgrade."
+              }
             },
             "flaskKey": {
               "type": "securestring"
@@ -1840,6 +1874,9 @@
                   },
                   "allowedClientIp": {
                     "value": "[parameters('allowedClientIp')]"
+                  },
+                  "skuName": {
+                    "value": "[parameters('sqlDatabaseSkuName')]"
                   }
                 },
                 "template": {
@@ -1849,7 +1886,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "2004737624686870436"
+                      "templateHash": "4790372723276407625"
                     }
                   },
                   "parameters": {
@@ -1876,7 +1913,35 @@
                     "allowedClientIp": {
                       "type": "string",
                       "defaultValue": ""
+                    },
+                    "skuName": {
+                      "type": "string",
+                      "defaultValue": "Basic",
+                      "metadata": {
+                        "description": "SKU name, for example Basic, S0, S1 or GP_S_Gen5_1. The tier is derived from the name."
+                      }
                     }
+                  },
+                  "variables": {
+                    "dtuTiers": {
+                      "Basic": "Basic",
+                      "S0": "Standard",
+                      "S1": "Standard",
+                      "S2": "Standard",
+                      "S3": "Standard",
+                      "S4": "Standard",
+                      "S6": "Standard",
+                      "S7": "Standard",
+                      "S9": "Standard",
+                      "S12": "Standard",
+                      "P1": "Premium",
+                      "P2": "Premium",
+                      "P4": "Premium",
+                      "P6": "Premium",
+                      "P11": "Premium",
+                      "P15": "Premium"
+                    },
+                    "databaseSku": "[if(contains(variables('dtuTiers'), parameters('skuName')), createObject('name', parameters('skuName'), 'tier', variables('dtuTiers')[parameters('skuName')]), createObject('name', parameters('skuName')))]"
                   },
                   "resources": [
                     {
@@ -1897,10 +1962,7 @@
                       "apiVersion": "2023-08-01-preview",
                       "name": "[format('{0}/{1}', parameters('sqlServerName'), parameters('databaseName'))]",
                       "location": "[parameters('location')]",
-                      "sku": {
-                        "name": "Basic",
-                        "tier": "Basic"
-                      },
+                      "sku": "[variables('databaseSku')]",
                       "properties": {
                         "collation": "SQL_Latin1_General_CP1_CI_AS"
                       },
@@ -2271,6 +2333,7 @@
                   },
                   "appSettings": {
                     "value": {
+                      "ALLOW_LEGACY_SCOPE_ACCESS": "[if(parameters('allowLegacyScopeAccess'), 'true', 'false')]",
                       "AVD_HOST_GROUP_ID": "[parameters('avdHostGroupId')]",
                       "AZURE_AUTHORITY_HOST": "[variables('resolvedAuthorityHost')]",
                       "AZURE_CLOUD_NAME": "[parameters('azureCloudName')]",

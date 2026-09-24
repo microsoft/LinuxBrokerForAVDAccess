@@ -110,6 +110,9 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `nfsShareQuotaGiB`: provisioned size of that share in GiB. Premium shares have a 100 GiB minimum, and cost is based on the provisioned size. Defaults to `100`.
 - `avdUsersGroupId`: object ID of an existing Entra group whose members can launch **Linux Desktop**. Leave empty to have `preprovision` create `<appName>-<environmentName>-avd-users-sg` and add you to it.
 - `vmHostResourceGroup`: override if managed VMs live in a different resource group.
+- `brokerReaderGroupId`, `brokerOperatorGroupId`, `brokerAdminGroupId`: optional object IDs of Entra groups to assign the Broker API's `Reader`, `Operator` and `FullAccess` app roles to. Assigning an app role to a group needs Microsoft Entra ID P1 or P2; without it, assign the roles to users in **Enterprise applications**. See [Portal roles](#portal-roles).
+- `sqlDatabaseSkuName`: Azure SQL Database SKU, for example `Basic`, `S1` or `GP_S_Gen5_1`. Defaults to `Basic`, which suits small pools. Use `S1` or higher when many hosts and portal users call the broker at once; each API worker process opens at most `DB_MAX_CONCURRENCY` connections (6 by default).
+- `allowLegacyScopeAccess`: `true` or `false`. Defaults to `false`. When `true`, any portal user holding the `access_as_user` scope is treated as `FullAccess`, as in releases before role enforcement. Use it only while you assign roles during an upgrade.
 
 ### Values that are usually auto-generated
 
@@ -376,18 +379,18 @@ Important deployment characteristics:
 It currently runs, in order:
 
 1. [Assign-FunctionAppApiRole.ps1](Assign-FunctionAppApiRole.ps1)
-2. [Build-ContainerImages.ps1](Build-ContainerImages.ps1)
-3. [Initialize-Database.ps1](Initialize-Database.ps1)
+2. [Initialize-Database.ps1](Initialize-Database.ps1)
+3. [Build-ContainerImages.ps1](Build-ContainerImages.ps1)
 4. [Assign-VmApiRoles.ps1](Assign-VmApiRoles.ps1)
 5. [Register-LinuxHostSqlRecords.ps1](Register-LinuxHostSqlRecords.ps1)
 
 That means `postprovision` does all of the following:
 
 - Assigns the `ScheduledTask` app role to the function app managed identity. This runs before the images are built because the function app requests an API token as soon as its image starts, and the managed identity service caches that token for up to 24 hours.
-- Builds `frontend:latest`, `api:latest`, and `task:latest` in ACR.
-- Restarts the frontend app, API app, and function app after the new images are pushed.
-- Applies all SQL scripts from [../sql_queries](../sql_queries) through ADO.NET.
+- Applies all SQL scripts from [../sql_queries](../sql_queries) through ADO.NET, before any new image starts, so new code never runs against procedures it cannot call. The scripts only add columns, parameters and result columns, so the images still running meanwhile keep working.
 - Makes the SQL bootstrap rerunnable by handling `GO` batches and converting procedure creation to `CREATE OR ALTER`.
+- Builds `frontend:latest`, `api:latest`, and `task:latest` in ACR.
+- Restarts the API app, then the function app, then the frontend app, so nothing starts ahead of the API endpoints it calls.
 - Adds AVD and Linux VM managed identities to the corresponding Entra groups, retrying while new identities replicate, and fails the hook if a membership still cannot be confirmed.
 - Registers Linux hosts into `dbo.VirtualMachines` through `dbo.RegisterLinuxHostVm`.
 
@@ -456,6 +459,59 @@ The migration also rewrites `/etc/sudoers.d/avdadmin`. Older hosts were provisio
 `apply-host-settings.sh` is the only way the broker API can change host configuration. It accepts a JSON settings document on stdin and nothing on argv, rejects unknown keys, and clamps every value to a supported range before writing anything, so a bad value cannot strand the fleet.
 
 The migration additionally installs `dconf` and, where available, `xprintidle`. `xprintidle` backs the optional idle session timeout; if it cannot be installed the migration still succeeds and idle enforcement is simply skipped on that host. Existing hosts keep any settings profile they already have, and hosts with no profile are seeded with the shipped defaults, which match the values that were previously hardcoded.
+
+The current host scripts also bring:
+
+- **Single-call provisioning.** `create-user.sh --password-stdin` creates the account, mounts the home, adds the remote access groups and sets the password in one SSH session, instead of six to eight. The API falls back to the old sequence for a host whose script predates it, and logs a reminder to migrate that host.
+- **Lease handling for signed-in users.** `manage-lease.sh` keeps the lease while the user is still signed in, so the broker keeps the host **Cleanup pending** and retries, instead of treating it as clean.
+- **Keeping sessions alive.** The release agent and `apply-host-settings.sh` understand the **Keep sessions alive during the grace period** setting. Hosts that are not migrated reject the setting once it is turned on, keep their current behavior, and show as pending in the drift table.
+
+## Upgrading To Role-Based Access And Working Scaling
+
+This release changes three behaviors that need planning before you upgrade an existing environment.
+
+### Portal roles
+
+Every Broker API endpoint now checks the caller's app roles. The delegated `access_as_user` scope that the portal requests no longer grants anything by itself.
+
+| Role | Allows |
+| --- | --- |
+| `Reader` | Viewing everything in the portal |
+| `Operator` | Reader, plus releasing and returning hosts, retrying cleanup, maintenance on and off, and **Apply Now** |
+| `FullAccess` | Operator, plus adding, deleting and repairing VMs, test checkouts, and editing the scaling rule and host settings |
+
+`preprovision` creates the `Reader` and `Operator` roles on the API app registration (`FullAccess` already exists) and assigns `FullAccess` to the user running the deployment. Assign roles to other administrators under **Microsoft Entra ID > Enterprise applications > *API app* > Users and groups**, or set `brokerReaderGroupId`, `brokerOperatorGroupId` and `brokerAdminGroupId` so `preprovision` assigns them to groups (group assignment needs Entra ID P1 or P2). Users pick up a new role the next time they sign in to the portal.
+
+If you cannot assign roles before the upgrade, deploy once with the legacy toggle and turn it off afterwards:
+
+```powershell
+azd env set allowLegacyScopeAccess true
+azd provision
+# ...assign the roles...
+azd env set allowLegacyScopeAccess false
+azd provision
+```
+
+While the toggle is on, the API logs a warning whenever it grants access through the scope, and the portal shows a banner.
+
+### Scaling now starts and stops VMs
+
+Earlier releases recorded scaling decisions in the database but never sent them to Azure, because the procedure and the API disagreed on the action names. After this upgrade the scaling task starts and stops VMs for real, every five minutes.
+
+- Review the scaling rule first. `MinVMs` must now be at least 1, only one rule applies, and idle hosts above the minimum are powered off when utilization is at or below the scale-down ratio.
+- Choose the stop mode per rule in the portal. **Power off** (the default) keeps compute allocated and billed but starts quickly; **Deallocate** stops compute billing but starts more slowly and can fail with `AllocationFailed` in a capacity-constrained region.
+- The API's managed identity already holds **Desktop Virtualization Power On Off Contributor** on the VM resource group, which includes start, power off and deallocate.
+
+### Returned hosts are cleaned before reuse
+
+A returned host is now held **Cleanup pending** until the previous user's account has been removed and their home unmounted, and the released-VM sweep follows the configured grace period instead of a fixed 30 minutes. Hosts released by the previous API build during the rollout are claimed by the new sweep and cleaned automatically.
+
+### Recommended order
+
+1. Assign the portal roles, or set `allowLegacyScopeAccess`.
+2. Review the scaling rule and, for larger pools, set `sqlDatabaseSkuName`.
+3. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1), which applies the SQL scripts first, then rebuilds and restarts the apps, then migrates the Linux hosts.
+4. Confirm that a checkout, a disconnect and a return work end to end, and that returned hosts leave **Cleanup pending** within a few minutes.
 
 ## Manual Steps After `azd up`
 
@@ -546,6 +602,7 @@ Confirm that:
 - the function app managed identity has the `ScheduledTask` API app role
 - the AVD host group has the `AvdHost` API app role
 - the Linux host group has the `LinuxHost` API app role
+- every portal administrator holds `Reader`, `Operator` or `FullAccess` on the API app, and `allowLegacyScopeAccess` is `false`
 - VM managed identities are members of the correct Entra groups
 - the AVD users group holds **Desktop Virtualization User** on the RemoteApp application group and **Virtual Machine User Login** on each session host
 - the API app's managed identity holds **Desktop Virtualization Power On Off Contributor** on the VM resource group
@@ -631,9 +688,17 @@ A device object left over from an earlier deployment that used the same VM name 
 
 `Connect-LinuxBroker.ps1` shows this when checkout does not return a host. Check the **LinuxBrokerScript** source in the session host's Application event log. A `403` from the API means the session host's managed identity is not yet in the AVD host group; rerun `azd hooks run postprovision`. Otherwise, confirm in the portal that at least one Linux host is available.
 
+### The portal shows "No access" after signing in
+
+The signed-in account holds none of the Broker API's `Reader`, `Operator` or `FullAccess` app roles. Assign one (see [Portal roles](#portal-roles)) and sign in again. If the portal instead reports that it could not verify your roles, the portal could not reach the API's `/api/me` endpoint; check the API app's health.
+
+### A host stays Cleanup pending
+
+The broker keeps a returned host out of the pool until the previous user's account has been removed. The API log names the reason on each retry: the user is still signed in (the host agent signs them off when the grace period expires), the host is powered off or unreachable (retries resume when it is back), or the home directory is still mounted on a host that has not been migrated. Use **Retry cleanup** in the portal after fixing the cause.
+
 ### Released Linux hosts never return to Available
 
-The function app returns released hosts to the pool. If hosts stay **Released** and the API log shows `Access denied: insufficient scope or role permissions or group membership.` at the start of every minute, the function app's API token does not carry the `ScheduledTask` role.
+The function app returns released hosts to the pool. If hosts stay **Released** and the API log shows `Access denied: insufficient role permissions or group membership.` at the start of every minute, the function app's API token does not carry the `ScheduledTask` role.
 
 This happens when the function app requested a token before the role was assigned, which earlier versions of [Post-Provision.ps1](Post-Provision.ps1) allowed on a new deployment. The managed identity service caches the token for up to 24 hours, so restarting the function app does not help. Either wait for the token to expire, or give the function app a new identity. Stop the app first, so it cannot request a token before the role is in place:
 

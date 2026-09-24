@@ -19,6 +19,12 @@ param linuxHostGroupId string = ''
 param sqlAdminLogin string = 'brokeradmin'
 @secure()
 param sqlAdminPassword string
+
+@description('Azure SQL Database SKU name.')
+param sqlDatabaseSkuName string = 'Basic'
+
+@description('Temporarily treat the access_as_user scope as FullAccess while roles are assigned during an upgrade.')
+param allowLegacyScopeAccess bool = false
 @secure()
 param flaskKey string
 param domainName string = ''
@@ -215,6 +221,7 @@ module sql 'modules/core/sql-database.bicep' = {
     administratorLogin: sqlAdminLogin
     administratorPassword: sqlAdminPassword
     allowedClientIp: allowedClientIp
+    skuName: sqlDatabaseSkuName
   }
 }
 
@@ -359,6 +366,7 @@ var frontendSettings = {
   WEBSITE_AUTH_AAD_ALLOWED_TENANTS: tenantId
 }
 var apiSettings = {
+  ALLOW_LEGACY_SCOPE_ACCESS: allowLegacyScopeAccess ? 'true' : 'false'
   AVD_HOST_GROUP_ID: avdHostGroupId
   AZURE_AUTHORITY_HOST: resolvedAuthorityHost
   AZURE_CLOUD_NAME: azureCloudName
