@@ -77,6 +77,7 @@ def _install_import_fakes():
             self.virtual_machines = types.SimpleNamespace(
                 begin_start=lambda *a, **k: None,
                 begin_power_off=lambda *a, **k: None,
+                begin_deallocate=lambda *a, **k: None,
             )
 
     azure_mgmt_compute.ComputeManagementClient = ComputeManagementClient
@@ -229,6 +230,14 @@ def app_module():
     return module
 
 
+@pytest.fixture(autouse=True)
+def reset_process_caches(app_module):
+    """JWKS, Graph token, SSH key and group-membership caches live for the process."""
+    app_module.reset_caches()
+    yield
+    app_module.reset_caches()
+
+
 @pytest.fixture
 def fake_db(app_module, monkeypatch):
     db = FakeDb()
@@ -243,3 +252,34 @@ def client(app_module, fake_db, monkeypatch):
         if original is not None:
             monkeypatch.setitem(app_module.app.view_functions, endpoint, original)
     return app_module.app.test_client()
+
+
+@pytest.fixture
+def auth_client(app_module, fake_db, monkeypatch):
+    """A test client that keeps token_required in place.
+
+    Call the returned function with the token claims the next requests should carry.
+    Group membership defaults to False and is recorded in `group_checks`.
+    """
+    state = {"claims": {"oid": "user-oid"}, "group_member": False, "group_checks": []}
+
+    monkeypatch.setattr(app_module.requests, "get", lambda url, **kwargs: FakeJwksResponse())
+    monkeypatch.setattr(app_module.jwt, "get_unverified_header", lambda token: {"kid": "test-kid"})
+    monkeypatch.setattr(app_module.jwt, "decode", lambda *args, **kwargs: dict(state["claims"]))
+
+    def fake_group_check(oid, groups):
+        state["group_checks"].append((oid, tuple(groups)))
+        return state["group_member"]
+
+    monkeypatch.setattr(app_module, "is_member_of_group", fake_group_check)
+
+    test_client = app_module.app.test_client()
+
+    def use(claims=None, group_member=False):
+        state["claims"] = {"oid": "user-oid", **(claims or {})}
+        state["group_member"] = group_member
+        return test_client
+
+    use.state = state
+    use.headers = {"Authorization": "Bearer test-token"}
+    return use
