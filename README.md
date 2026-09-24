@@ -68,44 +68,55 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 5. **Session Management**:
    - If the user disconnects or logs off, the Session Release Agent on the Linux host reconciles the XRDP/Xorg session state immediately when possible and otherwise on the next safety-net poll.
    - A reconnect timer is initiated, 20 minutes by default and configurable from the portal.
-   - If the user reconnects within that window, they resume their session.
-   - If not, the user's account is removed from the Linux host, and the VM is made available for other users.
+   - If the user reconnects within that window, they return to the same host and profile. With **Keep sessions alive during the grace period** turned on in Host Settings, they also resume the same desktop and running applications; otherwise the desktop is closed at disconnect and they start a fresh one.
+   - If not, the user is signed off and the VM is returned. It becomes available to other users once the user's account has been removed from the host.
 
 ## Admin Workflow
+
+What an administrator can do depends on their role (see [RBAC Permissions](#rbac-permissions)).
 
 1. **Access Service Management Portal**: Admins log into the front-end portal.
 2. **Manage VMs**:
    - **Add VMs**: Register new Linux VMs into the system.
    - **Delete VMs**: Remove VMs from the system.
-   - **Update VM Attributes**: Modify VM statuses (e.g., set to maintenance).
-3. **Manage Scaling Rules**:
-   - **Create/Update/Delete Scaling Rules**: Adjust scaling rules to control the minimum and maximum number of VMs, scale-up/down ratios, and increments.
+   - **Maintenance**: Take an unassigned host out of rotation, and put it back.
+   - **Release and return**: End a user's assignment early. A returned host stays **Cleanup pending** until the user's account has been removed from it; cleanup is retried automatically, or on demand with **Retry cleanup**.
+   - **Repair VM records**: **Update attributes** edits what the broker has recorded for a host (FullAccess only). It does not start or stop the VM.
+3. **Manage Scaling**:
+   - **Edit the scaling rule**: Set the minimum and maximum number of running VMs, the scale-up and scale-down thresholds and increments, and whether scale-down powers VMs off or deallocates them.
 4. **Manage Linux Host Settings**:
-   - **Edit the fleet-wide profile**: Change the reconnect grace period, reconcile interval, watcher timings, idle session timeout, and screen lock policy without editing or redeploying any script.   - **Apply Now**: Optionally push the profile to hosts immediately instead of waiting for them to pick it up.
+   - **Edit the fleet-wide profile**: Change the reconnect grace period, whether disconnected sessions are kept alive, the reconcile interval, watcher timings, idle session timeout, and screen lock policy without editing or redeploying any script.
+   - **Apply Now**: Optionally push the profile to hosts immediately instead of waiting for them to pick it up.
    - **Review drift**: See which hosts have applied the current settings version.
 5. **Monitor System**:
    - **View VM Details**: Access detailed information about VMs.
-   - **View Scaling Activity Logs**: Monitor scaling activities and history.
+   - **View Scaling Activity Logs**: Monitor scaling activities and history, including why each run did or did not act.
    - **View VM History**: Track the usage and status changes of VMs.
 
 ## RBAC Permissions
 
-The solution uses Role-Based Access Control (RBAC) to secure access:
+The solution uses Role-Based Access Control (RBAC) to secure access. Every Broker API endpoint checks the caller's app roles; the portal only hides what a role cannot do.
 
-- **Management Portal Admins**:
-  - **Roles**: `User` and `FullAccess` on the Broker API.
-  - **Permissions**: Access to the management portal and ability to manage VMs, scaling rules, and Linux host settings.
+- **Management Portal Users**: assign one of these app roles on the Broker API's enterprise application, to users directly or to groups (group assignment needs Microsoft Entra ID P1 or P2):
+
+  | Role | Allows |
+  | --- | --- |
+  | `Reader` | Viewing everything in the portal. |
+  | `Operator` | Everything `Reader` can do, plus releasing and returning hosts, retrying cleanup, turning maintenance on and off, and pushing host settings with **Apply Now**. |
+  | `FullAccess` | Everything `Operator` can do, plus adding and deleting VMs, repairing VM records, checking out a VM for testing, and editing the scaling rule and host settings. |
+
+  The portal signs users in with the delegated `access_as_user` scope, but the scope alone no longer grants anything: a signed-in user without one of these roles sees a **No access** page. The deployment assigns `FullAccess` to the user who runs it. When upgrading, see [Upgrading an existing deployment](#upgrading-an-existing-deployment).
 - **Broker Agent (AVD Hosts)**:
-  - **Role**: `AVDHost` on the Broker API.
+  - **Role**: `AvdHost` on the Broker API.
   - **Permissions**: Access to the `checkout` API endpoint.
   - **Requirements**: Must be using managed identity and be a member of the `LinuxBroker-AVDHost-VMs` security group.
 - **Session Release Agent (Linux Hosts)**:
   - **Role**: `LinuxHost` on the Broker API.
-  - **Permissions**: Access to release VMs, update statuses, read the host settings profile, and acknowledge the settings version applied.
+  - **Permissions**: Access to release VMs, read the host settings profile, and acknowledge the settings version applied.
   - **Requirements**: Managed identity and membership in `LinuxBroker-LinuxHost-VMs` security group.
 - **Azure Function (Scaling Tasks)**:
   - **Role**: `ScheduledTask` on the Broker API.
-  - **Permissions**: Access to APIs for getting VMs, updating attributes, releasing VMs, and triggering scaling.
+  - **Permissions**: Access to APIs for listing VMs, recording network status, returning released VMs, and triggering scaling.
 - **Broker API**:
   - **Permissions**: Has API permissions to Microsoft Graph for directory and group read access to validate managed identities and security group memberships.
 - **Managed Identities**:
@@ -148,19 +159,23 @@ These scripts:
 
 ### Scaling Rules
 
-- **Minimum VMs Running**: The minimum number of Linux VMs to keep powered on.
-- **Maximum VMs Running**: The maximum number of Linux VMs allowed to be powered on.
-- **Scale-Up Ratio**: The ratio of used VMs to total VMs at which the system should scale up (e.g., when 80% of VMs are in use).
-- **Scale-Up Increment**: The number of VMs to add when scaling up.
-- **Scale-Down Ratio**: The ratio at which to scale down the number of running VMs (e.g., when usage drops below 30%).
-- **Scale-Down Increment**: The number of VMs to remove when scaling down.
+- **One rule applies**: the rule with the lowest ID. Creating a second rule is refused; edit the existing one.
+- **Minimum VMs Running**: At least 1. Whenever fewer serviceable hosts are running (powered on, not in maintenance, and reachable or still booting), hosts are started to reach it.
+- **Maximum VMs Running**: The maximum number of Linux VMs allowed to be powered on, including hosts in maintenance.
+- **Scale-Up Ratio**: The utilization at which more VMs are started (e.g., 80%). Utilization is hosts in use (checked out, released within their grace period, or pending cleanup) divided by serviceable hosts.
+- **Scale-Up Increment**: The number of VMs to start when scaling up.
+- **Scale-Down Ratio**: The utilization at or below which VMs are stopped (e.g., 30%).
+- **Scale-Down Increment**: The number of VMs to stop when scaling down. Only idle, reachable, unassigned hosts that have stayed in their current power state for at least 10 minutes are stopped, highest VMID first.
+- **Stop mode**: **Power off** (the default) keeps the VM's compute allocation, so it starts quickly but compute is still billed. **Deallocate** stops compute billing, but starts take longer, and in a capacity-constrained region or VM size a start can fail with `AllocationFailed` (the broker records the host as off and retries on a later run). Deallocation also wipes the temporary disk; private IP addresses and host names are kept.
+
+Every run first reads each host's power state from Azure and corrects the broker's record, runs never overlap, and each run writes an activity log entry whose notes explain the decision. Before this release, scaling decisions were recorded but never sent to Azure, so upgrading makes scaling start and stop VMs for the first time.
 
 ### Session Release Mechanism
 
 - **Session Monitoring**: The Session Release Agent reconciles XRDP/Xorg session state on a timer (60 seconds by default) and can also wake early from `systemd-logind` session signals.
-- **Release State**: When a session is disconnected, the VM enters a 'released' state, allowing the user to reconnect within the configured grace period (20 minutes by default).
-- **Session Termination**: If the user does not reconnect within that window, their account is removed from the Linux host, and the VM becomes available for other users.
-- **Idle Sessions**: When an idle timeout is configured, a user who stays connected but inactive is disconnected, which starts the same grace period. They can reconnect and resume; if they do not, the VM is reclaimed. This is disabled by default.
+- **Release State**: When a session is disconnected, the VM enters a 'released' state, allowing the user to reconnect within the configured grace period (20 minutes by default). The desktop itself is closed at disconnect unless **Keep sessions alive during the grace period** is turned on, in which case it keeps running until the grace period expires.
+- **Session Termination**: If the user does not reconnect within that window, the host signs them off. The broker returns the VM once the grace period, one reconcile interval and a further 60 seconds have passed, then keeps it **Cleanup pending** until the user's account has been removed and the home unmounted. Cleanup is retried automatically about every two minutes while the host is on and reachable, and operators can retry it from the portal. Only then can the VM be checked out by someone else.
+- **Idle Sessions**: When an idle timeout is configured, a user who stays connected but inactive is disconnected, which starts the same grace period. With **Keep sessions alive** turned on they can reconnect and resume; otherwise they get a fresh desktop on the same host. If they do not reconnect, the VM is reclaimed. This is disabled by default.
 
 ### Linux Host Settings
 
@@ -169,6 +184,7 @@ Administrators manage host behavior from the **Host Settings** page in the Servi
 | Setting | Default | Range | Effect |
 | --- | --- | --- | --- |
 | Reconnect grace period | 1200 s | 60–86400 | How long a disconnected user can reconnect before the VM is reclaimed |
+| Keep sessions alive during the grace period | false | boolean | Keeps a disconnected desktop running until the grace period expires, so a reconnect resumes it. Cannot be combined with **Screen lock enabled**. Hosts need the current agent scripts |
 | Reconcile interval | 60 s | 30–900 | How often each host re-checks session state |
 | Watcher debounce | 10 s | 1–300 | Minimum gap between `logind`-triggered reconciliations |
 | Watcher settle | 2 s | 0–60 | Pause after a `logind` signal before reconciling |
@@ -183,6 +199,8 @@ Administrators manage host behavior from the **Host Settings** page in the Servi
 The session lifecycle defaults match the values that were previously hardcoded, so adopting this feature changes no behavior until an administrator edits the profile.
 
 The screen lock defaults preserve the posture set by `LINUXBROKER_DISABLE_SCREEN_LOCK`: the lock screen is removed, because a locked GNOME greeter inside an xrdp session frequently cannot be unlocked after a reconnect, which strands the host's lease. That environment variable still chooses the posture seeded at provisioning time; from then on the values are managed from the portal. Set **Screen lock enabled** on and **Remove the lock screen** off to satisfy a STIG or CIS idle-lock control.
+
+**Keep sessions alive during the grace period** and **Screen lock enabled** are mutually exclusive: a resumed session behind a lock screen cannot be unlocked, because users never know the password the broker sets at each checkout. Hosts that have not been updated with `deploy/Migrate-LinuxHostReleaseAgent.ps1` keep closing desktops at disconnect and show as pending in the drift table once the setting is on.
 
 #### How settings reach the hosts
 
@@ -264,6 +282,20 @@ The Service Management Portal serves all of its front-end assets from its own co
 The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps.
 
 Before running `azd up`, review the detailed guide and set any environment-specific values you need, especially networking, host counts, VM sizes, App Service plan sizing, and SQL firewall access. The deployment scripts under `deploy/` now handle the Entra bootstrap, SSH key flow, App Service health checks on `/health`, Application Insights wiring for the frontend and API, post-provision role assignment, container image builds, SQL initialization, and Linux host SQL registration used by this solution.
+
+## Upgrading an existing deployment
+
+This release changes behavior you should plan for. The full procedure is in [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md#upgrading-to-role-based-access-and-working-scaling).
+
+- **Scaling starts and stops VMs.** Earlier releases recorded scaling decisions without sending them to Azure. Review the scaling rule (the minimum is now at least 1) before upgrading, because idle hosts above the minimum will be powered off.
+- **Portal access needs a role.** Assign `Reader`, `Operator` or `FullAccess` to every administrator before upgrading, or deploy once with `allowLegacyScopeAccess=true` and turn it off after the roles are assigned.
+- **Returned hosts are cleaned before reuse.** A host is not handed to the next user until the previous user's account is gone, and the released-VM sweep now follows the configured grace period instead of a fixed 30 minutes.
+- **Update the Linux hosts.** Run `deploy/Migrate-LinuxHostReleaseAgent.ps1` so hosts get single-call provisioning, the lease handling that keeps a signed-in user's host pending, and support for keeping sessions alive. Hosts that are not migrated keep working with the previous behavior.
+- **Size the database.** The API now serves requests concurrently and caps its SQL connections per worker (`DB_MAX_CONCURRENCY`). The default Basic tier suits small pools; set `sqlDatabaseSkuName` to `S1` or higher for larger fleets.
+
+## Roadmap
+
+Planned work beyond this release, including a sessions view, fleet health, an audit log, scaling schedules, Ubuntu desktop and RHEL 10 support, and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contributing
 
