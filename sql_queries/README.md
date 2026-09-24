@@ -53,6 +53,9 @@ Use that path when you need to:
 - `027_add_unique_index-virtual_machines_hostname.sql`: enforces `Hostname` uniqueness on `dbo.VirtualMachines`
 - `028_create_table-linux_host_settings.sql`: creates `dbo.LinuxHostSettings` and seeds the single global profile
 - `029_add_settings_tracking_to_virtual_machines.sql`: adds `SettingsVersion` and `SettingsAppliedDate` to `dbo.VirtualMachines` so settings drift is visible
+- `067_create_table-audit_log.sql`: creates `dbo.AuditLog`
+- `072_add_drain_requested_to_virtual_machines.sql`: adds the drain flag to `dbo.VirtualMachines`
+- `083_create_table-host_heartbeats.sql`: creates `dbo.HostHeartbeats`
 
 The table scripts above are written to be rerunnable.
 
@@ -119,6 +122,26 @@ The scripts do not contain `USE <database>` statements. The target database come
 - `064_add_preserve_sessions_to_linux_host_settings.sql`: adds the preserve-sessions host setting and constraint
 - `065_alter_procedure-GetLinuxHostSettings.sql`: returns `PreserveSessionsOnDisconnect`
 - `066_alter_procedure-UpdateLinuxHostSettings.sql`: updates `PreserveSessionsOnDisconnect` and bumps versions only on change
+- `067_create_table-audit_log.sql`: creates the append-only `dbo.AuditLog` (UTC `OccurredAt`, actor, action, target, outcome, JSON detail, correlation ID) and its indexes
+- `068_create_procedure-WriteAuditEntry.sql`: appends one audit entry, truncating over-long values and dropping detail that is not JSON
+- `069_create_procedure-GetAuditLogPaged.sql`: returns filtered, paged audit entries with `TotalCount` and an ISO-8601 `OccurredAtUtc`
+- `070_create_procedure-PurgeAuditLog.sql`: deletes entries older than the retention in batches of at most 2,000 rows, so a purge never escalates to a table lock, clamping the retention to 30–3650 days
+- `071_create_procedure-GetLinuxHostSettingsHistory.sql`: returns every saved version of the host settings profile from the temporal history, newest first
+- `072_add_drain_requested_to_virtual_machines.sql`: adds `DrainRequested` and `DrainRequestedDate` to `dbo.VirtualMachines`
+- `073_alter_procedure-CheckoutVm.sql`: gives a draining host to no new user, while its current user can still reconnect
+- `074_alter_procedure-CompleteVmCleanup.sql`: moves a draining host to Maintenance once its previous user is gone, and reports `DrainCompleted`
+- `075_alter_procedure-SetVmMaintenance.sql`: clears the drain flag on either maintenance transition
+- `076_create_procedure-SetVmDrain.sql`: starts or ends a drain (`Draining`, `Drained`, `ReturnedToService`, `Unchanged`)
+- `077_create_procedure-FinalizeVmDrains.sql`: moves every draining host that has become unassigned and clean to Maintenance
+- `078_create_procedure-BeginVmPowerAction.sql`: records a requested start, stop or restart, refuses an assigned host unless allowed, ends the assignment when an assigned host is stopped, and returns the previous state for a revert
+- `079_alter_procedure-TriggerScalingLogic.sql`: leaves draining hosts out of capacity and never starts or stops them
+- `080_alter_procedure-GetVms.sql`, `081_alter_procedure-GetVmDetails.sql`: return `DrainRequested` and `DrainRequestedDate`
+- `082_alter_procedure-GetVmSummary.sql`: adds `Draining` and leaves draining hosts out of `Ready`
+- `083_create_table-host_heartbeats.sql`: creates `dbo.HostHeartbeats`, one current row per host agent
+- `084_create_procedure-RecordHostHeartbeat.sql`: upserts a registered host's heartbeat from JSON and records a changed settings version as applied
+- `085_create_procedure-GetHostHealth.sql`: returns every host with its latest heartbeat, the heartbeat age, and the current settings version and reconcile interval
+- `086_alter_procedure-DeleteVm.sql`: returns a row only when a VM was deleted, with its hostname, and removes its heartbeat
+- `087_create_procedure-RevertVmPowerAction.sql`: puts back what `BeginVmPowerAction` recorded when Azure refuses the operation, including the assignment a refused stop ended, unless the user has since been given another host
 
 `033` exists as its own file rather than being folded into `014` because `014` runs before `029` adds those columns, and SQL Server validates column references against existing tables when a procedure is created.
 
@@ -133,6 +156,8 @@ The current code and deployment flow depend on the following SQL objects being p
 - `dbo.VirtualMachines`
 - `dbo.VmUsers`
 - `dbo.LinuxHostSettings`
+- `dbo.AuditLog`
+- `dbo.HostHeartbeats`
 - all of the stored procedures above
 - especially `dbo.CheckoutVm`, `dbo.ReleaseVm`, `dbo.UpdateVmAttributes`, and `dbo.RegisterLinuxHostVm`
 
@@ -146,6 +171,9 @@ Two current behaviors are worth calling out:
 - Scaling stop behavior is controlled by `StopMode` (`PowerOff` or `Deallocate`), and booting hosts count as serviceable without being selected for stop.
 - Linux user ids are allocated through `dbo.VmUserUidSequence`, seeded at the greater of 2000 or the current maximum user id plus one, and collision-skipped for legacy inserts.
 - Host settings include `PreserveSessionsOnDisconnect`, which cannot be enabled at the same time as `ScreenLockEnabled`.
+- A draining host (`DrainRequested = 1`) is offered to no new user, is left out of scaling capacity, and moves to Maintenance once its assignment has ended and it is clean. `dbo.BeginVmPowerAction` records every operator start, stop and restart the way scaling records its own, and stopping an assigned host ends the assignment exactly as `dbo.ReturnVm` does. If Azure refuses, `dbo.RevertVmPowerAction` restores the power state and gives the assignment back in one transaction.
+- `dbo.AuditLog` is append-only and UTC. The API writes it through `dbo.WriteAuditEntry` and purges it through `dbo.PurgeAuditLog`; nothing else updates or deletes it.
+- `dbo.HostHeartbeats` keeps only each host's latest heartbeat. `dbo.RecordHostHeartbeat` writes `dbo.VirtualMachines` only when the reported settings version changed, because that table is system-versioned and a write on every heartbeat would add a history row per host per minute.
 
 Linux host settings are a single fleet-wide profile:
 
@@ -247,7 +275,7 @@ After bootstrap, verify both tables and procedures.
 ```sql
 SELECT name
 FROM sys.tables
-WHERE name IN ('VmScalingRules', 'VmScalingActivityLog', 'VirtualMachines', 'VmUsers', 'LinuxHostSettings')
+WHERE name IN ('VmScalingRules', 'VmScalingActivityLog', 'VirtualMachines', 'VmUsers', 'LinuxHostSettings', 'AuditLog', 'HostHeartbeats')
 ORDER BY name;
 ```
 
@@ -290,7 +318,17 @@ WHERE name IN (
     'SetVmMaintenance',
     'SyncVmPowerStates',
     'AppendScalingActivityNote',
-    'GetOrCreateVmUserUid'
+    'GetOrCreateVmUserUid',
+    'WriteAuditEntry',
+    'GetAuditLogPaged',
+    'PurgeAuditLog',
+    'GetLinuxHostSettingsHistory',
+    'SetVmDrain',
+    'FinalizeVmDrains',
+    'BeginVmPowerAction',
+    'RevertVmPowerAction',
+    'RecordHostHeartbeat',
+    'GetHostHealth'
 )
 ORDER BY name;
 ```
