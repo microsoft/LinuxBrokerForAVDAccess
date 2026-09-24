@@ -40,6 +40,17 @@ EXPECTED_ROLES = {
     "update_host_settings": ADMIN,
     "apply_host_settings": OPERATE | {"ScheduledTask"},
     "acknowledge_host_settings": {"LinuxHost", "FullAccess"},
+    "get_host_settings_history": READ,
+    "start_vm": OPERATE,
+    "stop_vm": OPERATE,
+    "restart_vm": OPERATE,
+    "drain_vm": OPERATE,
+    "undrain_vm": OPERATE,
+    "sync_power_states": OPERATE,
+    "record_host_heartbeat": {"LinuxHost", "FullAccess"},
+    "get_host_health": READ,
+    "get_audit_log": READ,
+    "purge_audit_log": {"ScheduledTask", "FullAccess"},
 }
 
 EXPECTED_GROUPS = {
@@ -47,6 +58,7 @@ EXPECTED_GROUPS = {
     "release_vm": "LINUX_HOST_GROUP_ID",
     "get_host_settings": "LINUX_HOST_GROUP_ID",
     "acknowledge_host_settings": "LINUX_HOST_GROUP_ID",
+    "record_host_heartbeat": "LINUX_HOST_GROUP_ID",
 }
 
 

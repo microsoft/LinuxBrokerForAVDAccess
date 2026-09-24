@@ -78,6 +78,7 @@ def _install_import_fakes():
                 begin_start=lambda *a, **k: None,
                 begin_power_off=lambda *a, **k: None,
                 begin_deallocate=lambda *a, **k: None,
+                begin_restart=lambda *a, **k: None,
             )
 
     azure_mgmt_compute.ComputeManagementClient = ComputeManagementClient
@@ -236,6 +237,30 @@ def reset_process_caches(app_module):
     app_module.reset_caches()
     yield
     app_module.reset_caches()
+
+
+class AuditRecorder(list):
+    """The audit entries a test produced. `original` is the real write_audit_entry."""
+
+    original = None
+
+
+@pytest.fixture(autouse=True)
+def audit_entries(app_module, monkeypatch):
+    """Audit entries the code under test wrote, instead of sending them to the fake database.
+
+    Keeping them out of the fake database means a test that counts database calls or
+    commits is not affected by auditing; tests that care about auditing assert on this list.
+    """
+    entries = AuditRecorder()
+    entries.original = app_module.write_audit_entry
+
+    def record(entry):
+        entries.append(dict(entry))
+        return True
+
+    monkeypatch.setattr(app_module, "write_audit_entry", record)
+    return entries
 
 
 @pytest.fixture

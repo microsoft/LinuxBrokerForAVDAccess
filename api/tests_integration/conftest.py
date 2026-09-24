@@ -137,6 +137,8 @@ def db(sql):
     database = Db(sql)
     for statement in (
         "DELETE FROM dbo.VmUsers",
+        "DELETE FROM dbo.AuditLog",
+        "DELETE FROM dbo.HostHeartbeats",
         "DELETE FROM dbo.VirtualMachines",
         "DELETE FROM dbo.VmScalingActivityLog",
         "DELETE FROM dbo.VmScalingRules",

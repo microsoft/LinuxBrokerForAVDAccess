@@ -109,6 +109,7 @@ def test_vm_summary_returns_integer_zeroes_when_procedure_has_no_row(client, fak
         "Unreachable": 0,
         "Ready": 0,
         "CleanupPending": 0,
+        "Draining": 0,
     }
     assert all(isinstance(value, int) for value in response.get_json().values())
 
