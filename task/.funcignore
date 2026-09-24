@@ -5,4 +5,6 @@ __blobstorage__
 __queuestorage__
 local.settings.json
 test
+tests
+requirements-dev.txt
 .venv
