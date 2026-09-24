@@ -77,6 +77,7 @@ BOOLEAN_SETTINGS=(
     "ScreenLockEnabled|false"
     "DisableLockScreen|true"
     "ScreenLockSettingsLocked|true"
+    "PreserveSessionsOnDisconnect|false"
 )
 
 # IdleTimeoutSeconds treats 0 as "disabled"; any other value must clear this floor so a bad
@@ -221,6 +222,12 @@ parse_settings_document() {
        [ "${SETTING_VALUES[IdleWarningSeconds]}" -ge "${SETTING_VALUES[IdleTimeoutSeconds]}" ]; then
         log "WARNING: IdleWarningSeconds is not less than IdleTimeoutSeconds. Disabling the warning."
         SETTING_VALUES[IdleWarningSeconds]=0
+    fi
+
+    if [ "${SETTING_VALUES[PreserveSessionsOnDisconnect]}" = "true" ] && \
+       [ "${SETTING_VALUES[ScreenLockEnabled]}" = "true" ]; then
+        log "WARNING: PreserveSessionsOnDisconnect cannot be enabled while ScreenLockEnabled is true. Disabling session preservation."
+        SETTING_VALUES[PreserveSessionsOnDisconnect]=false
     fi
 }
 
