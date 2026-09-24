@@ -3,6 +3,10 @@
 # Usage: ./create-user.sh <NFS_SHARE> <USERID> <USERNAME> [LEASE_ID]
 #        ./create-user.sh --password-stdin <NFS_SHARE> <USERID> <USERNAME> <LEASE_ID>
 
+# The Linux Broker host agent version. Every script in linux_host/ declares the same value
+# and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
+LINUXBROKER_AGENT_VERSION="1.0.0"
+
 # Constants
 NFS_MOUNT_ROOT="/awipsprofiles"
 NFS_OPTIONS="vers=4,minorversion=1,sec=sys,nconnect=4"

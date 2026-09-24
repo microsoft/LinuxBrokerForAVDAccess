@@ -3,6 +3,10 @@
 # Print info about xrdp Xorg sessions
 #
 
+# The Linux Broker host agent version. Every script in linux_host/ declares the same value
+# and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
+LINUXBROKER_AGENT_VERSION="1.0.0"
+
 if [ -t 1 ] && [ -n "$TERM" ]; then
     RED=$(tput setaf 1; tput bold) #"\033[1;31m"
     GREEN=$(tput setaf 2; tput bold) #"\033[1;32m"

@@ -117,10 +117,34 @@ INFO
     ensure_jq_installed() { return 0; }
     release_vm() { echo "$1" >> "$WORK_DIR/agg-releases-$label"; return 0; }
     enforce_idle_session() { echo "$1:$2" >> "$WORK_DIR/agg-idle-$label"; return 0; }
+    send_heartbeat() { printf '%s' "$1" > "$WORK_DIR/agg-heartbeat-$label"; return 0; }
 
     main
     assert_not_exists "$WORK_DIR/agg-releases-$label"
     assert_file_contains "$WORK_DIR/agg-idle-$label" "alice:102"
+    # The heartbeat reports one session per user, active when any of their sessions is.
+    jq -e 'length == 1 and .[0].username == "alice" and .[0].state == "active" and (.[0].sessionStart | type) == "number"' \
+        "$WORK_DIR/agg-heartbeat-$label" >/dev/null || fail "$label heartbeat sessions: $(cat "$WORK_DIR/agg-heartbeat-$label")"
+
+    # Building the session list reads each active session's idle time from its X server, so a
+    # run that sends no heartbeat never builds it: a watcher run, or one during the back-off.
+    session_json() { echo "$1" >> "$WORK_DIR/agg-sessions-$label"; echo '{}'; }
+    rm -f "$WORK_DIR/agg-heartbeat-$label"
+    RUN_MODE="logind-watcher"
+    main
+    assert_not_exists "$WORK_DIR/agg-sessions-$label"
+    assert_not_exists "$WORK_DIR/agg-heartbeat-$label"
+
+    RUN_MODE="systemd-timer"
+    printf '%s\n' "$(( $(date +%s) + 600 ))" > "$STATE_DIRECTORY/heartbeat_unsupported_until"
+    main
+    assert_not_exists "$WORK_DIR/agg-sessions-$label"
+    assert_not_exists "$WORK_DIR/agg-heartbeat-$label"
+
+    rm -f "$STATE_DIRECTORY/heartbeat_unsupported_until"
+    main
+    assert_file_contains "$WORK_DIR/agg-sessions-$label" "alice"
+    assert_file_exists "$WORK_DIR/agg-heartbeat-$label"
 }
 
 run_for_script "$ROOT_DIR/linux_host/session_release_buffer/Ubuntu/release-session.sh" ubuntu
