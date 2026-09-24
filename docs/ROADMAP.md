@@ -88,9 +88,27 @@ The portal today is a well-built view over the broker's tables. Phase 2 turns it
 operations console: it shows live state, offers actions that change the real world, and
 answers "who did what".
 
+**Status: In progress.** 2.1, 2.2 and 2.4 are done; the other items are planned.
+
 ### 2.1 Real host actions and drain
 
-**Status: Planned** · depends on Phase 1 (roles, stop mode, power sync, `CleanupPending`)
+**Status: Done** · depends on Phase 1 (roles, stop mode, power sync, `CleanupPending`)
+
+**Shipped.** `sql_queries/072`–`082` and `087`, the start, stop, restart, drain, undrain and sync
+endpoints, and the portal's **Host** menu and grouped host actions. Where it differs from the
+design below:
+
+- Stopping an assigned host **ends the assignment first**, as a return does, so the user gets a
+  running host when they reconnect instead of the stopped one. Restart keeps the assignment. If
+  Azure refuses the stop, the assignment is given back along with the power state.
+- Stop and restart of an assigned host both need Admin plus the hostname typed to confirm. The
+  procedure re-checks the assignment, so a race cannot slip past the check.
+- Drain has **no deadline**. Forcing a signed-in user off needs `session-control.sh` (2.3).
+- Scaling leaves draining hosts out of capacity entirely, so a drained pool starts replacements
+  within `MaxVMs` rather than looking healthy.
+- Drain and Return to service replace the Phase 1 maintenance toggle in the portal. The
+  maintenance endpoint stays for compatibility and now clears the drain flag.
+- No broadcast before a restart yet; that comes with 2.10.
 
 **Why.** "Update attributes" (`front_end/web/src/pages/vm/UpdateVmAttributes.tsx`,
 `sql_queries/017_create_procedure-UpdateVmAttributes.sql`) edits `PowerState`,
@@ -123,7 +141,24 @@ an account or mount. Every action is written to the audit log (2.4).
 
 ### 2.2 Host heartbeat and fleet health
 
-**Status: Planned** · no dependencies
+**Status: Done** · no dependencies
+
+**Shipped.** `sql_queries/083`–`086`, the heartbeat and `/api/hosts/health` endpoints,
+`LINUXBROKER_AGENT_VERSION` (1.0.0) in every host script, the heartbeat in both release agents,
+the portal's **Fleet health** page, a **Host agent** card on each host, and a dashboard strip.
+Where it differs from the design below:
+
+- **Report only.** The task function does not mark a host `Unreachable` on a stale heartbeat, and
+  readiness at boot still comes from the TCP probe. Gating readiness on the heartbeat would let a
+  broken heartbeat path take every host out of rotation at once; it can be added later behind a
+  safety valve.
+- **No history table.** Only the current row per host is kept.
+- The separate settings ack stays. The heartbeat also carries `SettingsVersion` and records it
+  when it changed, so a failed ack no longer leaves a host showing drift.
+- A Linux host's managed identity names its VM in `xms_mirid`, so a host cannot post a heartbeat
+  for another hostname.
+- NFS is checked with a bounded `stat -f` on mounted homes, or, with none mounted, a TCP
+  connection to the NFS server remembered from an earlier mount.
 
 **Why.** The only thing a host reports today is the settings version it applied
 (`/api/hosts/<hostname>/settings/ack`). Answering "which hosts run the old agent", "is NFS
@@ -193,7 +228,22 @@ without SSH or the database.
 
 ### 2.4 Admin audit log
 
-**Status: Planned** · depends on Phase 1 roles (the actor identity)
+**Status: Done** · depends on Phase 1 roles (the actor identity)
+
+**Shipped.** `sql_queries/067`–`071` and `086`, the `@audited` decorator and denial auditing,
+`GET /api/audit`, a daily purge from the task function, the portal's **Audit** page with CSV
+export, and **Version history** on Host Settings. Where it differs from the design below:
+
+- **Retention:** SQL keeps entries for `AUDIT_RETENTION_DAYS` (default 365, 30–3650), and every
+  entry is also a structured `linuxbroker.api.audit` log record in Application Insights, with its
+  own retention.
+- High-volume agent traffic is **not** audited: AVD checkouts, Linux host releases, acks and
+  heartbeats, and the task's probes. `VirtualMachinesHistory` already records their effect, and
+  2.6's checkout events will cover checkouts. Their authorization denials are audited.
+- Broker-initiated entries cover scaling power actions and their failures, power states corrected
+  from Azure, expired releases, completed cleanups and drains, and the purge.
+- `DeleteVm` now reports a delete of a missing VM as not found, so the audit records what really
+  happened.
 
 **Why.** Nothing records who deleted, released or returned a host, who changed a scaling
 rule, or who pushed settings. `LinuxHostSettings` is temporal and has `UpdatedBy`, but the
@@ -686,6 +736,11 @@ A separate track, prioritized independently of the phases.
 | 2026-09 | Session preservation during the grace period is an **opt-in Host Setting**, off by default. It can't be combined with the screen lock, because a resumed session behind a lock screen can't be unlocked with a rotating password. |
 | 2026-09 | A returned host isn't offered for checkout until the previous user's cleanup succeeds (`CleanupPending`). |
 | 2026-09 | This roadmap lives in `docs/ROADMAP.md` and is updated as items land. |
+| 2026-09 | Phase 2 ships in stages. The first PR covers the foundations: 2.4 audit log, 2.1 host actions and drain, and 2.2 heartbeat and fleet health. The rest follows in later PRs. |
+| 2026-09 | The host heartbeat **reports only**. Readiness stays on the TCP probe, so a broken heartbeat path cannot take hosts out of rotation. |
+| 2026-09 | Audit entries stay in SQL for `AUDIT_RETENTION_DAYS` (default 365) and are also sent to Application Insights. Routine agent traffic is not audited; denials are, up to 30 a minute per caller in each worker process. |
+| 2026-09 | Stopping a host a user is signed in to needs Admin and the typed hostname, and ends the assignment so the user gets a running host next time. Restart needs the same and keeps the assignment. |
+| 2026-09 | Drain has no deadline until forced sign-out exists (2.3). Draining hosts are left out of scaling capacity. |
 
 ## Glossary
 

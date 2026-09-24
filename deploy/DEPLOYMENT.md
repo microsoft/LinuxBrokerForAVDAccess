@@ -465,6 +465,7 @@ The current host scripts also bring:
 - **Single-call provisioning.** `create-user.sh --password-stdin` creates the account, mounts the home, adds the remote access groups and sets the password in one SSH session, instead of six to eight. The API falls back to the old sequence for a host whose script predates it, and logs a reminder to migrate that host.
 - **Lease handling for signed-in users.** `manage-lease.sh` keeps the lease while the user is still signed in, so the broker keeps the host **Cleanup pending** and retries, instead of treating it as clean.
 - **Keeping sessions alive.** The release agent and `apply-host-settings.sh` understand the **Keep sessions alive during the grace period** setting. Hosts that are not migrated reject the setting once it is turned on, keep their current behavior, and show as pending in the drift table.
+- **Heartbeats.** The release agent reports its version, each installed script's version, OS, desktop, xrdp, NFS, load, memory, disk and sessions to the broker at the end of every timer run. Watcher-triggered runs do not report, and a broker without heartbeats is asked again only every 15 minutes.
 
 ## Upgrading To Role-Based Access And Working Scaling
 
@@ -476,9 +477,9 @@ Every Broker API endpoint now checks the caller's app roles. The delegated `acce
 
 | Role | Allows |
 | --- | --- |
-| `Reader` | Viewing everything in the portal |
-| `Operator` | Reader, plus releasing and returning hosts, retrying cleanup, maintenance on and off, and **Apply Now** |
-| `FullAccess` | Operator, plus adding, deleting and repairing VMs, test checkouts, and editing the scaling rule and host settings |
+| `Reader` | Viewing everything in the portal, including fleet health and the audit log |
+| `Operator` | Reader, plus releasing and returning hosts, retrying cleanup, draining and returning hosts to service, starting hosts, stopping and restarting hosts no one is using, syncing power states, and **Apply Now** |
+| `FullAccess` | Operator, plus stopping and restarting hosts in use, adding, deleting and repairing VMs, test checkouts, and editing the scaling rule and host settings |
 
 `preprovision` creates the `Reader` and `Operator` roles on the API app registration (`FullAccess` already exists) and assigns `FullAccess` to the user running the deployment. Assign roles to other administrators under **Microsoft Entra ID > Enterprise applications > *API app* > Users and groups**, or set `brokerReaderGroupId`, `brokerOperatorGroupId` and `brokerAdminGroupId` so `preprovision` assigns them to groups (group assignment needs Entra ID P1 or P2). Users pick up a new role the next time they sign in to the portal.
 
@@ -512,6 +513,24 @@ A returned host is now held **Cleanup pending** until the previous user's accoun
 2. Review the scaling rule and, for larger pools, set `sqlDatabaseSkuName`.
 3. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1), which applies the SQL scripts first, then rebuilds and restarts the apps, then migrates the Linux hosts.
 4. Confirm that a checkout, a disconnect and a return work end to end, and that returned hosts leave **Cleanup pending** within a few minutes.
+
+## Upgrading To The Admin Console Foundations
+
+This release adds the audit log, real host actions and drain, and host heartbeats with a fleet health page (items 2.1, 2.2 and 2.4 of the [roadmap](../docs/ROADMAP.md)). It needs no new Azure resources, role assignments or deployment parameters.
+
+- **Audit log.** Every portal action, every denied attempt on a mutating API route, and the changes the broker makes on its own are recorded in `dbo.AuditLog` and on the portal's **Audit** page, with CSV export. Each entry also goes to Application Insights as a log record from the `linuxbroker.api.audit` logger. The scheduled task purges SQL entries older than `AUDIT_RETENTION_DAYS` (default 365) every day at 03:17 UTC; set that app setting on the API to keep more or fewer. Entries written before this release do not exist: the log starts at the upgrade.
+- **Host actions.** Operators can start, stop, restart and drain hosts from the portal instead of editing records with **Update attributes**. The API's existing **Desktop Virtualization Power On Off Contributor** role already covers restart. Stopping or restarting a host that a user is signed in to needs `FullAccess` and the hostname typed to confirm; stopping it ends the user's assignment, so they get a different host when they reconnect.
+- **Drain** replaces the maintenance toggle in the portal. A draining host keeps its current user, takes no new ones, and moves to maintenance when the assignment ends. Scaling no longer counts draining hosts as capacity, so draining several busy hosts can start replacements, up to the rule's `MaxVMs`.
+- **Heartbeats.** Migrated Linux hosts post a heartbeat at the end of every reconcile run, which the **Fleet health** page and each host's **Host agent** card show. It reports only: checkout readiness still comes from the reachability probe. Each heartbeat is one small SQL write per host per reconcile interval (60 seconds by default), about 1.7 writes a second for 100 hosts, which the Basic SQL tier handles; size up with `sqlDatabaseSkuName` for pools of several hundred hosts or a shorter interval.
+- **Host agent version.** Every script in `linux_host/` now declares `LINUXBROKER_AGENT_VERSION` (1.0.0). Hosts that are not migrated keep working, show **No heartbeat** in fleet health, and are counted there as needing attention.
+
+### Recommended order
+
+1. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1). It applies SQL scripts `067`–`087` before the new images start, restarts the apps in the order API, task, front end, and then migrates the Linux hosts so they start sending heartbeats.
+2. Open **Fleet health** and confirm every powered-on host reports within a few minutes. A host that stays on **No heartbeat** was not migrated; rerun the migration for it with `-LinuxHostNames`.
+3. Drain one idle host and return it to service, and confirm both appear on the **Audit** page.
+
+Every layer tolerates the others being one release behind during the rollout. A host agent that meets an older API backs off its heartbeat for 15 minutes on each `404`. A portal that meets an older API shows the new pages' errors and hides the dashboard's fleet health strip. The previous API build keeps working against the new database, apart from `DeleteVm`, which now answers `404` for a VM that does not exist instead of reporting success.
 
 ## Manual Steps After `azd up`
 
