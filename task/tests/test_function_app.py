@@ -129,12 +129,28 @@ def test_request_timeouts_are_passed(monkeypatch):
     function_app.test_vm_connectivity(timer)
     function_app.trigger_return_released_vms(timer)
     function_app.time_triggered_scaling(timer)
+    function_app.purge_audit_log(timer)
 
     assert calls == [
         ("get", "https://broker.example/api/vms", 30),
         ("post", "https://broker.example/api/vms/released", 120),
         ("post", "https://broker.example/api/scaling/trigger", 120),
+        ("post", "https://broker.example/api/audit/purge", 120),
     ]
+
+
+@pytest.mark.parametrize("status,level,text", [
+    (200, "INFO", "Audit log purge completed"),
+    (404, "WARNING", "does not have an audit log yet"),
+    (500, "ERROR", "Failed to purge the audit log"),
+])
+def test_the_audit_purge_reports_its_outcome(monkeypatch, caplog, status, level, text):
+    monkeypatch.setattr(function_app.requests, "post", lambda *_args, **_kwargs: FakeResponse(status, text='{"Deleted": 3}'))
+
+    with caplog.at_level("INFO"):
+        function_app.purge_audit_log(function_app.func.TimerRequest())
+
+    assert any(record.levelname == level and text in record.getMessage() for record in caplog.records)
 
 
 def test_timer_functions_tolerate_api_errors(monkeypatch):
@@ -148,6 +164,7 @@ def test_timer_functions_tolerate_api_errors(monkeypatch):
     function_app.test_vm_connectivity(timer)
     function_app.trigger_return_released_vms(timer)
     function_app.time_triggered_scaling(timer)
+    function_app.purge_audit_log(timer)
 
 
 def test_fake_modules_are_used():
