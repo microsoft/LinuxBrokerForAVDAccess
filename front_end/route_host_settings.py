@@ -7,6 +7,7 @@ from flask import jsonify, session
 
 from function_api import NotAuthenticated, api_get, api_post
 from function_authentication import login_required
+from config import APPLY_TIMEOUT_SECONDS
 from function_bff import API_PREFIX, BadRequest, broker_endpoint, json_body
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ BOOLEAN_FIELDS = {
     'screenlockenabled': 'ScreenLockEnabled',
     'disablelockscreen': 'DisableLockScreen',
     'screenlocksettingslocked': 'ScreenLockSettingsLocked',
+    'preservesessionsondisconnect': 'PreserveSessionsOnDisconnect',
 }
 
 
@@ -87,7 +89,7 @@ def register_route_host_settings(app):
     @broker_endpoint("Unable to push host settings. Please try again later.")
     def ui_apply_host_settings():
         hostname = (json_body().get('hostname') or '').strip()
-        result = api_post('/hosts/settings/apply', {'hostnames': [hostname]} if hostname else {})
+        result = api_post('/hosts/settings/apply', {'hostnames': [hostname]} if hostname else {}, timeout=APPLY_TIMEOUT_SECONDS)
 
         return jsonify(_apply_summary(result))
 
@@ -104,18 +106,24 @@ def _apply_summary(result):
     unreachable = [entry.get('Hostname') for entry in (result.get('Results') or [])
                    if not entry.get('Applied')]
     unreachable = [name for name in unreachable if name]
+    not_attempted = [name for name in (result.get('NotAttempted') or []) if name]
 
     if target_count == 0:
         message = ("No reachable Linux hosts were found to push to. Hosts still converge on "
                    "their own at their next reconcile run.")
         tone = "info"
-    elif succeeded == target_count:
+    elif succeeded == target_count and not not_attempted:
         message = f"Applied settings to {succeeded} of {target_count} host(s)."
         tone = "success"
     else:
-        message = (f"Applied settings to {succeeded} of {target_count} host(s). "
-                   f"Unreachable: {', '.join(unreachable)}. "
-                   "These converge on their next reconcile run.")
+        parts = [f"Applied settings to {succeeded} of {target_count} host(s)."]
+        if unreachable:
+            parts.append(f"Unreachable: {', '.join(unreachable)}.")
+        if not_attempted:
+            parts.append(f"{len(not_attempted)} host(s) were not attempted before the time limit and will converge on their next reconcile run.")
+        else:
+            parts.append("These converge on their next reconcile run.")
+        message = " ".join(parts)
         tone = "warning"
 
     return {
@@ -123,6 +131,7 @@ def _apply_summary(result):
         "targetCount": target_count,
         "succeededCount": succeeded,
         "unreachable": unreachable,
+        "notAttempted": not_attempted,
         "message": message,
         "tone": tone,
     }

@@ -72,6 +72,13 @@ export function RuleHistory() {
       render: (row) => valueOrDash(row.ScaleDownIncrement),
     },
     {
+      key: 'stopmode',
+      header: 'Stop mode',
+      sort: 'text',
+      value: (row) => row.StopMode ?? 'PowerOff',
+      render: (row) => row.StopMode === 'Deallocate' ? 'Deallocate' : 'Power off',
+    },
+    {
       key: 'from',
       header: 'Valid from',
       sort: 'date',

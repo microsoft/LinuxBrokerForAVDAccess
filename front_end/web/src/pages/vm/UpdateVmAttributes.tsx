@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { Breadcrumbs } from '../../components/layout/Breadcrumbs';
 import { Button, ButtonLink } from '../../components/ui/Button';
-import { ErrorPanel, LoadingPanel, PageHeader } from '../../components/ui/Feedback';
+import { ErrorPanel, LoadingPanel, Notice, PageHeader } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
 import { SelectField } from '../../components/ui/Field';
 import { useToast } from '../../components/ui/Toast';
@@ -91,6 +91,11 @@ export function UpdateVmAttributes() {
         subtitle="Change the attributes the broker records for this host."
         icon="pencil"
       />
+
+      <Notice tone="warning" className="mb-4">
+        This data repair page only edits broker records. It does not start or stop Azure VMs.
+        Leaving an assignment by moving a checked-out or released host to Available or Maintenance schedules cleanup.
+      </Notice>
 
       <GlassCard className="max-w-3xl p-6">
         <form onSubmit={submit} noValidate>

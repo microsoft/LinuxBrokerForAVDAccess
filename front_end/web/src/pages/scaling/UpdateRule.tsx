@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ButtonLink } from '../../components/ui/Button';
 import { ErrorPanel, LoadingPanel, PageHeader } from '../../components/ui/Feedback';
 import { useToast } from '../../components/ui/Toast';
+import { useConfirm } from '../../hooks/useConfirm';
 import { useScalingRule, useUpdateScalingRule } from '../../hooks/useBroker';
 import { errorMessage } from '../../lib/api';
 import type { ScalingRuleInput } from '../../types/broker';
@@ -15,6 +16,7 @@ export function UpdateRule() {
   const { showToast } = useToast();
   const { data: rule, isPending, error } = useScalingRule(ruleid);
   const updateRule = useUpdateScalingRule(ruleid);
+  const { confirm, dialog } = useConfirm();
 
   const [form, setForm] = useState<ScalingRuleInput>(EMPTY_RULE);
   const [seeded, setSeeded] = useState(false);
@@ -29,6 +31,7 @@ export function UpdateRule() {
         scaleupincrement: String(rule.ScaleUpIncrement ?? ''),
         scaledownratio: String(rule.ScaleDownRatio ?? ''),
         scaledownincrement: String(rule.ScaleDownIncrement ?? ''),
+        stopmode: rule.StopMode ?? 'PowerOff',
       });
       setSeeded(true);
     }
@@ -51,7 +54,9 @@ export function UpdateRule() {
     );
   }
 
-  async function submit() {
+  const loadedRule = rule;
+
+  async function save() {
     try {
       await updateRule.mutateAsync(form);
       showToast('Scaling rule updated successfully.', 'success');
@@ -61,14 +66,28 @@ export function UpdateRule() {
     }
   }
 
+  function submit() {
+    if ((loadedRule.StopMode ?? 'PowerOff') !== 'Deallocate' && form.stopmode === 'Deallocate') {
+      confirm({
+        title: 'Use deallocate for scale down?',
+        body: 'Deallocate stops compute billing but starts take longer, can hit AllocationFailed capacity errors, and wipes the temporary resource disk.',
+        confirmLabel: 'Use deallocate',
+        variant: 'warning',
+        onConfirm: save,
+      });
+      return;
+    }
+    void save();
+  }
+
   return (
     <>
       <PageHeader
-        title={`Update scaling rule #${rule.RuleID}`}
+        title={`Update scaling rule #${loadedRule.RuleID}`}
         subtitle="Adjust the thresholds that grow and shrink the pool."
         icon="pencil"
         actions={
-          <ButtonLink to={`/scaling/rules/${rule.RuleID}`} size="sm" icon="chevron-left">
+          <ButtonLink to={`/scaling/rules/${loadedRule.RuleID}`} size="sm" icon="chevron-left">
             Back to rule
           </ButtonLink>
         }
@@ -77,11 +96,12 @@ export function UpdateRule() {
       <RuleForm
         value={form}
         onChange={setForm}
-        onSubmit={() => void submit()}
+        onSubmit={submit}
         submitLabel="Save changes"
         busy={updateRule.isPending}
-        cancelTo={`/scaling/rules/${rule.RuleID}`}
+        cancelTo={`/scaling/rules/${loadedRule.RuleID}`}
       />
+      {dialog}
     </>
   );
 }

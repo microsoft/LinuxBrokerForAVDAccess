@@ -27,19 +27,19 @@ VMS = [
     {"VMID": 1, "Hostname": "linux-host-01", "IPAddress": "10.0.0.4", "PowerState": "On",
      "NetworkStatus": "Reachable", "VmStatus": "Available", "Username": None,
      "AvdHost": None, "Description": "Pool host", "LastUpdateDate": "2026-08-01 10:00:00",
-     "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-01 10:00:00", "SysEndTime": None},
+     "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-01 10:00:00", "SysEndTime": None, "ReleasedDate": None, "CleanupPending": False, "CleanupUsername": None, "PowerStateChangedDate": None},
     {"VMID": 2, "Hostname": "linux-host-02", "IPAddress": "10.0.0.5", "PowerState": "On",
      "NetworkStatus": "Reachable", "VmStatus": "CheckedOut", "Username": "alice@contoso.com",
      "AvdHost": "avd-01", "Description": "", "LastUpdateDate": "2026-08-02 11:00:00",
-     "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-02 11:00:00", "SysEndTime": None},
+     "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-02 11:00:00", "SysEndTime": None, "ReleasedDate": None, "CleanupPending": False, "CleanupUsername": None, "PowerStateChangedDate": None},
     {"VMID": 3, "Hostname": "linux-host-03", "IPAddress": "10.0.0.6", "PowerState": "Off",
      "NetworkStatus": "Unreachable", "VmStatus": "Maintenance", "Username": None,
      "AvdHost": None, "Description": "Patching", "LastUpdateDate": "2026-08-03 09:00:00",
-     "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-03 09:00:00", "SysEndTime": None},
+     "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-03 09:00:00", "SysEndTime": None, "ReleasedDate": None, "CleanupPending": False, "CleanupUsername": None, "PowerStateChangedDate": None},
     {"VMID": 4, "Hostname": "linux-host-04", "IPAddress": "10.0.0.7", "PowerState": "On",
      "NetworkStatus": "Reachable", "VmStatus": "Released", "Username": "bob@contoso.com",
      "AvdHost": "avd-02", "Description": "", "LastUpdateDate": "2026-08-04 08:00:00",
-     "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-04 08:00:00", "SysEndTime": None},
+     "CreateDate": "2026-07-01 10:00:00", "SysStartTime": "2026-08-04 08:00:00", "SysEndTime": None, "ReleasedDate": None, "CleanupPending": False, "CleanupUsername": None, "PowerStateChangedDate": None},
 ]
 
 RULE = {"RuleID": 1, "MinVMs": 2, "MaxVMs": 20, "ScaleUpRatio": 80.0,
@@ -56,7 +56,7 @@ HOST_SETTINGS = {"GracePeriodSeconds": 1200, "ReconcileIntervalSeconds": 60,
                  "IdleTimeoutSeconds": 0, "IdleWarningSeconds": 120,
                  "ScreenLockEnabled": False, "DisableLockScreen": True,
                  "ScreenIdleDelaySeconds": 0, "ScreenLockDelaySeconds": 0,
-                 "ScreenLockSettingsLocked": True, "SettingsVersion": 3}
+                 "ScreenLockSettingsLocked": True, "PreserveSessionsOnDisconnect": False, "SettingsVersion": 3}
 
 # Every JSON endpoint the React portal calls.
 API = "/api/ui"
@@ -118,7 +118,7 @@ class FakeBrokerApi:
         self.vm_summary = {
             "TotalVMs": 4, "Available": 1, "CheckedOut": 1, "Maintenance": 1,
             "Released": 1, "PoweredOn": 3, "PoweredOff": 1, "Unreachable": 1,
-            "Ready": 1,
+            "Ready": 1, "CleanupPending": 0,
         }
         # Set to 404/405/500 to simulate an API that predates /vms/summary.
         self.summary_status = None
@@ -131,6 +131,8 @@ class FakeBrokerApi:
         import requests
         if any(url.endswith(path) for path in self.raise_get_paths):
             raise requests.exceptions.RequestException("broker unavailable")
+        if url.endswith("/me"):
+            return FakeResponse({"roles": ["FullAccess"], "permissions": {"read": True, "operate": True, "admin": True}, "legacyScopeAccess": False})
         if url.endswith("/vms/summary"):
             if self.summary_status is not None:
                 return FakeResponse({"error": "not found"}, status_code=self.summary_status)
@@ -168,9 +170,15 @@ class FakeBrokerApi:
             rows = [dict(VMS[i % len(VMS)], VMID=i + 1) for i in range(self.history_total)]
             return self._history(rows, params)
         if url.endswith("/scaling/rules/create"):
-            return FakeResponse({"RuleID": 1}, status_code=201)
+            return FakeResponse({"NewRuleID": 1}, status_code=201)
         if url.endswith("/vms/checkout"):
-            return FakeResponse(VMS[0])
+            return FakeResponse(dict(VMS[0], password="secret", LeaseId="lease-secret"))
+        match = re.search(r"/vms/(\d+)/cleanup$", url)
+        if match:
+            return FakeResponse({"VMID": int(match.group(1)), "Hostname": "linux-host-01", "CleanupPending": False, "CleanupResult": "Completed", "message": "Cleanup completed."})
+        match = re.search(r"/vms/(\d+)/maintenance$", url)
+        if match:
+            return FakeResponse({"VMID": int(match.group(1)), "Hostname": "linux-host-01", "VmStatus": "Maintenance", "Result": "Updated"})
         # The bodies the broker API returns for these, which the BFF passes through.
         match = re.search(r"/vms/(\d+)/delete$", url)
         if match:

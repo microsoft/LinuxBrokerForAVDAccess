@@ -4,6 +4,7 @@ from msal import ConfidentialClientApplication
 from flask import request, redirect, url_for, session
 from datetime import datetime, timedelta
 from config import CLIENT_ID, TENANT_ID, CLIENT_SECRET, AUTHORITY, AUTHORITY_HOST, API_SCOPE
+from function_api import api_get
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,18 @@ def register_route_authentication(app):
 
             session["user"] = result.get("id_token_claims")
             session["access_token"] = result.get("access_token")
+            try:
+                me = api_get('/me')
+                session['roles'] = me.get('roles') or []
+                session['permissions'] = me.get('permissions') or {}
+                session['legacy_access'] = bool(me.get('legacyScopeAccess'))
+                session.pop('permissions_unavailable', None)
+            except Exception as e:
+                logger.warning("Unable to fetch signed-in user's broker permissions: %s", e)
+                session.pop('roles', None)
+                session.pop('permissions', None)
+                session.pop('legacy_access', None)
+                session['permissions_unavailable'] = True
 
             # Store token expiration time
             expires_in = result.get("expires_in")  # in seconds

@@ -10,12 +10,26 @@ import type { Vm } from '../types/broker';
  * table and the tests agree on one definition.
  */
 
-export function canRelease(vm: Pick<Vm, 'VmStatus'>): boolean {
-  return vm.VmStatus === 'CheckedOut';
+export function canRelease(vm: Pick<Vm, 'VmStatus' | 'CleanupPending'>): boolean {
+  return vm.VmStatus === 'CheckedOut' && !vm.CleanupPending;
 }
 
-export function canReturn(vm: Pick<Vm, 'VmStatus'>): boolean {
-  return vm.VmStatus === 'CheckedOut' || vm.VmStatus === 'Released';
+export function canReturn(vm: Pick<Vm, 'VmStatus' | 'CleanupPending'>): boolean {
+  return !vm.CleanupPending && (vm.VmStatus === 'CheckedOut' || vm.VmStatus === 'Released');
+}
+
+export function canRetryCleanup(vm: Pick<Vm, 'CleanupPending'>): boolean {
+  return Boolean(vm.CleanupPending);
+}
+
+export function canToggleMaintenance(
+  vm: Pick<Vm, 'VmStatus' | 'Username' | 'AvdHost'>,
+): boolean {
+  return (
+    (vm.VmStatus === 'Available' || vm.VmStatus === 'Maintenance') &&
+    !vm.Username &&
+    !vm.AvdHost
+  );
 }
 
 /** A VM is ready only when it is powered on, reachable and unassigned. */

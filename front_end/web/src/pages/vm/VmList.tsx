@@ -3,15 +3,16 @@ import { Link } from 'react-router-dom';
 
 import { DataTable } from '../../components/data/DataTable';
 import type { Column } from '../../components/data/DataTable';
-import { NetworkBadge, PowerBadge, VmStatusBadge } from '../../components/ui/Badge';
+import { Badge, NetworkBadge, PowerBadge, VmStatusBadge } from '../../components/ui/Badge';
 import { Button, ButtonLink } from '../../components/ui/Button';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader } from '../../components/ui/Feedback';
 import { useConfirm } from '../../hooks/useConfirm';
-import { useDeleteVm, useReleaseVm, useReturnVm, useVms } from '../../hooks/useBroker';
+import { useCleanupVm, useDeleteVm, useReleaseVm, useReturnVm, useSetVmMaintenance, useVms } from '../../hooks/useBroker';
 import { useToast } from '../../components/ui/Toast';
+import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
 import { valueOrDash } from '../../lib/format';
-import { canRelease, canReturn } from '../../lib/vmLifecycle';
+import { canRelease, canRetryCleanup, canReturn, canToggleMaintenance } from '../../lib/vmLifecycle';
 import type { Vm } from '../../types/broker';
 
 export function VmList() {
@@ -19,10 +20,13 @@ export function VmList() {
   const { showToast } = useToast();
   const { confirm, dialog } = useConfirm();
   const { data: vms, isPending, error } = useVms();
+  const can = useCan();
 
   const releaseVm = useReleaseVm();
   const returnVm = useReturnVm();
   const deleteVm = useDeleteVm();
+  const cleanupVm = useCleanupVm();
+  const maintenanceVm = useSetVmMaintenance();
 
   function confirmRelease(vm: Vm) {
     confirm({
@@ -49,10 +53,46 @@ export function VmList() {
       variant: 'primary',
       onConfirm: async () => {
         try {
-          await returnVm.mutateAsync(vm.VMID);
-          showToast(`VM '${vm.Hostname}' returned successfully.`, 'success');
+          const result = await returnVm.mutateAsync(vm.VMID);
+          showToast(result.CleanupPending ? `VM '${vm.Hostname}' returned; cleanup is pending.` : `VM '${vm.Hostname}' returned successfully.`, result.CleanupPending ? 'warning' : 'success');
         } catch (cause) {
           showToast(errorMessage(cause, `Unable to return '${vm.Hostname}'.`), 'danger');
+        }
+      },
+    });
+  }
+
+
+  function confirmCleanup(vm: Vm) {
+    confirm({
+      title: `Retry cleanup on ${vm.Hostname}`,
+      body: `Retry cleanup of the previous user's account and mounts on ${vm.Hostname}?`,
+      confirmLabel: 'Retry cleanup',
+      variant: 'warning',
+      onConfirm: async () => {
+        try {
+          const result = await cleanupVm.mutateAsync(vm.VMID);
+          showToast(result.message || `Cleanup retried for '${vm.Hostname}'.`, 'success');
+        } catch (cause) {
+          showToast(errorMessage(cause, `Unable to retry cleanup on '${vm.Hostname}'.`), 'danger');
+        }
+      },
+    });
+  }
+
+  function confirmMaintenance(vm: Vm) {
+    const enabled = vm.VmStatus !== 'Maintenance';
+    confirm({
+      title: `${enabled ? 'Enable' : 'Disable'} maintenance for ${vm.Hostname}`,
+      body: `${enabled ? 'Put' : 'Return'} ${vm.Hostname} ${enabled ? 'in maintenance' : 'to available'}?`,
+      confirmLabel: enabled ? 'Enable maintenance' : 'Disable maintenance',
+      variant: enabled ? 'warning' : 'primary',
+      onConfirm: async () => {
+        try {
+          const result = await maintenanceVm.mutateAsync({ vmid: vm.VMID, enabled });
+          showToast(result.message || `Maintenance ${enabled ? 'enabled' : 'disabled'} for '${vm.Hostname}'.`, 'success');
+        } catch (cause) {
+          showToast(errorMessage(cause, `Unable to update maintenance for '${vm.Hostname}'.`), 'danger');
         }
       },
     });
@@ -122,7 +162,14 @@ export function VmList() {
       header: 'Status',
       sort: 'text',
       value: (vm) => vm.VmStatus,
-      render: (vm) => <VmStatusBadge value={vm.VmStatus} />,
+      render: (vm) => (
+        <span className="flex flex-wrap gap-1">
+          <VmStatusBadge value={vm.VmStatus} />
+          {vm.CleanupPending ? (
+            <Badge tone="warn" icon="alert-triangle">Cleanup pending</Badge>
+          ) : null}
+        </span>
+      ),
     },
     {
       key: 'username',
@@ -141,15 +188,17 @@ export function VmList() {
           <Button size="sm" icon="eye" onClick={() => navigate(`/vms/${vm.VMID}`)}>
             Details
           </Button>
-          <Button size="sm" icon="pencil" onClick={() => navigate(`/vms/${vm.VMID}/update`)}>
-            Edit
-          </Button>
+          {can.admin ? (
+            <Button size="sm" icon="pencil" onClick={() => navigate(`/vms/${vm.VMID}/update`)}>
+              Edit
+            </Button>
+          ) : null}
           {/*
             ReleaseVm moves a CheckedOut host to Released; ReturnVm moves CheckedOut
             or Released back to Available. Offering either on an already Available
             host was misleading, so both are gated on the lifecycle rules.
           */}
-          {canRelease(vm) ? (
+          {can.operate && canRelease(vm) ? (
             <Button
               size="sm"
               variant="warning"
@@ -160,7 +209,7 @@ export function VmList() {
               Release
             </Button>
           ) : null}
-          {canReturn(vm) ? (
+          {can.operate && canReturn(vm) ? (
             <Button
               size="sm"
               variant="primary"
@@ -171,15 +220,27 @@ export function VmList() {
               Return
             </Button>
           ) : null}
-          <Button
-            size="sm"
-            variant="danger"
-            icon="trash"
-            onClick={() => confirmDelete(vm)}
-            aria-label={`Delete ${vm.Hostname}`}
-          >
-            Delete
-          </Button>
+          {can.operate && canRetryCleanup(vm) ? (
+            <Button size="sm" variant="warning" icon="refresh" onClick={() => confirmCleanup(vm)} aria-label={`Retry cleanup on ${vm.Hostname}`}>
+              Retry cleanup
+            </Button>
+          ) : null}
+          {can.operate && canToggleMaintenance(vm) ? (
+            <Button size="sm" variant="warning" icon="wrench" onClick={() => confirmMaintenance(vm)} aria-label={`Toggle maintenance for ${vm.Hostname}`}>
+              {vm.VmStatus === 'Maintenance' ? 'End maintenance' : 'Maintenance'}
+            </Button>
+          ) : null}
+          {can.admin ? (
+            <Button
+              size="sm"
+              variant="danger"
+              icon="trash"
+              onClick={() => confirmDelete(vm)}
+              aria-label={`Delete ${vm.Hostname}`}
+            >
+              Delete
+            </Button>
+          ) : null}
         </div>
       ),
     },
@@ -196,12 +257,16 @@ export function VmList() {
             <ButtonLink to="/vms/history" size="sm" icon="clock">
               History
             </ButtonLink>
-            <ButtonLink to="/vms/checkout" size="sm" icon="person">
-              Checkout VM
-            </ButtonLink>
-            <ButtonLink to="/vms/add" size="sm" variant="primary" icon="plus">
-              Add VM
-            </ButtonLink>
+            {can.admin ? (
+              <>
+                <ButtonLink to="/vms/checkout" size="sm" icon="person">
+                  Checkout VM
+                </ButtonLink>
+                <ButtonLink to="/vms/add" size="sm" variant="primary" icon="plus">
+                  Add VM
+                </ButtonLink>
+              </>
+            ) : null}
           </>
         }
       />
@@ -218,9 +283,11 @@ export function VmList() {
           message="Register a Linux host to start brokering AVD sessions."
           icon="server"
           action={
-            <ButtonLink to="/vms/add" variant="primary" icon="plus">
-              Add your first VM
-            </ButtonLink>
+            can.admin ? (
+              <ButtonLink to="/vms/add" variant="primary" icon="plus">
+                Add your first VM
+              </ButtonLink>
+            ) : undefined
           }
         />
       ) : null}

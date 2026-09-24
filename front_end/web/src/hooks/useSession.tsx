@@ -26,3 +26,7 @@ export function useSessionQuery() {
     retry: 1,
   });
 }
+
+export function useCan() {
+  return useSession().permissions;
+}

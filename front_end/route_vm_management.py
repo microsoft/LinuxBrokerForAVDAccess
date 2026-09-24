@@ -11,7 +11,7 @@ from flask import jsonify
 
 from function_authentication import login_required
 from function_api import api_get, api_post
-from function_bff import API_PREFIX, broker_endpoint, history_page, json_body, require
+from function_bff import API_PREFIX, BadRequest, broker_endpoint, history_page, json_body, require
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +50,11 @@ def register_route_vm_management(app):
             "powerstate": payload['powerstate'],
             "networkstatus": payload['networkstatus'],
             "vmstatus": payload['vmstatus'],
-            "username": payload.get('username') or '',
-            "avdhost": payload.get('avdhost') or '',
-            "description": payload.get('description') or '',
+            # Blank optional fields are sent as null; an empty username would make the
+            # broker treat the new host as assigned.
+            "username": (payload.get('username') or '').strip() or None,
+            "avdhost": (payload.get('avdhost') or '').strip() or None,
+            "description": (payload.get('description') or '').strip() or None,
         })), 201
 
     @app.route(f'{API_PREFIX}/vms/<int:vmid>/update-attributes', methods=['POST'])
@@ -88,6 +90,21 @@ def register_route_vm_management(app):
     def ui_return_vm(vmid):
         return jsonify(api_post(f'/vms/{vmid}/return'))
 
+    @app.route(f'{API_PREFIX}/vms/<int:vmid>/cleanup', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to retry VM cleanup. Please try again later.")
+    def ui_cleanup_vm(vmid):
+        return jsonify(api_post(f'/vms/{vmid}/cleanup'))
+
+    @app.route(f'{API_PREFIX}/vms/<int:vmid>/maintenance', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to update VM maintenance. Please try again later.")
+    def ui_maintenance_vm(vmid):
+        payload = json_body()
+        if 'enabled' not in payload or not isinstance(payload.get('enabled'), bool):
+            raise BadRequest("enabled must be a boolean.")
+        return jsonify(api_post(f'/vms/{vmid}/maintenance', {"enabled": payload['enabled']}))
+
     @app.route(f'{API_PREFIX}/vms/checkout', methods=['POST'])
     @login_required
     @broker_endpoint("Unable to check out a VM. Please try again later.")
@@ -95,4 +112,8 @@ def register_route_vm_management(app):
         payload = json_body()
         username, avdhost = require(payload, 'username', 'avdhost')
 
-        return jsonify(api_post('/vms/checkout', {"username": username, "avdhost": avdhost}))
+        result = api_post('/vms/checkout', {"username": username, "avdhost": avdhost})
+        if isinstance(result, dict):
+            result.pop("password", None)
+            result.pop("LeaseId", None)
+        return jsonify(result)
