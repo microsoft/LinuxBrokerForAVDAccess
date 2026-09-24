@@ -1,0 +1,12 @@
+DECLARE @StartValue INT;
+DECLARE @Sql NVARCHAR(MAX);
+
+IF OBJECT_ID('dbo.VmUserUidSequence', 'SO') IS NULL
+BEGIN
+    SELECT @StartValue = CASE WHEN COALESCE(MAX(uid), 1999) + 1 < 2000 THEN 2000 ELSE COALESCE(MAX(uid), 1999) + 1 END
+    FROM dbo.VmUsers;
+
+    SET @Sql = N'CREATE SEQUENCE dbo.VmUserUidSequence AS INT START WITH ' + CAST(@StartValue AS NVARCHAR(20)) + N' INCREMENT BY 1 NO CYCLE NO CACHE;';
+    EXEC sp_executesql @Sql;
+END;
+GO
