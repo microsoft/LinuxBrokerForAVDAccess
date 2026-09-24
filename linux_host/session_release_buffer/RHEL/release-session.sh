@@ -4,6 +4,10 @@
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+# The Linux Broker host agent version. Every script in linux_host/ declares the same value
+# and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
+LINUXBROKER_AGENT_VERSION="1.0.0"
+
 LOG_FILE="/var/log/release-session.log"
 LOCATION_PATH="/usr/local/bin"
 XORG_USERS_INFO_SCRIPT="$LOCATION_PATH/xrdp-who-xorg.sh"
@@ -463,6 +467,10 @@ reconcile_disconnected_user() {
 # idle one hold a VM for another poll.
 # ---------------------------------------------------------------------------
 
+# Reading a session's idle time goes through its X server and its owner's home, either of
+# which can hang: a wedged Xorg, or a hard-mounted NFS home that is unreachable.
+SESSION_PROBE_TIMEOUT_SECONDS=5
+
 get_session_display() {
     local xorg_pid="$1"
 
@@ -485,7 +493,8 @@ get_session_xauthority() {
     # WorkingDirectory, so the path has to be resolved here or every idle lookup would fail
     # to open the display and idle enforcement would silently never fire.
     if [ "${auth_path#/}" = "$auth_path" ]; then
-        xorg_cwd=$(readlink -f "/proc/$xorg_pid/cwd" 2>/dev/null)
+        # Resolving the path stats the user's home, which blocks while an NFS home is hung.
+        xorg_cwd=$(timeout "$SESSION_PROBE_TIMEOUT_SECONDS" readlink -f "/proc/$xorg_pid/cwd" 2>/dev/null)
 
         if [ -n "$xorg_cwd" ]; then
             auth_path="$xorg_cwd/$auth_path"
@@ -513,9 +522,9 @@ get_session_idle_seconds() {
     xauthority=$(get_session_xauthority "$xorg_pid")
 
     if [ -n "$xauthority" ]; then
-        idle_milliseconds=$(DISPLAY="$display" XAUTHORITY="$xauthority" xprintidle 2>/dev/null)
+        idle_milliseconds=$(DISPLAY="$display" XAUTHORITY="$xauthority" timeout "$SESSION_PROBE_TIMEOUT_SECONDS" xprintidle 2>/dev/null)
     else
-        idle_milliseconds=$(DISPLAY="$display" xprintidle 2>/dev/null)
+        idle_milliseconds=$(DISPLAY="$display" timeout "$SESSION_PROBE_TIMEOUT_SECONDS" xprintidle 2>/dev/null)
     fi
 
     if ! [[ "$idle_milliseconds" =~ ^[0-9]+$ ]]; then
@@ -691,6 +700,294 @@ check_unmount_user_homes() {
     done < <(mount | awk '$5 ~ /^nfs/ {print $1, $3, $5, $6}')
 }
 
+# ---------------------------------------------------------------------------
+# Heartbeat
+#
+# One heartbeat per timer run tells the broker what this host looks like: agent and script
+# versions, OS, desktop, xrdp, NFS, load, memory, disk and sessions. The portal's fleet health
+# reports on it, and nothing is decided from it, so every failure here is logged and ignored:
+# reconciliation must never depend on it.
+# ---------------------------------------------------------------------------
+
+HEARTBEAT_SCRIPTS=(release-session.sh logind-session-watcher.sh xrdp-who-xorg.sh create-user.sh manage-lease.sh apply-host-settings.sh)
+HEARTBEAT_BACKOFF_SECONDS=900
+
+# The version an installed script declares, so a host that was only partly migrated shows up.
+script_version() {
+    local path="$1"
+    local version
+
+    [ -r "$path" ] || return 1
+    version=$(grep -m1 -E '^LINUXBROKER_AGENT_VERSION="[^"]+"$' "$path" 2>/dev/null | cut -d'"' -f2)
+    [ -n "$version" ] || return 1
+    echo "$version"
+}
+
+collect_script_versions() {
+    local name
+    local version
+    local versions='{}'
+
+    for name in "${HEARTBEAT_SCRIPTS[@]}"; do
+        [ -e "$LOCATION_PATH/$name" ] || continue
+
+        # A script that predates the version constant is reported as null.
+        if version=$(script_version "$LOCATION_PATH/$name"); then
+            versions=$(/usr/bin/jq -c --arg name "$name" --arg version "$version" '. + {($name): $version}' <<< "$versions")
+        else
+            versions=$(/usr/bin/jq -c --arg name "$name" '. + {($name): null}' <<< "$versions")
+        fi
+    done
+
+    echo "$versions"
+}
+
+detect_desktop() {
+    if command -v gnome-shell >/dev/null 2>&1; then
+        echo "gnome"
+    elif command -v xfce4-session >/dev/null 2>&1; then
+        echo "xfce"
+    elif command -v mate-session >/dev/null 2>&1; then
+        echo "mate"
+    elif command -v startplasma-x11 >/dev/null 2>&1; then
+        echo "kde"
+    else
+        echo "none"
+    fi
+}
+
+detect_xrdp_version() {
+    local line
+
+    command -v xrdp >/dev/null 2>&1 || return 1
+    line=$(xrdp --version 2>/dev/null | head -n 1)
+    [[ "$line" =~ ([0-9]+(\.[0-9]+)+) ]] || return 1
+    echo "${BASH_REMATCH[1]}"
+}
+
+# Prints "<mounted homes> <true|false|null>". Mounted NFS homes are checked with a bounded
+# stat, because a hung share blocks forever. With none mounted, a TCP connection to the NFS
+# server remembered from an earlier mount shows whether a new checkout could mount one.
+check_nfs() {
+    local server_file="$STATE_DIRECTORY/nfs_server"
+    local mounts=0
+    local reachable="null"
+    local server=""
+    local source
+    local mountpoint
+
+    while read -r source mountpoint; do
+        [ -z "$mountpoint" ] && continue
+        mounts=$((mounts + 1))
+        [ -z "$server" ] && server="${source%%:*}"
+
+        if timeout 5 stat -f "$mountpoint" >/dev/null 2>&1; then
+            [ "$reachable" = "null" ] && reachable="true"
+        else
+            reachable="false"
+        fi
+    done < <(awk '$3 ~ /^nfs/ && $2 ~ /^\/home\/[^\/]+$/ {print $1, $2}' /proc/mounts 2>/dev/null)
+
+    if [ "$mounts" -gt 0 ]; then
+        if [[ "$server" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            printf '%s\n' "$server" > "$server_file" 2>/dev/null && chmod 600 "$server_file" 2>/dev/null
+        fi
+    elif [ -s "$server_file" ]; then
+        server=$(head -n 1 "$server_file" 2>/dev/null)
+        if [[ "$server" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            if timeout 5 bash -c "exec 3<>/dev/tcp/$server/2049" 2>/dev/null; then
+                reachable="true"
+            else
+                reachable="false"
+            fi
+        fi
+    fi
+
+    echo "$mounts $reachable"
+}
+
+# One entry of the heartbeat's session list, from what the reconcile run already knows.
+session_json() {
+    local username="$1"
+    local state="$2"
+    local start_time="$3"
+    local active_pid="$4"
+    local started=""
+    local disconnected_since
+    local idle=""
+
+    if [ -n "$start_time" ]; then
+        started=$(date -d "$start_time" +%s 2>/dev/null || true)
+    fi
+
+    disconnected_since=$(get_disconnect_timestamp "$username")
+
+    if [ "$state" = "active" ] && [ -n "$active_pid" ]; then
+        idle=$(get_session_idle_seconds "$active_pid" 2>/dev/null || true)
+    fi
+
+    /usr/bin/jq -cn \
+        --arg username "$username" \
+        --arg state "$state" \
+        --arg started "$started" \
+        --arg disconnectedSince "$disconnected_since" \
+        --arg idle "$idle" \
+        'def num: if . == "" then null else (tonumber? // null) end;
+         {username: $username, state: $state, sessionStart: ($started | num),
+          disconnectedSince: ($disconnectedSince | num), idleSeconds: ($idle | num)}'
+}
+
+build_heartbeat() {
+    local sessions_json="${1:-[]}"
+    local os_id=""
+    local os_version=""
+    local os_name=""
+    local xrdp_version
+    local xrdp_active="false"
+    local nfs_mounts
+    local nfs_reachable
+    local disk_used
+
+    if [ -r /etc/os-release ]; then
+        os_id=$(. /etc/os-release && echo "${ID:-}")
+        os_version=$(. /etc/os-release && echo "${VERSION_ID:-}")
+        os_name=$(. /etc/os-release && echo "${PRETTY_NAME:-}")
+    fi
+
+    xrdp_version=$(detect_xrdp_version || true)
+    if systemctl is-active --quiet xrdp 2>/dev/null; then
+        xrdp_active="true"
+    fi
+
+    read -r nfs_mounts nfs_reachable < <(check_nfs)
+    disk_used=$(df -P / 2>/dev/null | awk 'NR == 2 {gsub("%", "", $5); print $5}')
+
+    /usr/bin/jq -cn \
+        --arg agentVersion "$LINUXBROKER_AGENT_VERSION" \
+        --argjson scriptVersions "$(collect_script_versions)" \
+        --arg settingsVersion "$SETTINGS_VERSION" \
+        --arg osId "$os_id" \
+        --arg osVersion "$os_version" \
+        --arg osName "$os_name" \
+        --arg kernel "$(uname -r 2>/dev/null)" \
+        --arg desktop "$(detect_desktop)" \
+        --arg xrdpVersion "$xrdp_version" \
+        --argjson xrdpActive "$xrdp_active" \
+        --arg nfsMounts "$nfs_mounts" \
+        --arg nfsReachable "$nfs_reachable" \
+        --arg load "$(awk '{print $1}' /proc/loadavg 2>/dev/null)" \
+        --arg cpuCount "$(nproc 2>/dev/null)" \
+        --arg memoryAvailableMb "$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null)" \
+        --arg memoryTotalMb "$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null)" \
+        --arg diskUsed "$disk_used" \
+        --arg uptime "$(awk '{print int($1)}' /proc/uptime 2>/dev/null)" \
+        --argjson sessions "$sessions_json" \
+        'def num: if . == "" then null else (tonumber? // null) end;
+         def text: if . == "" then null else . end;
+         {
+           agentVersion: $agentVersion,
+           scriptVersions: $scriptVersions,
+           settingsVersion: ($settingsVersion | num),
+           os: {id: ($osId | text), version: ($osVersion | text), name: ($osName | text)},
+           kernel: ($kernel | text),
+           desktop: $desktop,
+           xrdp: {version: ($xrdpVersion | text), active: $xrdpActive},
+           nfs: {
+             mounts: ($nfsMounts | num),
+             reachable: (if $nfsReachable == "true" then true elif $nfsReachable == "false" then false else null end)
+           },
+           loadAverage: ($load | num),
+           cpuCount: ($cpuCount | num),
+           memoryAvailableMb: ($memoryAvailableMb | num),
+           memoryTotalMb: ($memoryTotalMb | num),
+           rootDiskFreePct: (($diskUsed | num) as $used | if $used == null then null else 100 - $used end),
+           uptimeSeconds: ($uptime | num),
+           sessions: $sessions
+         }'
+}
+
+# Whether this run sends a heartbeat. Watcher runs are extra reconciles triggered by sign-ins
+# and sign-outs; the timer run reports on a steady schedule. A broker that answered 404 is
+# asked again only once the backoff has passed.
+heartbeat_due() {
+    local backoff_file="$STATE_DIRECTORY/heartbeat_unsupported_until"
+    local backoff_until
+
+    if [ "$RUN_MODE" = "logind-watcher" ]; then
+        return 1
+    fi
+
+    if [ -s "$backoff_file" ]; then
+        backoff_until=$(tr -dc '0-9' < "$backoff_file")
+        if [ -n "$backoff_until" ] && [ "$(date +%s)" -lt "$backoff_until" ]; then
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+send_heartbeat() {
+    local sessions_json="${1:-[]}"
+    local api_base_url="YOUR_LINUX_BROKER_API_BASE_URL"
+    local heartbeat_url="$api_base_url/hosts/$hostname/heartbeat"
+    local backoff_file="$STATE_DIRECTORY/heartbeat_unsupported_until"
+    local failed_file="$STATE_DIRECTORY/heartbeat_failed"
+    local payload_file
+    local access_token
+    local http_status
+    local now
+
+    if ! heartbeat_due; then
+        return 0
+    fi
+
+    now=$(date +%s)
+
+    if ! access_token=$(get_access_token); then
+        log "Unable to obtain an access token for the heartbeat."
+        return 0
+    fi
+
+    payload_file="$STATE_DIRECTORY/heartbeat.$$.json"
+    if ! build_heartbeat "$sessions_json" > "$payload_file" 2>/dev/null; then
+        log "Could not build the heartbeat."
+        rm -f "$payload_file"
+        return 0
+    fi
+
+    http_status=$(/usr/bin/curl -s -m 10 -w "%{http_code}" -o /dev/null -X POST "$heartbeat_url" \
+        -H "Authorization: Bearer $access_token" \
+        -H "Content-Type: application/json" \
+        --data-binary "@$payload_file")
+    rm -f "$payload_file"
+
+    if [[ "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+        rm -f "$backoff_file"
+        if [ -e "$failed_file" ]; then
+            rm -f "$failed_file"
+            log "The broker is accepting heartbeats again."
+        fi
+        return 0
+    fi
+
+    if [ "$http_status" = "404" ]; then
+        # An API older than heartbeats, or a host the broker does not know. Neither changes
+        # within a minute, so ask again later instead of on every run.
+        printf '%s\n' "$((now + HEARTBEAT_BACKOFF_SECONDS))" > "$backoff_file"
+        chmod 600 "$backoff_file"
+        log "The broker does not accept heartbeats from $hostname (HTTP 404). Trying again in $((HEARTBEAT_BACKOFF_SECONDS / 60)) minutes."
+        return 0
+    fi
+
+    # Logged once per outage rather than on every run.
+    if [ ! -e "$failed_file" ]; then
+        : > "$failed_file"
+        chmod 600 "$failed_file"
+        log "Heartbeat failed (HTTP $http_status). It is retried on every run."
+    fi
+}
+
 main() {
     local session_info_script
     local now
@@ -702,10 +999,13 @@ main() {
     local disconnected_at
     local prev_user
     local active_pid
+    local start_clock
+    local sessions_json='[]'
     local current_users=()
     local previous_users=()
     declare -A user_status=()
     declare -A user_active_pids=()
+    declare -A user_start_times=()
 
     ensure_state_files
     load_settings
@@ -733,6 +1033,7 @@ main() {
         pid=$(echo "$line" | awk '{print $1}')
         username=$(echo "$line" | awk '{print $2}')
         start_time=$(echo "$line" | awk '{print $3}')
+        start_clock=$(echo "$line" | awk '{print $4}')
         status=$(echo "$line" | awk '{print $NF}' | sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' | xargs)
 
         if [ -z "$username" ] || [ "$pid" = "PID" ]; then
@@ -741,6 +1042,10 @@ main() {
 
         if ! array_contains "$username" "${current_users[@]}"; then
             current_users+=("$username")
+        fi
+
+        if [ -z "${user_start_times[$username]:-}" ] && [[ "$start_time" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            user_start_times["$username"]="$start_time $start_clock"
         fi
 
         if ! [[ -z "$start_time" || "$start_time" == *"START_TIME"* ]]; then
@@ -808,6 +1113,18 @@ main() {
     chmod 600 "$PREVIOUS_USERS_FILE"
 
     check_unmount_user_homes
+
+    # The session list reads each active session's idle time from its X server, so it is
+    # only built on a run that sends it.
+    if heartbeat_due; then
+        for username in "${current_users[@]}"; do
+            active_pid="${user_active_pids[$username]:-}"
+            active_pid="${active_pid%% *}"
+            sessions_json=$(/usr/bin/jq -c --argjson entry "$(session_json "$username" "${user_status[$username]:-unknown}" "${user_start_times[$username]:-}" "$active_pid")" '. + [$entry]' <<< "$sessions_json" 2>/dev/null || echo "$sessions_json")
+        done
+
+        send_heartbeat "$sessions_json" || true
+    fi
 
     log "Script completed."
 }

@@ -14,6 +14,7 @@ import re
 import shlex
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
 from azure.monitor.opentelemetry import configure_azure_monitor
 
@@ -21,7 +22,7 @@ connection_string = os.environ.get('APPLICATIONINSIGHTS_CONNECTION_STRING')
 if connection_string:
     configure_azure_monitor(connection_string=connection_string, logger_name='linuxbroker.api')
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, g, has_app_context, jsonify, request
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
 from functools import wraps
@@ -30,11 +31,18 @@ from flask_caching import Cache
 from azure.keyvault.secrets import SecretClient
 from config import *
 
+try:
+    # Installed with azure-monitor-opentelemetry. The trace id ties an audit entry to the
+    # request's logs in Application Insights.
+    from opentelemetry import trace as otel_trace
+except ImportError:  # pragma: no cover - only when the telemetry package is absent
+    otel_trace = None
+
 # ===============================
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.164'
+app.config['VERSION'] = '0.165'
 
 # Backs is_member_of_group_cached, which keeps token validation off the Graph API on
 # every request.
@@ -842,8 +850,12 @@ def delete_remote_user(hostname: str, username: str, lease_id: str = None) -> bo
     """Lease-safe removal of a user; True when the account is gone or belongs to someone else."""
     return cleanup_remote_user(hostname, username, lease_id) in (CLEANUP_COMPLETED, CLEANUP_SKIPPED)
 
-def complete_vm_cleanup(vmid, lease_id, username) -> bool:
-    """Clear CleanupPending once the user is gone, so the VM can be checked out again."""
+def complete_vm_cleanup(vmid, lease_id, username):
+    """Clear CleanupPending once the user is gone, so the VM can be checked out again.
+
+    Returns the updated row, or None when nothing matched. A draining host moves to
+    Maintenance here instead of becoming available, and that is recorded in the audit log.
+    """
     try:
         with db_connection() as conn:
             with conn.cursor(as_dict=True) as cursor:
@@ -854,14 +866,18 @@ def complete_vm_cleanup(vmid, lease_id, username) -> bool:
                 row = cursor.fetchone()
 
             conn.commit()
-
-        return bool(row)
     except DatabaseUnavailable:
         logger.error("Database connection failed while completing the cleanup of VMID %s.", vmid)
-        return False
+        return None
     except Exception:
         logger.exception("Error completing the cleanup of VMID %s.", vmid)
-        return False
+        return None
+
+    if row and row.get('DrainCompleted'):
+        audit('vm.drain_completed', 'vm', row.get('Hostname') or vmid, AUDIT_SUCCESS,
+              {'vmid': vmid, 'vmStatus': row.get('VmStatus')})
+
+    return row or None
 
 def clean_up_returned_user(vmid, hostname, username, lease_id, timeout: int = 120) -> str:
     """Remove a returned user from its host and then mark the VM clean.
@@ -998,6 +1014,9 @@ def token_required(required_permissions=None, required_group_ids=None, allow_any
     group_ids = tuple(group_id for group_id in (required_group_ids or ()) if group_id)
 
     def decorator(f):
+        audit_action = getattr(f, '_audit_action', None)
+        audit_target_type = getattr(f, '_audit_target_type', None)
+
         @wraps(f)
         def decorated(*args, **kwargs):
             token = None
@@ -1075,6 +1094,22 @@ def token_required(required_permissions=None, required_group_ids=None, allow_any
 
                 if not authorized:
                     logger.error("Access denied: insufficient role permissions or group membership.")
+                    if (request.method not in ('GET', 'HEAD', 'OPTIONS')
+                            and request.endpoint not in READ_ONLY_POST_ENDPOINTS
+                            and denial_audit_allowed(user_oid)):
+                        audit(
+                            audit_action or f"route.{request.endpoint}",
+                            audit_target_type,
+                            next((value for value in kwargs.values() if value is not None), None),
+                            AUDIT_DENIED,
+                            {
+                                'method': request.method,
+                                'path': request.path,
+                                'requiredRoles': sorted(allowed_roles),
+                                'callerRoles': sorted(roles),
+                            },
+                            claims=payload,
+                        )
                     return jsonify({'message': 'Access denied: insufficient role permissions or group membership.'}), 403
 
                 if legacy:
@@ -1110,6 +1145,258 @@ def is_delegated_caller():
     """True for a user signed in through the portal; False for a managed identity."""
     claims = getattr(g, 'token_claims', None) or {}
     return bool(claims.get('scp'))
+
+
+def caller_is_admin():
+    return ROLE_ADMIN in (getattr(g, 'effective_roles', None) or set())
+
+# ===============================
+# Audit log
+#
+# Who changed what. The @audited decorator records every call a portal user or an
+# administrator principal makes to a mutating route, token_required records authorization
+# denials on those routes, and handlers record the state changes the broker makes on its own:
+# scaling power actions, power states corrected from Azure, expired releases, and completed
+# cleanups and drains. Routine agent calls are not audited. The AVD hosts' checkouts, the
+# Linux hosts' releases, acknowledgements and heartbeats, and the scheduled task's probes are
+# high volume, and VirtualMachinesHistory already records what they change.
+
+AUDIT_ACTOR_USER = 'user'
+AUDIT_ACTOR_SERVICE = 'service'
+AUDIT_ACTOR_SYSTEM = 'system'
+AUDIT_SUCCESS = 'success'
+AUDIT_FAILURE = 'failure'
+AUDIT_DENIED = 'denied'
+AUDIT_OUTCOMES = (AUDIT_SUCCESS, AUDIT_FAILURE, AUDIT_DENIED)
+
+# POST routes that only read. They carry no audit action and their denials are not audited.
+READ_ONLY_POST_ENDPOINTS = frozenset({'get_vm_history', 'get_scaling_activity_log', 'get_scaling_rules_history'})
+
+_MIRID_RESOURCE_NAME_RE = re.compile(r'/providers/[^/]+/[^/]+/(?P<name>[^/]+)/?$', re.IGNORECASE)
+_MIRID_VM_NAME_RE = re.compile(r'/providers/Microsoft\.Compute/virtualMachines/(?P<name>[^/]+)/?$', re.IGNORECASE)
+
+audit_logger = logging.getLogger('linuxbroker.api.audit')
+
+
+def _request_claims():
+    if not has_app_context():
+        return {}
+    return getattr(g, 'token_claims', None) or {}
+
+
+def audit_actor(claims=None):
+    """(object id, display name, actor type) for the caller, from its validated token.
+
+    A portal user is named by their sign-in name. A managed identity has no name claim, so
+    it is named by the resource it belongs to (the VM or function app in xms_mirid), which is
+    what an operator recognizes, and otherwise by its application id.
+    """
+    claims = _request_claims() if claims is None else (claims or {})
+    if not claims:
+        return None, None, AUDIT_ACTOR_SYSTEM
+
+    oid = str(claims.get('oid') or '').strip() or None
+    if claims.get('scp'):
+        name = (claims.get('preferred_username') or claims.get('upn') or claims.get('unique_name')
+                or claims.get('email') or claims.get('name'))
+        return oid, (str(name) if name else None), AUDIT_ACTOR_USER
+
+    match = _MIRID_RESOURCE_NAME_RE.search(str(claims.get('xms_mirid') or ''))
+    name = match.group('name') if match else (claims.get('app_displayname') or claims.get('appid') or claims.get('azp'))
+    return oid, (str(name) if name else None), AUDIT_ACTOR_SERVICE
+
+
+def audit_correlation_id():
+    """The OpenTelemetry trace id when the request is traced, otherwise one id per request."""
+    if otel_trace is not None:
+        try:
+            context = otel_trace.get_current_span().get_span_context()
+            if context is not None and context.is_valid:
+                return format(context.trace_id, '032x')
+        except Exception:
+            pass
+
+    if not has_app_context():
+        return uuid.uuid4().hex
+
+    correlation_id = getattr(g, 'audit_correlation_id', None)
+    if not correlation_id:
+        correlation_id = uuid.uuid4().hex
+        g.audit_correlation_id = correlation_id
+    return correlation_id
+
+
+def audit_detail_json(detail):
+    """Serialize curated detail, bounded so one entry cannot grow without limit."""
+    if not detail:
+        return None
+    try:
+        text = json.dumps(serialize_for_json(detail), default=str, sort_keys=True)
+    except (TypeError, ValueError):
+        return None
+    if len(text) <= AUDIT_DETAIL_MAX_CHARS:
+        return text
+
+    # Escaping can lengthen the excerpt, so shrink it until the envelope fits.
+    excerpt = text[:AUDIT_DETAIL_MAX_CHARS - 64]
+    while True:
+        bounded = json.dumps({'truncated': True, 'excerpt': excerpt})
+        if len(bounded) <= AUDIT_DETAIL_MAX_CHARS or not excerpt:
+            return bounded
+        excerpt = excerpt[:len(excerpt) // 2]
+
+
+def write_audit_entry(entry):
+    """Store one audit entry. Never raises: a failure to audit must not fail the operation."""
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC WriteAuditEntry @ActorOid = %s, @ActorName = %s, @ActorType = %s, @Action = %s, "
+                    "@TargetType = %s, @TargetId = %s, @Outcome = %s, @DetailJson = %s, @CorrelationId = %s",
+                    (entry['actorOid'], entry['actorName'], entry['actorType'], entry['action'],
+                     entry['targetType'], entry['targetId'], entry['outcome'], entry['detailJson'],
+                     entry['correlationId'])
+                )
+                cursor.fetchone()
+            conn.commit()
+        return True
+    except Exception:
+        logger.exception("Could not write the audit entry for %s.", entry.get('action'))
+        return False
+
+
+def audit(action, target_type=None, target_id=None, outcome=AUDIT_SUCCESS, detail=None, claims=None):
+    """Record an audited event in SQL, and as a structured log record for Application Insights."""
+    try:
+        oid, name, actor_type = audit_actor(claims)
+        entry = {
+            'action': action,
+            'targetType': target_type,
+            'targetId': None if target_id in (None, '') else str(target_id),
+            'outcome': outcome,
+            'actorOid': oid,
+            'actorName': name,
+            'actorType': actor_type,
+            'detailJson': audit_detail_json(detail),
+            'correlationId': audit_correlation_id(),
+        }
+
+        # Telemetry attributes cannot be None, so absent values are left out.
+        attributes = {
+            f"audit_{key}": value for key, value in (
+                ('action', entry['action']), ('outcome', entry['outcome']),
+                ('target_type', entry['targetType']), ('target_id', entry['targetId']),
+                ('actor_oid', entry['actorOid']), ('actor_name', entry['actorName']),
+                ('actor_type', entry['actorType']), ('detail', entry['detailJson']),
+                ('correlation_id', entry['correlationId']),
+            ) if value is not None
+        }
+        audit_logger.info(
+            "Audit: %s %s on %s %s by %s.",
+            action, outcome, target_type or '-', entry['targetId'] or '-', name or oid or actor_type,
+            extra=attributes,
+        )
+
+        write_audit_entry(entry)
+    except Exception:
+        logger.exception("Could not audit %s.", action)
+
+
+def caller_is_audited():
+    """Portal users and administrator principals are audited; agents' routine calls are not."""
+    if not has_app_context():
+        return False
+    if is_delegated_caller():
+        return True
+    roles = getattr(g, 'effective_roles', None) or set()
+    return bool(roles.intersection(READ_ROLES))
+
+
+# Any signed-in tenant principal can be denied, so denials are capped per caller and worker
+# process: past the cap they are still logged, but no longer written to SQL, so a loop of
+# refused calls cannot fill the audit table.
+DENIAL_AUDITS_PER_MINUTE = 30
+
+
+def denial_audit_allowed(oid):
+    key = f"audit-denials:{oid or 'unknown'}"
+    count = cache.get(key) or 0
+    if count >= DENIAL_AUDITS_PER_MINUTE:
+        logger.warning("Not auditing a further denial for %s this minute.", oid)
+        return False
+    # Approximate across threads, which is enough for a flood guard.
+    cache.set(key, count + 1, timeout=60)
+    return True
+
+
+def _response_body_and_status(rv):
+    if isinstance(rv, tuple):
+        body = rv[0]
+        status = rv[1] if len(rv) > 1 and isinstance(rv[1], int) else getattr(body, 'status_code', 200)
+        return body, int(status)
+    return rv, int(getattr(rv, 'status_code', 200) or 200)
+
+
+def _response_error_text(body):
+    """The curated message from an error envelope. Never the body of a success."""
+    try:
+        payload = body.get_json(silent=True) if hasattr(body, 'get_json') else body
+    except Exception:
+        return None
+    if isinstance(payload, dict):
+        text = payload.get('error') or payload.get('message')
+        if text:
+            return str(text)[:300]
+    return None
+
+
+def audited(action, target_type=None, target_param=None):
+    """Record the outcome of a mutating route in the audit log.
+
+    Sits under @token_required, so it only runs for authorized callers; token_required audits
+    denials itself, using the action recorded here. A handler adds context through
+    g.audit_target_id (the hostname, where it is known) and g.audit_detail. The detail is
+    curated and never includes a response body, so no password or lease id can reach the log.
+    """
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            g.audit_target_id = None
+            g.audit_detail = {}
+            rv = f(*args, **kwargs)
+
+            try:
+                if caller_is_audited():
+                    body, status = _response_body_and_status(rv)
+                    if status == 403:
+                        outcome = AUDIT_DENIED
+                    elif status < 400:
+                        outcome = AUDIT_SUCCESS
+                    else:
+                        outcome = AUDIT_FAILURE
+
+                    detail = dict(getattr(g, 'audit_detail', None) or {})
+                    detail['status'] = status
+                    param_value = kwargs.get(target_param) if target_param else None
+                    if param_value is not None:
+                        detail.setdefault(target_param, param_value)
+                    if status >= 400:
+                        error_text = _response_error_text(body)
+                        if error_text:
+                            detail['error'] = error_text
+
+                    target_id = getattr(g, 'audit_target_id', None) or param_value
+                    audit(action, target_type, target_id, outcome, detail)
+            except Exception:
+                logger.exception("Could not audit %s.", action)
+
+            return rv
+
+        wrapper._audit_action = action
+        wrapper._audit_target_type = target_type
+        return wrapper
+    return decorator
 
 def remote_group_exists(hostname: str, group_name: str) -> bool:
     try:
@@ -1391,7 +1678,7 @@ def get_vm_summary():
         # The procedure always returns a row, but never let the dashboard 500 or render
         # blanks if that ever changes.
         fields = ('TotalVMs', 'Available', 'CheckedOut', 'Maintenance', 'Released',
-                  'PoweredOn', 'PoweredOff', 'Unreachable', 'Ready', 'CleanupPending')
+                  'PoweredOn', 'PoweredOff', 'Unreachable', 'Ready', 'CleanupPending', 'Draining')
         normalized = {field: int(summary.get(field) or 0) for field in fields}
 
         return jsonify(normalized), 200
@@ -1405,6 +1692,7 @@ def get_vm_summary():
 
 @app.route('/api/vms/checkout', methods=['POST'])
 @token_required([ROLE_AVD_HOST, ROLE_ADMIN], required_group_ids=[AVD_HOST_GROUP_ID])
+@audited('vm.checkout', target_type='vm')
 def checkout_vm():
     try:
         req_body = request.get_json(silent=True) or {}
@@ -1419,6 +1707,7 @@ def checkout_vm():
         if not username:
             return error_response("The username contains no characters a Linux account can use.", 400)
 
+        g.audit_detail = {'username': username, 'avdhost': avdhost}
         user_password = generate_secure_password()
 
         with db_connection() as conn:
@@ -1438,6 +1727,7 @@ def checkout_vm():
         vmid = checked_out_vm.get("VMID")
         vm_hostname = checked_out_vm.get('Hostname')
         lease_id = normalize_lease_id(checked_out_vm.get('LeaseId'))
+        g.audit_target_id = vm_hostname
 
         if not vm_hostname or not lease_id:
             return error_response("No hostname or LeaseId found for the checked-out VM.", 500)
@@ -1482,6 +1772,7 @@ def _validate_choice(value, field, choices):
 
 @app.route('/api/vms/<int:vmid>/update-attributes', methods=['POST'])
 @token_required(ADMIN_ROLES + [ROLE_SCHEDULED_TASK])
+@audited('vm.update_attributes', target_type='vm', target_param='vmid')
 def update_vm_attributes(vmid):
     """Admin repair of the broker's record for a VM. It never starts or stops anything.
 
@@ -1494,6 +1785,7 @@ def update_vm_attributes(vmid):
         powerstate = req_body.get('powerstate') or None
         networkstatus = req_body.get('networkstatus') or None
         vmstatus = req_body.get('vmstatus') or None
+        g.audit_detail = {'powerstate': powerstate, 'networkstatus': networkstatus, 'vmstatus': vmstatus}
 
         if not any([powerstate, networkstatus, vmstatus]):
             return error_response("Please provide at least one attribute to update.", 400)
@@ -1519,6 +1811,7 @@ def update_vm_attributes(vmid):
         if not row:
             return error_response("VM not found or no attributes updated. Please try again.", 404)
 
+        g.audit_target_id = row.get('Hostname')
         return jsonify(serialize_for_json(row)), 200
 
     except DatabaseUnavailable as e:
@@ -1531,6 +1824,7 @@ def update_vm_attributes(vmid):
 
 @app.route('/api/vms/<int:vmid>/network-status', methods=['POST'])
 @token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
+@audited('vm.network_status', target_type='vm', target_param='vmid')
 def set_vm_network_status(vmid):
     """Record a reachability probe result. Writes only when the status actually changed."""
     try:
@@ -1552,6 +1846,8 @@ def set_vm_network_status(vmid):
         if not row:
             return error_response(f"VM with VMID {vmid} was not found.", 404)
 
+        g.audit_target_id = row.get('Hostname')
+        g.audit_detail = {'networkstatus': networkstatus, 'changed': bool(row.get('Changed'))}
         body = serialize_for_json(row)
         body['Changed'] = bool(row.get('Changed'))
         return jsonify(body), 200
@@ -1566,6 +1862,7 @@ def set_vm_network_status(vmid):
 
 @app.route('/api/vms/<int:vmid>/maintenance', methods=['POST'])
 @token_required(OPERATE_ROLES)
+@audited('vm.maintenance', target_type='vm', target_param='vmid')
 def set_vm_maintenance(vmid):
     """Take an unassigned host out of rotation, or put it back."""
     try:
@@ -1583,6 +1880,8 @@ def set_vm_maintenance(vmid):
 
         result = (row or {}).get('Result')
         hostname = (row or {}).get('Hostname') or f"VMID {vmid}"
+        g.audit_target_id = (row or {}).get('Hostname')
+        g.audit_detail = {'enabled': enabled, 'result': result}
 
         if result in ('Updated', 'Unchanged'):
             return jsonify(serialize_for_json({
@@ -1610,6 +1909,7 @@ def set_vm_maintenance(vmid):
 
 @app.route('/api/vms/<int:vmid>/cleanup', methods=['POST'])
 @token_required(OPERATE_ROLES)
+@audited('vm.cleanup_retry', target_type='vm', target_param='vmid')
 def retry_vm_cleanup(vmid):
     """Retry removing a returned user from a host now, instead of waiting for the sweep."""
     try:
@@ -1625,11 +1925,14 @@ def retry_vm_cleanup(vmid):
         hostname = row.get('Hostname')
         username = row.get('CleanupUsername')
         lease_id = row.get('CleanupLeaseId')
+        g.audit_target_id = hostname
 
         if username:
             outcome = clean_up_returned_user(vmid, hostname, username, lease_id, timeout=60)
         else:
             outcome = CLEANUP_COMPLETED if complete_vm_cleanup(vmid, lease_id, None) else CLEANUP_FAILED
+
+        g.audit_detail = {'username': username, 'cleanupResult': outcome}
 
         body = {
             'VMID': vmid,
@@ -1659,6 +1962,7 @@ def retry_vm_cleanup(vmid):
 
 @app.route('/api/vms/<int:vmid>/delete', methods=['POST'])
 @token_required(ADMIN_ROLES)
+@audited('vm.delete', target_type='vm', target_param='vmid')
 def delete_vm(vmid):
     try:
         with db_connection() as conn:
@@ -1671,6 +1975,8 @@ def delete_vm(vmid):
         if not row:
             return error_response(f"VM with VMID {vmid} could not be deleted or was not found.", 404)
 
+        g.audit_target_id = row.get('Hostname')
+        g.audit_detail = {'vmStatus': row.get('VmStatus'), 'username': row.get('Username')}
         return jsonify({'message': f"VM with VMID {vmid} has been successfully deleted.", 'VMID': vmid}), 200
 
     except DatabaseUnavailable as e:
@@ -1683,6 +1989,7 @@ def delete_vm(vmid):
 
 @app.route('/api/vms/add', methods=['POST'])
 @token_required(ADMIN_ROLES)
+@audited('vm.add', target_type='vm')
 def add_new_vm():
     try:
         req_body = request.get_json(silent=True) or {}
@@ -1697,6 +2004,11 @@ def add_new_vm():
         username = str(req_body.get('username') or '').strip() or None
         avdhost = str(req_body.get('avdhost') or '').strip() or None
         description = str(req_body.get('description') or '').strip() or None
+        g.audit_target_id = str(hostname) if hostname else None
+        g.audit_detail = {
+            'ipaddress': ipaddress, 'powerstate': powerstate, 'networkstatus': networkstatus,
+            'vmstatus': vmstatus, 'username': username,
+        }
 
         if not (hostname and ipaddress and powerstate and networkstatus and vmstatus):
             return error_response("Please provide 'hostname', 'ipaddress', 'powerstate', 'networkstatus', and 'vmstatus' in the request body.", 400)
@@ -1761,6 +2073,7 @@ def get_vm_details(vmid):
 
 @app.route('/api/vms/<int:vmid>/return', methods=['POST'])
 @token_required(OPERATE_ROLES)
+@audited('vm.return', target_type='vm', target_param='vmid')
 def return_vm(vmid):
     """End an assignment now. The VM stays CleanupPending until its user is off the host."""
     try:
@@ -1779,7 +2092,9 @@ def return_vm(vmid):
 
         hostname = row.get('Hostname')
         username = row.get('ReturnedUsername')
+        g.audit_target_id = hostname
         outcome = clean_up_returned_user(vmid, hostname, username, row.get('ReturnedLeaseId'), timeout=60)
+        g.audit_detail = {'username': username, 'cleanupResult': outcome}
 
         if outcome == CLEANUP_COMPLETED:
             logger.info("Removed user %s from %s during manual return.", username, hostname)
@@ -1801,6 +2116,7 @@ def return_vm(vmid):
 
 @app.route('/api/vms/<hostname>/release', methods=['POST'])
 @token_required(OPERATE_ROLES + [ROLE_LINUX_HOST], required_group_ids=[LINUX_HOST_GROUP_ID])
+@audited('vm.release', target_type='vm', target_param='hostname')
 def release_vm(hostname):
     try:
         req_body = request.get_json(silent=True) or {}
@@ -1830,6 +2146,7 @@ def release_vm(hostname):
             return error_response(f"Failed to release VM with Hostname {hostname}. Please try again.", 500)
 
         release_status = (row.get('ReleaseStatus') or '').strip()
+        g.audit_detail = {'username': username, 'releaseStatus': release_status}
 
         if release_status == 'NotFound':
             return jsonify({'error': f"No VM found with Hostname {hostname}.", 'ReleaseStatus': release_status}), 404
@@ -1871,8 +2188,51 @@ def _sweep_cleanup(row, deadline):
         hostname, username, row.get('ReturnedLeaseId'), force=True, timeout=SWEEP_COMMAND_TIMEOUT_SECONDS
     )
 
+def audit_sweep_result(row, outcome):
+    """Audit what the sweep changed for one host.
+
+    A retry that still cannot clean the host changes nothing, so it is not recorded again
+    every two minutes; the expiry that made the host pending already is.
+    """
+    detail = {'vmid': row.get('VMID'), 'username': row.get('ReturnedUsername'), 'cleanupResult': outcome}
+    hostname = row.get('Hostname') or row.get('VMID')
+
+    if row.get('ResultType') == 'Expired':
+        audit('vm.release_expired', 'vm', hostname, AUDIT_SUCCESS, detail)
+    elif outcome == CLEANUP_COMPLETED:
+        audit('vm.cleanup_completed', 'vm', hostname, AUDIT_SUCCESS, detail)
+
+def finalize_vm_drains():
+    """Complete drains whose hosts have become unassigned and clean, auditing each one.
+
+    Returns the hosts moved to Maintenance. A database that does not have FinalizeVmDrains
+    yet is not an error: CompleteVmCleanup already completes drains on the common path.
+    """
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC FinalizeVmDrains")
+                rows = cursor.fetchall() or []
+            conn.commit()
+    except DatabaseUnavailable:
+        logger.error("Database connection failed while completing drained hosts.")
+        return []
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            logger.warning("FinalizeVmDrains is not deployed yet; skipping drain completion.")
+        else:
+            logger.exception("Could not complete drained hosts.")
+        return []
+
+    finalized = [row for row in rows if not is_procedure_error(row)]
+    for row in finalized:
+        audit('vm.drain_completed', 'vm', row.get('Hostname') or row.get('VMID'), AUDIT_SUCCESS,
+              {'vmid': row.get('VMID'), 'vmStatus': row.get('VmStatus')})
+    return finalized
+
 @app.route('/api/vms/released', methods=['POST'])
 @token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
+@audited('vm.sweep', target_type='fleet')
 def return_released_vm_api():
     """Return Released VMs whose grace period has expired, and retry pending cleanups.
 
@@ -1880,6 +2240,9 @@ def return_released_vm_api():
     host that cannot be cleaned now is retried on a later run instead of being handed to the
     next user with the previous session still on it. Cleanups run in parallel and stop
     starting new work at the deadline, so one slow host cannot hold up the rest.
+
+    Drains whose hosts have become clean are completed afterwards. Every host the sweep
+    returns, cleans or takes out of rotation is recorded in the audit log.
     """
     try:
         with db_connection() as conn:
@@ -1889,32 +2252,35 @@ def return_released_vm_api():
             conn.commit()
 
         rows = [row for row in (rows or []) if not is_procedure_error(row)]
-        if not rows:
-            return jsonify([]), 200
-
-        deadline = time.monotonic() + SWEEP_DEADLINE_SECONDS
-        with ThreadPoolExecutor(max_workers=min(SWEEP_CONCURRENCY, len(rows))) as pool:
-            outcomes = list(pool.map(lambda row: _sweep_cleanup(row, deadline), rows))
-
         results = []
-        tally = {}
-        for row, outcome in zip(rows, outcomes):
-            if outcome == CLEANUP_COMPLETED and not complete_vm_cleanup(
-                row.get('VMID'), row.get('ReturnedLeaseId'), row.get('ReturnedUsername')
-            ):
-                outcome = CLEANUP_FAILED
 
-            tally[outcome] = tally.get(outcome, 0) + 1
+        if rows:
+            deadline = time.monotonic() + SWEEP_DEADLINE_SECONDS
+            with ThreadPoolExecutor(max_workers=min(SWEEP_CONCURRENCY, len(rows))) as pool:
+                outcomes = list(pool.map(lambda row: _sweep_cleanup(row, deadline), rows))
 
-            entry = serialize_for_json(row)
-            entry['CleanupResult'] = outcome
-            entry['CleanupPending'] = outcome not in (CLEANUP_COMPLETED, CLEANUP_NOT_REQUIRED)
-            results.append(entry)
+            tally = {}
+            for row, outcome in zip(rows, outcomes):
+                if outcome == CLEANUP_COMPLETED and not complete_vm_cleanup(
+                    row.get('VMID'), row.get('ReturnedLeaseId'), row.get('ReturnedUsername')
+                ):
+                    outcome = CLEANUP_FAILED
 
-        logger.info(
-            "Released VM sweep processed %s row(s): %s.",
-            len(results), ', '.join(f"{key}={value}" for key, value in sorted(tally.items()))
-        )
+                tally[outcome] = tally.get(outcome, 0) + 1
+
+                entry = serialize_for_json(row)
+                entry['CleanupResult'] = outcome
+                entry['CleanupPending'] = outcome not in (CLEANUP_COMPLETED, CLEANUP_NOT_REQUIRED)
+                results.append(entry)
+                audit_sweep_result(row, outcome)
+
+            logger.info(
+                "Released VM sweep processed %s row(s): %s.",
+                len(results), ', '.join(f"{key}={value}" for key, value in sorted(tally.items()))
+            )
+
+        drained = finalize_vm_drains()
+        g.audit_detail = {'processed': len(results), 'drainsCompleted': len(drained)}
 
         return jsonify(results), 200
 
@@ -1935,6 +2301,335 @@ def get_vm_history():
         paged_proc='GetVmHistoryPaged',
         label='VM history',
     )
+
+# ===============================
+# Host Actions APIs
+#
+# Real power actions and drain, so no admin workflow needs the "Update attributes" repair
+# tool. Each action records the intended state in SQL first, exactly as scaling does, and
+# then asks Azure; if Azure refuses, the recorded state is put back. The API does not wait
+# for Azure to finish: the power-state sync and the reachability probe converge the record.
+
+POWER_ACTION_VERBS = {'Start': 'start', 'Stop': 'stop', 'Restart': 'restart'}
+
+
+def get_compute_client():
+    return ComputeManagementClient(credential=get_azure_credential(), subscription_id=VM_SUBSCRIPTION_ID)
+
+
+def _vm_is_assigned(vm):
+    return bool(vm.get('Username') or vm.get('LeaseId') or vm.get('VmStatus') in ('CheckedOut', 'Released'))
+
+
+def revert_refused_power_action(vmid, hostname, row):
+    """Put back what BeginVmPowerAction recorded, including an assignment a refused stop ended.
+
+    Returns whether the assignment was given back, or None when the recorded state could not
+    be restored at all.
+    """
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC RevertVmPowerAction @VMID = %s, @PreviousPowerState = %s, @PreviousNetworkStatus = %s, "
+                    "@EndedAssignment = %s, @PreviousVmStatus = %s, @Username = %s, @AvdHost = %s, "
+                    "@LeaseId = %s, @ReleasedDate = %s",
+                    (
+                        vmid,
+                        row.get('PreviousPowerState'),
+                        row.get('PreviousNetworkStatus'),
+                        bool(row.get('EndedAssignment')),
+                        row.get('PreviousVmStatus'),
+                        row.get('Username'),
+                        row.get('AvdHost'),
+                        row.get('PreviousLeaseId'),
+                        row.get('PreviousReleasedDate'),
+                    )
+                )
+                reverted = cursor.fetchone()
+            conn.commit()
+    except Exception:
+        logger.exception("Could not restore the recorded state of %s.", hostname)
+        return None
+
+    if not reverted or reverted.get('Result') != 'Reverted':
+        logger.error("RevertVmPowerAction returned %s for VM %s.", (reverted or {}).get('Result'), vmid)
+        return None
+    return bool(reverted.get('AssignmentRestored'))
+
+
+def run_power_action(vmid, action):
+    """Start, stop or restart one host for an operator.
+
+    A host with a user assigned can only be stopped or restarted by an administrator who
+    confirms its hostname, because the user's session ends. Stopping it also ends the
+    assignment (see BeginVmPowerAction), so the user gets a working host when they next
+    connect instead of this powered-off one.
+    """
+    verb = POWER_ACTION_VERBS[action]
+    try:
+        if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
+            return error_response("Configuration error: missing Azure subscription or resource group.", 500)
+
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+
+        mode = None
+        if action == 'Stop':
+            try:
+                mode = parse_stop_mode(body.get('mode'))
+            except RuleValidationError:
+                return error_response("mode must be PowerOff or Deallocate.", 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetVmDetails @VMID = %s", (vmid,))
+                vm = cursor.fetchone()
+
+        if not vm:
+            return error_response(f"VM with VMID {vmid} was not found.", 404)
+
+        hostname = vm.get('Hostname')
+        g.audit_target_id = hostname
+        allow_assigned = False
+
+        if action in ('Stop', 'Restart') and _vm_is_assigned(vm):
+            user = vm.get('Username') or 'a user'
+            g.audit_detail = {'username': vm.get('Username')}
+
+            if not caller_is_admin():
+                return error_response(
+                    f"{hostname} is assigned to {user}. Only an administrator can {verb} a host that is in use.", 403
+                )
+
+            if str(body.get('confirm') or '').strip().lower() != str(hostname or '').lower():
+                return jsonify({
+                    'error': f"{hostname} is assigned to {user}. Send its hostname as confirm to {verb} it anyway.",
+                    'requiresConfirmation': True,
+                    'Hostname': hostname,
+                    'Username': vm.get('Username'),
+                }), 409
+
+            allow_assigned = True
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC BeginVmPowerAction @VMID = %s, @Action = %s, @AllowAssigned = %s",
+                    (vmid, action, allow_assigned)
+                )
+                row = cursor.fetchone()
+            conn.commit()
+
+        result = (row or {}).get('Result')
+        if result == 'NotFound' or not row:
+            return error_response(f"VM with VMID {vmid} was not found.", 404)
+        if result == 'Assigned':
+            return error_response(f"{hostname} was just assigned to {row.get('Username') or 'a user'}. Refresh and try again.", 409)
+        if result == 'InvalidState':
+            return error_response(f"{hostname} is powered off. Start it instead of restarting it.", 409)
+        if result != 'Requested':
+            logger.error("BeginVmPowerAction returned %s for VM %s.", result, vmid)
+            return error_response(f"Unable to {verb} the virtual machine.", 500)
+
+        stop_mode = (mode or row.get('StopMode') or 'PowerOff') if action == 'Stop' else None
+        ended_assignment = bool(row.get('EndedAssignment'))
+        g.audit_detail = {
+            'previousPowerState': row.get('PreviousPowerState'),
+            'username': row.get('Username'),
+            'endedAssignment': ended_assignment,
+        }
+        if stop_mode:
+            g.audit_detail['mode'] = stop_mode
+
+        try:
+            virtual_machines = get_compute_client().virtual_machines
+            if action == 'Start':
+                virtual_machines.begin_start(VM_RESOURCE_GROUP, hostname)
+            elif action == 'Restart':
+                virtual_machines.begin_restart(VM_RESOURCE_GROUP, hostname)
+            elif stop_mode == 'Deallocate':
+                virtual_machines.begin_deallocate(VM_RESOURCE_GROUP, hostname)
+            else:
+                virtual_machines.begin_power_off(VM_RESOURCE_GROUP, hostname)
+        except Exception:
+            logger.exception("Azure refused to %s %s.", verb, hostname)
+            restored = revert_refused_power_action(vmid, hostname, row)
+            g.audit_detail['stateRestored'] = restored is not None
+            if restored is None:
+                message = (f"Azure refused to {verb} {hostname}, and the broker could not restore its recorded state. "
+                           "Check the host before trying again.")
+            elif ended_assignment and not restored:
+                g.audit_detail['assignmentRestored'] = False
+                message = (f"Azure refused to stop {hostname}. Its power state was restored, but "
+                           f"{row.get('Username') or 'the user'}'s assignment could not be, so it stays ended.")
+            else:
+                if ended_assignment:
+                    g.audit_detail['assignmentRestored'] = True
+                message = f"Azure refused to {verb} {hostname}. Its recorded state was restored."
+            return error_response(message, 502)
+
+        if action == 'Start':
+            message = f"Start requested for {hostname}. It is offered to users once it is reachable."
+        elif action == 'Restart':
+            message = f"Restart requested for {hostname}."
+        elif ended_assignment:
+            message = (f"Stop requested for {hostname}. {row.get('Username') or 'The user'}'s assignment ended; "
+                       "they get another host when they reconnect.")
+        else:
+            message = f"Stop requested for {hostname}."
+
+        response = {
+            'VMID': vmid,
+            'Hostname': hostname,
+            'Action': action,
+            'PreviousPowerState': row.get('PreviousPowerState'),
+            'EndedAssignment': ended_assignment,
+            'message': message,
+        }
+        if stop_mode:
+            response['Mode'] = stop_mode
+        return jsonify(response), 202
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while requesting %s of VM %s.", verb, vmid)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to %s VM %s.", verb, vmid)
+        return error_response(f"Unable to {verb} the virtual machine.", 500)
+
+
+@app.route('/api/vms/<int:vmid>/start', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('vm.start', target_type='vm', target_param='vmid')
+def start_vm(vmid):
+    return run_power_action(vmid, 'Start')
+
+
+@app.route('/api/vms/<int:vmid>/stop', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('vm.stop', target_type='vm', target_param='vmid')
+def stop_vm(vmid):
+    return run_power_action(vmid, 'Stop')
+
+
+@app.route('/api/vms/<int:vmid>/restart', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('vm.restart', target_type='vm', target_param='vmid')
+def restart_vm(vmid):
+    return run_power_action(vmid, 'Restart')
+
+
+DRAIN_MESSAGES = {
+    'Draining': "{hostname} is draining. {user} keeps the session and can reconnect; no one new is assigned. "
+                "It moves to maintenance when the assignment ends.",
+    'Drained': "{hostname} had no user, so it is in maintenance now.",
+    'ReturnedToService': "{hostname} is back in service.",
+}
+
+
+def set_vm_drain(vmid, enabled):
+    verb = 'drain' if enabled else 'return to service'
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC SetVmDrain @VMID = %s, @Enabled = %s", (vmid, enabled))
+                row = cursor.fetchone()
+            conn.commit()
+
+        result = (row or {}).get('Result')
+        if not row or result == 'NotFound':
+            return error_response(f"VM with VMID {vmid} was not found.", 404)
+
+        hostname = row.get('Hostname')
+        g.audit_target_id = hostname
+        g.audit_detail = {'result': result, 'username': row.get('Username')}
+
+        if result == 'InvalidState':
+            return error_response(f"{hostname} is in a state drain cannot change. Repair its status first.", 409)
+
+        template = DRAIN_MESSAGES.get(result)
+        if template:
+            message = template.format(hostname=hostname, user=row.get('Username') or 'The current user')
+        elif enabled:
+            message = f"{hostname} is already out of rotation."
+        else:
+            message = f"{hostname} is already in service."
+
+        return jsonify(serialize_for_json({
+            'VMID': row.get('VMID'),
+            'Hostname': hostname,
+            'VmStatus': row.get('VmStatus'),
+            'DrainRequested': bool(row.get('DrainRequested')),
+            'Result': result,
+            'message': message,
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while trying to %s VM %s.", verb, vmid)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to %s VM %s.", verb, vmid)
+        return error_response(f"Unable to {verb} the virtual machine.", 500)
+
+
+@app.route('/api/vms/<int:vmid>/drain', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('vm.drain', target_type='vm', target_param='vmid')
+def drain_vm(vmid):
+    """Stop offering a host to new users without disturbing the one it has."""
+    return set_vm_drain(vmid, True)
+
+
+@app.route('/api/vms/<int:vmid>/undrain', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('vm.undrain', target_type='vm', target_param='vmid')
+def undrain_vm(vmid):
+    """Return a drained or draining host to service."""
+    return set_vm_drain(vmid, False)
+
+
+@app.route('/api/vms/sync', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('vm.power_sync', target_type='fleet')
+def sync_power_states():
+    """Correct the recorded power state of every host from Azure now, as scaling does first."""
+    try:
+        if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
+            return error_response("Configuration error: missing Azure subscription or resource group.", 500)
+
+        try:
+            corrections, failed = sync_vm_power_states(get_compute_client())
+        except DatabaseUnavailable:
+            raise
+        except Exception:
+            logger.exception("Could not read power states from Azure.")
+            return error_response("Azure could not be read. Try again shortly.", 502)
+
+        g.audit_detail = {'corrections': len(corrections), 'failed': bool(failed)}
+
+        if corrections:
+            message = f"Corrected the power state of {len(corrections)} host(s) to match Azure."
+        else:
+            message = "Every host's recorded power state already matches Azure."
+        if failed:
+            message += " Some hosts could not be read and were left as they were."
+
+        return jsonify({
+            'PowerStateCorrections': corrections,
+            'PowerSyncFailed': bool(failed),
+            'message': message,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while syncing power states.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to sync power states.")
+        return error_response("Unable to sync power states.", 500)
 
 # ===============================
 # Scaling APIs
@@ -2022,6 +2717,13 @@ def sync_vm_power_states(compute_client):
             "Corrected the power state of %s from %s to %s to match Azure.",
             row.get('Hostname'), row.get('PreviousPowerState'), row.get('PowerState')
         )
+        # Something outside the broker started or stopped this VM, or a requested operation
+        # never happened. Either way an operator will want to know when and which.
+        audit('vm.power_corrected', 'vm', row.get('Hostname'), AUDIT_SUCCESS, {
+            'vmid': row.get('VMID'),
+            'from': row.get('PreviousPowerState'),
+            'to': row.get('PowerState'),
+        })
 
     return [{'Hostname': row.get('Hostname'), 'PowerState': row.get('PowerState')} for row in corrections], failed > 0
 
@@ -2052,6 +2754,7 @@ def append_scaling_note(activity_id, note):
 
 @app.route('/api/scaling/trigger', methods=['POST'])
 @token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
+@audited('scaling.trigger', target_type='fleet')
 def trigger_scaling_logic():
     try:
         if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
@@ -2096,13 +2799,19 @@ def trigger_scaling_logic():
                 try:
                     compute_client.virtual_machines.begin_start(VM_RESOURCE_GROUP, vm_name)
                     powered_on_vms.append(vm_name)
+                    audit('scaling.power_on', 'vm', vm_name, AUDIT_SUCCESS, {'activityId': row.get('ActivityID')})
                 except Exception:
                     logger.exception("Azure refused to start %s.", vm_name)
                     revert_power_action(row, 'Off')
                     append_scaling_note(row.get('ActivityID'), f"Starting {vm_name} failed, so it was recorded as off again.")
                     failed.append({'VMName': vm_name, 'Action': 'PowerOn', 'Error': 'The Azure start operation could not be requested.'})
+                    audit('scaling.power_on', 'vm', vm_name, AUDIT_FAILURE, {
+                        'activityId': row.get('ActivityID'),
+                        'error': 'The Azure start operation could not be requested.',
+                    })
             elif action in ('PowerOff', 'PoweredOff'):
                 deallocate = (row.get('StopMode') or 'PowerOff') == 'Deallocate'
+                audit_action = 'scaling.deallocate' if deallocate else 'scaling.power_off'
                 try:
                     if deallocate:
                         compute_client.virtual_machines.begin_deallocate(VM_RESOURCE_GROUP, vm_name)
@@ -2110,6 +2819,7 @@ def trigger_scaling_logic():
                     else:
                         compute_client.virtual_machines.begin_power_off(VM_RESOURCE_GROUP, vm_name)
                         powered_off_vms.append(vm_name)
+                    audit(audit_action, 'vm', vm_name, AUDIT_SUCCESS, {'activityId': row.get('ActivityID')})
                 except Exception:
                     logger.exception("Azure refused to stop %s.", vm_name)
                     revert_power_action(row, 'On')
@@ -2119,6 +2829,17 @@ def trigger_scaling_logic():
                         'Action': 'Deallocate' if deallocate else 'PowerOff',
                         'Error': 'The Azure stop operation could not be requested.',
                     })
+                    audit(audit_action, 'vm', vm_name, AUDIT_FAILURE, {
+                        'activityId': row.get('ActivityID'),
+                        'error': 'The Azure stop operation could not be requested.',
+                    })
+
+        g.audit_detail = {
+            'started': len(powered_on_vms),
+            'stopped': len(powered_off_vms) + len(deallocated_vms),
+            'failed': len(failed),
+            'corrections': len(corrections),
+        }
 
         return jsonify({
             'PoweredOnVMs': powered_on_vms,
@@ -2270,6 +2991,7 @@ def get_scaling_rule_details(ruleid):
 
 @app.route('/api/scaling/rules/create', methods=['POST'])
 @token_required(ADMIN_ROLES)
+@audited('scaling.rule_create', target_type='rule')
 def create_scaling_rule():
     try:
         req_body = request.get_json(silent=True) or {}
@@ -2287,6 +3009,8 @@ def create_scaling_rule():
             stop_mode = parse_stop_mode(req_body.get('stopmode'))
         except RuleValidationError as e:
             return error_response(e.client_message, 400)
+
+        g.audit_detail = {'rule': rule, 'stopMode': stop_mode or 'PowerOff'}
 
         with db_connection() as conn:
             with conn.cursor(as_dict=True) as cursor:
@@ -2319,6 +3043,7 @@ def create_scaling_rule():
             )
             return jsonify({'error': text, 'ActiveRuleID': active_rule_id}), 409
 
+        g.audit_target_id = int(new_rule_id)
         return jsonify({"NewRuleID": int(new_rule_id)}), 201
 
     except DatabaseUnavailable as e:
@@ -2331,6 +3056,7 @@ def create_scaling_rule():
 
 @app.route('/api/scaling/rules/<int:ruleid>/update', methods=['POST'])
 @token_required(ADMIN_ROLES)
+@audited('scaling.rule_update', target_type='rule', target_param='ruleid')
 def update_scaling_rule(ruleid):
     try:
         req_body = request.get_json(silent=True) or {}
@@ -2355,7 +3081,16 @@ def update_scaling_rule(ruleid):
         # Updates are partial, so the rule that results from them is what gets validated.
         # That also turns a CHECK constraint violation into a 400 that names the field.
         merged = _rule_from_row(current)
+        previous = dict(merged)
         merged.update(changes)
+        g.audit_detail = {
+            'changes': {
+                field: {'from': previous[field], 'to': value}
+                for field, value in changes.items() if previous.get(field) != value
+            },
+        }
+        if stop_mode is not None and stop_mode != (current.get('StopMode') or 'PowerOff'):
+            g.audit_detail['changes']['stopmode'] = {'from': current.get('StopMode') or 'PowerOff', 'to': stop_mode}
         try:
             validate_rule(merged)
         except RuleValidationError as e:
@@ -2386,6 +3121,7 @@ def update_scaling_rule(ruleid):
 
 @app.route('/api/scaling/rules/<int:ruleid>/delete', methods=['POST'])
 @token_required(ADMIN_ROLES)
+@audited('scaling.rule_delete', target_type='rule', target_param='ruleid')
 def delete_scaling_rule(ruleid):
     try:
         with db_connection() as conn:
@@ -2444,13 +3180,20 @@ def get_host_settings():
 
 @app.route('/api/hosts/settings/update', methods=['POST'])
 @token_required(ADMIN_ROLES)
+@audited('settings.update', target_type='settings')
 def update_host_settings():
     try:
+        g.audit_target_id = 'Global'
         payload = request.get_json(silent=True) or {}
         if not isinstance(payload, dict):
             return jsonify({'error': 'Settings payload must be a JSON object.'}), 400
 
         updated_by = payload.pop('updatedBy', None)
+        # A portal user is recorded as themselves, from their validated token, rather than
+        # from whatever name the caller put in the body.
+        _actor_oid, actor_name, actor_type = audit_actor()
+        if actor_type == AUDIT_ACTOR_USER and actor_name:
+            updated_by = actor_name
 
         settings, error = validate_host_settings(payload)
         if error:
@@ -2465,6 +3208,13 @@ def update_host_settings():
 
         resulting = dict(current)
         resulting.update(settings)
+        g.audit_detail = {
+            'changes': {
+                field: {'from': current.get(field), 'to': value}
+                for field, value in settings.items() if current.get(field) != value
+            },
+            'previousVersion': current.get('SettingsVersion'),
+        }
 
         if resulting['IdleTimeoutSeconds'] != 0 and resulting['IdleWarningSeconds'] >= resulting['IdleTimeoutSeconds']:
             return jsonify({
@@ -2518,7 +3268,9 @@ def update_host_settings():
         if not row:
             return jsonify({'error': 'Unable to update Linux host settings.'}), 500
 
-        return jsonify(normalize_host_settings(row)), 200
+        saved = normalize_host_settings(row)
+        g.audit_detail['settingsVersion'] = saved.get('SettingsVersion')
+        return jsonify(saved), 200
 
     except DatabaseUnavailable as e:
         logger.error("Database connection failed while updating Linux host settings.")
@@ -2530,6 +3282,7 @@ def update_host_settings():
 
 @app.route('/api/hosts/settings/apply', methods=['POST'])
 @token_required(OPERATE_ROLES + [ROLE_SCHEDULED_TASK])
+@audited('settings.apply', target_type='settings')
 def apply_host_settings():
     """Push the current settings profile to hosts over SSH.
 
@@ -2595,6 +3348,14 @@ def apply_host_settings():
                 'Message': message
             })
 
+        g.audit_target_id = ', '.join(hostnames) if requested_hostnames and len(hostnames) <= 5 else 'Fleet'
+        g.audit_detail = {
+            'settingsVersion': settings['SettingsVersion'],
+            'targetCount': len(hostnames),
+            'succeeded': succeeded,
+            'notAttempted': len(not_attempted),
+        }
+
         return jsonify({
             'SettingsVersion': settings['SettingsVersion'],
             'TargetCount': len(hostnames),
@@ -2635,6 +3396,629 @@ def acknowledge_host_settings(hostname):
     except Exception:
         logger.exception("Failed to record the applied settings version for %s.", hostname)
         return jsonify({'error': 'Unable to record the applied settings version.'}), 500
+
+@app.route('/api/hosts/settings/history', methods=['GET'])
+@token_required(READ_ROLES)
+def get_host_settings_history():
+    """Every saved version of the host settings profile, newest first, with who saved it."""
+    try:
+        limit = coerce_optional_int(request.args.get('limit'), default=50, minimum=1, maximum=200)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetLinuxHostSettingsHistory @Limit = %s", (limit,))
+                rows = cursor.fetchall() or []
+
+        versions = []
+        for row in rows:
+            version = {field: int(row[field]) for field in LINUX_HOST_SETTING_BOUNDS if row.get(field) is not None}
+            version.update({field: bool(row.get(field)) for field in LINUX_HOST_SETTING_BOOLEANS})
+            version.update({
+                'SettingsVersion': int(row.get('SettingsVersion') or 0),
+                'UpdatedBy': row.get('UpdatedBy'),
+                'ValidFromUtc': row.get('ValidFromUtc'),
+                'ValidToUtc': row.get('ValidToUtc'),
+                'IsCurrent': bool(row.get('IsCurrent')),
+            })
+            versions.append(version)
+
+        return jsonify(versions), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading the host settings history.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read the host settings history.")
+        return error_response("Unable to retrieve the host settings history.", 500)
+
+# ===============================
+# Host Heartbeat and Fleet Health APIs
+#
+# Each Linux host agent posts a heartbeat at the end of every timer run: its agent and script
+# versions, OS, desktop, xrdp and NFS state, load, memory, disk and sessions. Fleet health
+# reports on it only. Readiness is still decided by the reachability probe, so a broken
+# heartbeat path can never take hosts out of rotation.
+
+HEARTBEAT_HOSTNAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+HEARTBEAT_VERSION_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z.+~_-]{0,31}$')
+HEARTBEAT_TOKEN_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z.+~_:-]*$')
+HEARTBEAT_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
+HEARTBEAT_SCRIPTS = (
+    'release-session.sh', 'logind-session-watcher.sh', 'xrdp-who-xorg.sh',
+    'create-user.sh', 'manage-lease.sh', 'apply-host-settings.sh',
+)
+HEARTBEAT_DESKTOPS = ('gnome', 'xfce', 'mate', 'kde', 'other', 'none', 'unknown')
+HEARTBEAT_SESSION_STATES = ('active', 'disconnected', 'unknown')
+HEARTBEAT_MAX_EPOCH = 2 ** 40
+
+# Health flags, and the summary counter each one feeds.
+HEALTH_FLAGS = {
+    'no-heartbeat': 'NoHeartbeat',
+    'stale': 'Stale',
+    'xrdp-down': 'XrdpDown',
+    'nfs-unreachable': 'NfsUnreachable',
+    'low-disk': 'LowDisk',
+    'agent-outdated': 'AgentOutdated',
+    'settings-drift': 'SettingsDrift',
+}
+
+
+def _hb_version(value):
+    return value if isinstance(value, str) and HEARTBEAT_VERSION_RE.match(value) else None
+
+
+def _hb_token(value, max_length):
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if 0 < len(value) <= max_length and HEARTBEAT_TOKEN_RE.match(value) else None
+
+
+def _hb_text(value, max_length):
+    if not isinstance(value, str):
+        return None
+    value = ''.join(character for character in value if character.isprintable()).strip()
+    return value[:max_length] or None
+
+
+def _hb_int(value, minimum, maximum):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and re.fullmatch(r'-?\d{1,19}', value.strip()):
+        value = int(value.strip())
+    if isinstance(value, float):
+        if value != value or value in (float('inf'), float('-inf')):
+            return None
+        value = int(value)
+    if not isinstance(value, int):
+        return None
+    return value if minimum <= value <= maximum else None
+
+
+def _hb_float(value, minimum, maximum):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    if value != value or value in (float('inf'), float('-inf')) or not minimum <= value <= maximum:
+        return None
+    return round(value, 2)
+
+
+def _hb_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in ('true', 'false'):
+        return value.strip().lower() == 'true'
+    return None
+
+
+def _hb_object(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _without_none(document):
+    return {key: value for key, value in document.items() if value is not None and value != {}}
+
+
+def normalize_heartbeat(payload):
+    """Keep only the fields the broker understands, each checked and bounded.
+
+    Returns (document, problem). A host is root on itself, so nothing in a heartbeat is
+    trusted: unknown keys are dropped, and a value of the wrong type or out of range is
+    dropped rather than failing the heartbeat, which still proves the agent is running.
+    """
+    if not isinstance(payload, dict):
+        return None, "The heartbeat must be a JSON object."
+
+    scripts = {}
+    for name in HEARTBEAT_SCRIPTS:
+        if name in _hb_object(payload.get('scriptVersions')):
+            # A script that predates the version constant reports null, which is kept so
+            # fleet health can show a partly migrated host.
+            scripts[name] = _hb_version(payload['scriptVersions'][name])
+
+    sessions = []
+    raw_sessions = payload.get('sessions')
+    if isinstance(raw_sessions, list):
+        for raw in raw_sessions[:HEARTBEAT_MAX_SESSIONS]:
+            if not isinstance(raw, dict):
+                continue
+            username = raw.get('username')
+            if not isinstance(username, str) or not HEARTBEAT_USERNAME_RE.match(username):
+                continue
+            state = raw.get('state') if raw.get('state') in HEARTBEAT_SESSION_STATES else 'unknown'
+            sessions.append({
+                'username': username,
+                'state': state,
+                'sessionStart': _hb_int(raw.get('sessionStart'), 0, HEARTBEAT_MAX_EPOCH),
+                'disconnectedSince': _hb_int(raw.get('disconnectedSince'), 0, HEARTBEAT_MAX_EPOCH),
+                'idleSeconds': _hb_int(raw.get('idleSeconds'), 0, HEARTBEAT_MAX_EPOCH),
+            })
+
+    os_info = _hb_object(payload.get('os'))
+    xrdp = _hb_object(payload.get('xrdp'))
+    nfs = _hb_object(payload.get('nfs'))
+    desktop = payload.get('desktop')
+
+    document = _without_none({
+        'agentVersion': _hb_version(payload.get('agentVersion')),
+        'scriptVersions': scripts or None,
+        'settingsVersion': _hb_int(payload.get('settingsVersion'), 0, 2 ** 31 - 1),
+        'os': _without_none({
+            'id': _hb_token(os_info.get('id'), 32),
+            'version': _hb_token(os_info.get('version'), 32),
+            'name': _hb_text(os_info.get('name'), 128),
+        }),
+        'kernel': _hb_token(payload.get('kernel'), 128),
+        'desktop': desktop if desktop in HEARTBEAT_DESKTOPS else None,
+        'xrdp': _without_none({'version': _hb_version(xrdp.get('version')), 'active': _hb_bool(xrdp.get('active'))}),
+        'nfs': _without_none({'reachable': _hb_bool(nfs.get('reachable')), 'mounts': _hb_int(nfs.get('mounts'), 0, 1000)}),
+        'loadAverage': _hb_float(payload.get('loadAverage'), 0, 100000),
+        'cpuCount': _hb_int(payload.get('cpuCount'), 0, 4096),
+        'memoryAvailableMb': _hb_int(payload.get('memoryAvailableMb'), 0, 64 * 1024 * 1024),
+        'memoryTotalMb': _hb_int(payload.get('memoryTotalMb'), 0, 64 * 1024 * 1024),
+        'rootDiskFreePct': _hb_int(payload.get('rootDiskFreePct'), 0, 100),
+        'uptimeSeconds': _hb_int(payload.get('uptimeSeconds'), 0, HEARTBEAT_MAX_EPOCH),
+    })
+    # An empty list is kept: it means "no sessions", which differs from "not reported".
+    if isinstance(raw_sessions, list):
+        document['sessions'] = sessions
+
+    return document, None
+
+
+@app.route('/api/hosts/<hostname>/heartbeat', methods=['POST'])
+@token_required([ROLE_LINUX_HOST, ROLE_ADMIN], required_group_ids=[LINUX_HOST_GROUP_ID])
+def record_host_heartbeat(hostname):
+    """Store the latest heartbeat from a Linux host agent.
+
+    Not audited: every host sends one each reconcile run. A Linux host's managed identity
+    names its VM in xms_mirid, so a host cannot report on another's behalf.
+    """
+    try:
+        if not HEARTBEAT_HOSTNAME_RE.match(hostname or ''):
+            return error_response("The hostname is not valid.", 400)
+
+        too_large = f"The heartbeat is larger than {HEARTBEAT_MAX_BYTES} bytes."
+        if request.content_length is not None and request.content_length > HEARTBEAT_MAX_BYTES:
+            return error_response(too_large, 413)
+
+        raw = request.stream.read(HEARTBEAT_MAX_BYTES + 1)
+        if len(raw) > HEARTBEAT_MAX_BYTES:
+            return error_response(too_large, 413)
+
+        try:
+            payload = json.loads(raw.decode('utf-8')) if raw else None
+        except (UnicodeDecodeError, ValueError):
+            payload = None
+
+        claims = getattr(g, 'token_claims', None) or {}
+        identity = _MIRID_VM_NAME_RE.search(str(claims.get('xms_mirid') or ''))
+        if identity and identity.group('name').lower() != hostname.lower():
+            logger.warning("Refused a heartbeat for %s from the identity of VM %s.", hostname, identity.group('name'))
+            if denial_audit_allowed(claims.get('oid')):
+                audit('host.heartbeat', 'vm', hostname, AUDIT_DENIED, {
+                    'reason': 'The caller is the identity of a different VM.',
+                    'callerVm': identity.group('name'),
+                })
+            return error_response("A host can only report its own heartbeat.", 403)
+
+        document, problem = normalize_heartbeat(payload)
+        if problem:
+            return error_response(problem, 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC RecordHostHeartbeat @Hostname = %s, @HeartbeatJson = %s",
+                    (hostname, json.dumps(document))
+                )
+                row = cursor.fetchone()
+            conn.commit()
+
+        result = (row or {}).get('Result')
+        if result == 'NotFound':
+            return error_response(f"No VM found with Hostname {hostname}.", 404)
+        if result != 'Recorded':
+            logger.error("RecordHostHeartbeat returned %s for %s.", result, hostname)
+            return error_response("Unable to record the heartbeat.", 500)
+
+        return jsonify({'Hostname': row.get('Hostname'), 'ReceivedAtUtc': row.get('ReceivedAtUtc')}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while recording a heartbeat from %s.", hostname)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to record a heartbeat from %s.", hostname)
+        return error_response("Unable to record the heartbeat.", 500)
+
+
+def version_tuple(value):
+    """'1.2.3' as (1, 2, 3); a suffix such as '-dev' is ignored. None when there is no number."""
+    if not isinstance(value, str):
+        return None
+    numbers = re.findall(r'\d+', re.split(r'[-+]', value, maxsplit=1)[0])
+    if not numbers:
+        return None
+    parts = [int(number) for number in numbers[:4]]
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+def heartbeat_stale_after(reconcile_interval_seconds):
+    try:
+        interval = int(reconcile_interval_seconds or LINUX_HOST_SETTING_BOUNDS['ReconcileIntervalSeconds'][2])
+    except (TypeError, ValueError):
+        interval = LINUX_HOST_SETTING_BOUNDS['ReconcileIntervalSeconds'][2]
+    return max(HEARTBEAT_STALE_MINIMUM_SECONDS, HEARTBEAT_STALE_INTERVALS * interval)
+
+
+def agent_is_outdated(agent_version, script_versions, expected_version):
+    """True when the agent, or any one of its scripts, is older than the expected version."""
+    expected = version_tuple(expected_version)
+    reported = version_tuple(agent_version)
+    if reported is None or (expected and reported < expected):
+        return True
+    for version in (script_versions or {}).values():
+        parsed = version_tuple(version)
+        if parsed is None or (expected and parsed < expected):
+            return True
+    return False
+
+
+def _json_column(value, expected_type):
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, expected_type) else None
+
+
+def host_health(row, expected_version):
+    """One host's health entry, with the flags an operator needs to act on.
+
+    Heartbeat-derived problems (xrdp, NFS, disk) are only flagged from a heartbeat that is
+    still current, because stale data would be misleading. A powered-off host is expected to
+    be silent, so it is never flagged as stale or missing a heartbeat.
+    """
+    power_on = row.get('PowerState') == 'On'
+    age = row.get('HeartbeatAgeSeconds')
+    stale_after = heartbeat_stale_after(row.get('ReconcileIntervalSeconds'))
+    reporting = age is not None and age <= stale_after
+    script_versions = _json_column(row.get('ScriptVersionsJson'), dict)
+
+    flags = []
+    if power_on:
+        if age is None:
+            flags.append('no-heartbeat')
+        elif not reporting:
+            flags.append('stale')
+
+        if reporting:
+            if row.get('XrdpActive') is False:
+                flags.append('xrdp-down')
+            if row.get('NfsReachable') is False:
+                flags.append('nfs-unreachable')
+            disk = row.get('RootDiskFreePct')
+            if disk is not None and disk < LOW_DISK_FREE_PERCENT:
+                flags.append('low-disk')
+
+    if age is not None and agent_is_outdated(row.get('AgentVersion'), script_versions, expected_version):
+        flags.append('agent-outdated')
+
+    current_version = row.get('CurrentSettingsVersion')
+    applied_version = row.get('AppliedSettingsVersion')
+    if power_on and current_version and (applied_version is None or applied_version < current_version):
+        flags.append('settings-drift')
+
+    load = row.get('LoadAverage')
+    return serialize_for_json({
+        'VMID': row.get('VMID'),
+        'Hostname': row.get('Hostname'),
+        'PowerState': row.get('PowerState'),
+        'NetworkStatus': row.get('NetworkStatus'),
+        'VmStatus': row.get('VmStatus'),
+        'DrainRequested': bool(row.get('DrainRequested')),
+        'CleanupPending': bool(row.get('CleanupPending')),
+        'Username': row.get('Username'),
+        'Status': 'off' if not power_on else ('attention' if flags else 'healthy'),
+        'Flags': flags,
+        'Reporting': reporting,
+        'LastHeartbeatUtc': row.get('LastHeartbeatUtc'),
+        'HeartbeatAgeSeconds': age,
+        'AgentVersion': row.get('AgentVersion'),
+        'ScriptVersions': script_versions,
+        'AppliedSettingsVersion': applied_version,
+        'CurrentSettingsVersion': current_version,
+        'OsId': row.get('OsId'),
+        'OsVersion': row.get('OsVersion'),
+        'OsName': row.get('OsName'),
+        'KernelVersion': row.get('KernelVersion'),
+        'Desktop': row.get('Desktop'),
+        'XrdpVersion': row.get('XrdpVersion'),
+        'XrdpActive': row.get('XrdpActive'),
+        'NfsReachable': row.get('NfsReachable'),
+        'NfsMountCount': row.get('NfsMountCount'),
+        'LoadAverage': float(load) if load is not None else None,
+        'CpuCount': row.get('CpuCount'),
+        'MemoryAvailableMb': row.get('MemoryAvailableMb'),
+        'MemoryTotalMb': row.get('MemoryTotalMb'),
+        'RootDiskFreePct': row.get('RootDiskFreePct'),
+        'UptimeSeconds': row.get('UptimeSeconds'),
+        'SessionCount': row.get('SessionCount'),
+        'Sessions': _json_column(row.get('SessionsJson'), list) or [],
+    })
+
+
+def summarize_host_health(hosts):
+    summary = {'Total': len(hosts), 'PoweredOn': 0, 'Reporting': 0, 'Healthy': 0, 'Attention': 0, 'Off': 0}
+    summary.update({counter: 0 for counter in HEALTH_FLAGS.values()})
+
+    for host in hosts:
+        if host['Status'] == 'off':
+            summary['Off'] += 1
+        else:
+            summary['PoweredOn'] += 1
+            summary['Healthy' if host['Status'] == 'healthy' else 'Attention'] += 1
+        if host['Reporting']:
+            summary['Reporting'] += 1
+        for flag in host['Flags']:
+            summary[HEALTH_FLAGS[flag]] += 1
+
+    return summary
+
+
+@app.route('/api/hosts/health', methods=['GET'])
+@token_required(READ_ROLES)
+def get_host_health():
+    """Every host's latest heartbeat with health flags and a fleet summary.
+
+    ?hostname= narrows it to one host, for the host agent card on a VM's details page.
+    ?summary=true leaves the hosts out, for the dashboard, which refreshes every 30 seconds.
+    """
+    try:
+        hostname = (request.args.get('hostname') or '').strip() or None
+        if hostname and not HEARTBEAT_HOSTNAME_RE.match(hostname):
+            return error_response("The hostname is not valid.", 400)
+        summary_only = str(request.args.get('summary') or '').strip().lower() in ('1', 'true', 'yes')
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetHostHealth @Hostname = %s", (hostname,))
+                rows = cursor.fetchall() or []
+
+        hosts = [host_health(row, EXPECTED_HOST_AGENT_VERSION) for row in rows]
+        first = rows[0] if rows else {}
+
+        body = {
+            'ExpectedAgentVersion': EXPECTED_HOST_AGENT_VERSION,
+            'CurrentSettingsVersion': first.get('CurrentSettingsVersion'),
+            'StaleAfterSeconds': heartbeat_stale_after(first.get('ReconcileIntervalSeconds')),
+            'Summary': summarize_host_health(hosts),
+        }
+        if not summary_only:
+            body['Hosts'] = hosts
+
+        return jsonify(body), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading fleet health.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read fleet health.")
+        return error_response("Unable to retrieve fleet health.", 500)
+
+# ===============================
+# Audit APIs
+
+
+class AuditFilterError(Exception):
+    """An audit log filter the caller must correct. The message names the field."""
+
+    def __init__(self, client_message):
+        super().__init__(client_message)
+        self.client_message = client_message
+
+
+_AUDIT_TIME_FORMATS = ('%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M')
+
+
+def parse_audit_time(value, field, end_of_day=False):
+    """A UTC date (YYYY-MM-DD) or ISO-8601 UTC time, as a naive UTC datetime.
+
+    A bare date for the end of a range means the whole of that day, so it becomes the next
+    midnight: the procedure's upper bound is exclusive.
+    """
+    text = str(value or '').strip()
+    if not text:
+        return None
+    if text[-1:] in ('Z', 'z'):
+        text = text[:-1]
+
+    try:
+        day = datetime.strptime(text, '%Y-%m-%d')
+        return day + timedelta(days=1) if end_of_day else day
+    except ValueError:
+        pass
+
+    for time_format in _AUDIT_TIME_FORMATS:
+        try:
+            return datetime.strptime(text, time_format)
+        except ValueError:
+            continue
+
+    raise AuditFilterError(f"{field} must be a date (YYYY-MM-DD) or an ISO-8601 UTC time.")
+
+
+def _audit_filter(value, max_length):
+    text = str(value or '').strip()
+    return text[:max_length] or None
+
+
+def _audit_item(row):
+    item = {key: value for key, value in row.items() if key not in ('TotalCount', 'DetailJson')}
+    item['Detail'] = _json_column(row.get('DetailJson'), (dict, list))
+    return item
+
+
+@app.route('/api/audit', methods=['GET'])
+@token_required(READ_ROLES)
+def get_audit_log():
+    """Audit entries, newest first, paged and filtered like the history endpoints."""
+    try:
+        args = request.args
+        try:
+            start = parse_audit_time(args.get('from'), 'from')
+            end = parse_audit_time(args.get('to'), 'to', end_of_day=True)
+        except AuditFilterError as e:
+            return error_response(e.client_message, 400)
+
+        outcome = _audit_filter(args.get('outcome'), 16)
+        if outcome and outcome.lower() not in AUDIT_OUTCOMES:
+            return error_response("outcome must be success, failure or denied.", 400)
+
+        page = coerce_optional_int(args.get('page'), default=1, minimum=1)
+        per_page = coerce_optional_int(args.get('per_page'), default=DEFAULT_PAGE_SIZE, minimum=1, maximum=AUDIT_MAX_PAGE_SIZE)
+        offset = (page - 1) * per_page
+
+        filters = (
+            start,
+            end,
+            _audit_filter(args.get('actor'), 256),
+            _audit_filter(args.get('action'), 64),
+            _audit_filter(args.get('targetType'), 32),
+            _audit_filter(args.get('target'), 256),
+            outcome.lower() if outcome else None,
+        )
+        statement = (
+            "EXEC GetAuditLogPaged @From = %s, @To = %s, @Actor = %s, @Action = %s, @TargetType = %s, "
+            "@TargetId = %s, @Outcome = %s, @Offset = %s, @PageSize = %s"
+        )
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(statement, filters + (offset, per_page))
+                rows = cursor.fetchall() or []
+
+                # As in run_history_query: an out-of-range page must still report the total.
+                if not rows and offset > 0:
+                    cursor.execute(statement, filters + (0, 1))
+                    probe = cursor.fetchall() or []
+                    total = int(probe[0].get('TotalCount') or 0) if probe else 0
+                else:
+                    total = int(rows[0].get('TotalCount') or 0) if rows else 0
+
+        return jsonify(serialize_for_json({
+            'items': [_audit_item(row) for row in rows],
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'total_pages': (total + per_page - 1) // per_page if per_page else 0,
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading the audit log.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read the audit log.")
+        return error_response("Unable to retrieve the audit log.", 500)
+
+
+@app.route('/api/audit/purge', methods=['POST'])
+@token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
+def purge_audit_log():
+    """Remove audit entries older than AUDIT_RETENTION_DAYS. The scheduled task runs it daily.
+
+    Not decorated with @audited: the purge is recorded below with what it removed, whoever
+    called it.
+    """
+    try:
+        deleted = 0
+        more_remaining = True
+        batches = 0
+        deadline = time.monotonic() + AUDIT_PURGE_TIME_BUDGET_SECONDS
+
+        # pymssql keeps one transaction open until commit, so each call deletes a single batch
+        # and commits it; the locks it holds never outlast one batch.
+        try:
+            with db_connection() as conn:
+                while more_remaining and batches < AUDIT_PURGE_MAX_BATCHES and time.monotonic() < deadline:
+                    with conn.cursor(as_dict=True) as cursor:
+                        cursor.execute(
+                            "EXEC PurgeAuditLog @RetentionDays = %s, @BatchSize = %s, @MaxBatches = 1",
+                            (AUDIT_RETENTION_DAYS, AUDIT_PURGE_BATCH_SIZE)
+                        )
+                        row = cursor.fetchone() or {}
+                    conn.commit()
+
+                    deleted += int(row.get('Deleted') or 0)
+                    more_remaining = bool(row.get('MoreRemaining'))
+                    batches += 1
+        except Exception:
+            # The batches already committed stay deleted, so record them.
+            if deleted:
+                audit('audit.purge', 'audit', None, AUDIT_FAILURE, {
+                    'deleted': deleted,
+                    'retentionDays': AUDIT_RETENTION_DAYS,
+                    'moreRemaining': True,
+                })
+            raise
+
+        audit('audit.purge', 'audit', None, AUDIT_SUCCESS, {
+            'deleted': deleted,
+            'retentionDays': AUDIT_RETENTION_DAYS,
+            'moreRemaining': more_remaining,
+        })
+
+        return jsonify({
+            'Deleted': deleted,
+            'RetentionDays': AUDIT_RETENTION_DAYS,
+            'MoreRemaining': more_remaining,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while purging the audit log.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to purge the audit log.")
+        return error_response("Unable to purge the audit log.", 500)
 
 # ===============================
 # Error Handlers

@@ -67,3 +67,48 @@ export function describeSeconds(seconds: number | null | undefined): string {
 export function classNames(...values: Array<string | false | null | undefined>): string {
   return values.filter(Boolean).join(' ');
 }
+
+/**
+ * How long ago something happened, from an age in seconds the broker computed
+ * against its own clock, so no time zone is ever guessed.
+ */
+export function formatAge(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
+    return DASH;
+  }
+  if (seconds < 45) {
+    return 'just now';
+  }
+  if (seconds < 90) {
+    return '1 min ago';
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)} min ago`;
+  }
+  if (seconds < 86400) {
+    const hours = Math.round(seconds / 3600);
+    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  }
+  const days = Math.round(seconds / 86400);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+/**
+ * An ISO-8601 UTC timestamp from the newer endpoints, shown as
+ * 'YYYY-MM-DD HH:MM:SS UTC'. Anything else is shown as sent.
+ */
+export function formatUtc(value: string | null | undefined): string {
+  if (isBlank(value)) {
+    return DASH;
+  }
+  const text = String(value);
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?Z$/.exec(text);
+  return match ? `${match[1]} ${match[2]} UTC` : text;
+}
+
+export function formatMegabytes(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return DASH;
+  }
+  return value >= 1024 ? `${(value / 1024).toFixed(1)} GB` : `${value} MB`;
+}

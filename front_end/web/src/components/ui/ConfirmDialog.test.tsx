@@ -77,4 +77,38 @@ describe('ConfirmDialog', () => {
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Working…' })).toBeDisabled();
   });
+
+  describe('with a required confirmation', () => {
+    it('keeps the action disabled until the hostname is typed, ignoring case', async () => {
+      const { onConfirm } = setup({ requireText: 'linux-host-01', confirmLabel: 'Stop' });
+      const input = screen.getByLabelText(/Type linux-host-01 to confirm/);
+      const stop = screen.getByRole('button', { name: 'Stop' });
+
+      // The input, not the disabled button, takes focus.
+      expect(input).toHaveFocus();
+      expect(stop).toBeDisabled();
+
+      await userEvent.type(input, 'linux-host-0');
+      expect(stop).toBeDisabled();
+
+      await userEvent.type(input, '1');
+      expect(stop).toBeEnabled();
+      await userEvent.clear(input);
+      await userEvent.type(input, '  LINUX-HOST-01 ');
+      await userEvent.click(stop);
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
+
+    it('confirms with Enter once the text matches, and not before', async () => {
+      const { onConfirm } = setup({ requireText: 'linux-host-01' });
+      const input = screen.getByLabelText(/to confirm/);
+
+      await userEvent.type(input, 'wrong{Enter}');
+      expect(onConfirm).not.toHaveBeenCalled();
+
+      await userEvent.clear(input);
+      await userEvent.type(input, 'linux-host-01{Enter}');
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+    });
+  });
 });

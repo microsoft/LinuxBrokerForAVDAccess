@@ -3,7 +3,7 @@
 import logging
 
 import requests
-from flask import jsonify, session
+from flask import jsonify, request, session
 
 from function_api import NotAuthenticated, api_get, api_post
 from function_authentication import login_required
@@ -92,6 +92,19 @@ def register_route_host_settings(app):
         result = api_post('/hosts/settings/apply', {'hostnames': [hostname]} if hostname else {}, timeout=APPLY_TIMEOUT_SECONDS)
 
         return jsonify(_apply_summary(result))
+
+    @app.route(f'{API_PREFIX}/hosts/settings/history')
+    @login_required
+    @broker_endpoint("Unable to retrieve the host settings history. Please try again later.")
+    def ui_host_settings_history():
+        return jsonify(api_get('/hosts/settings/history'))
+
+    @app.route(f'{API_PREFIX}/hosts/health')
+    @login_required
+    @broker_endpoint("Unable to retrieve fleet health. Please try again later.")
+    def ui_host_health():
+        hostname = (request.args.get('hostname') or '').strip()
+        return jsonify(api_get('/hosts/health', params={'hostname': hostname} if hostname else None))
 
 
 def _apply_summary(result):

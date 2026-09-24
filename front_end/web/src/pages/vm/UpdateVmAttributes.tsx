@@ -93,8 +93,11 @@ export function UpdateVmAttributes() {
       />
 
       <Notice tone="warning" className="mb-4">
-        This data repair page only edits broker records. It does not start or stop Azure VMs.
-        Leaving an assignment by moving a checked-out or released host to Available or Maintenance schedules cleanup.
+        <strong>Data repair only.</strong> This page edits the broker&apos;s records and nothing
+        else: it never starts, stops or restarts the Azure VM, and never signs a user out. To act
+        on the host, use Start, Stop, Restart, Drain or Return to service on its details page.
+        Moving a checked-out or released host to Available or Maintenance here ends the assignment
+        and schedules cleanup of the user&apos;s account.
       </Notice>
 
       <GlassCard className="max-w-3xl p-6">

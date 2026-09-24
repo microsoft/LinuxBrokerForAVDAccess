@@ -157,3 +157,40 @@ HOST_DOCUMENT_OPTIONAL_BOOLEANS = ('PreserveSessionsOnDisconnect',)
 # disables idle enforcement entirely. Any non-zero value must clear this floor so a typo
 # cannot start disconnecting active users almost immediately.
 IDLE_TIMEOUT_MINIMUM_SECONDS = 300
+
+# ===============================
+# Audit log
+#
+# Entries older than this are removed by the daily purge (POST /api/audit/purge, called by
+# the scheduled task). dbo.PurgeAuditLog clamps to the same range. Every entry is also
+# written to the linuxbroker.api logger, so Application Insights keeps its own copy for as
+# long as its retention allows.
+AUDIT_RETENTION_DAYS = env_int('AUDIT_RETENTION_DAYS', 365, minimum=30, maximum=3650)
+AUDIT_DETAIL_MAX_CHARS = 4000
+AUDIT_MAX_PAGE_SIZE = 1000
+# The purge deletes one batch per call and commits it before the next, so audit writes wait
+# for at most one batch. dbo.PurgeAuditLog caps a batch at 2,000 rows, under SQL Server's
+# 5,000-lock escalation threshold, which would otherwise lock the whole table. A backlog
+# bigger than one run can clear, for example after lowering AUDIT_RETENTION_DAYS, is worked
+# off by the following daily runs.
+AUDIT_PURGE_BATCH_SIZE = 2000
+AUDIT_PURGE_MAX_BATCHES = 500
+# The scheduled task waits 120 seconds for the purge to answer.
+AUDIT_PURGE_TIME_BUDGET_SECONDS = 90
+
+# ===============================
+# Linux host agent
+#
+# The version every script in linux_host/ declares as LINUXBROKER_AGENT_VERSION. Bump it
+# with any change to those scripts; api/tests checks they agree. Fleet health flags a host
+# whose reported agent or scripts are older. The override exists so an operator can silence
+# the flag during a staged rollout.
+HOST_AGENT_VERSION = '1.0.0'
+EXPECTED_HOST_AGENT_VERSION = (os.environ.get('EXPECTED_HOST_AGENT_VERSION') or '').strip() or HOST_AGENT_VERSION
+
+HEARTBEAT_MAX_BYTES = 32 * 1024
+HEARTBEAT_MAX_SESSIONS = 50
+# A heartbeat is stale after this many reconcile intervals, and never sooner than the floor.
+HEARTBEAT_STALE_INTERVALS = 3
+HEARTBEAT_STALE_MINIMUM_SECONDS = 180
+LOW_DISK_FREE_PERCENT = 10

@@ -8,7 +8,7 @@ import requests
 import azure.functions as func
 from azure.identity import ManagedIdentityCredential
 
-# version  - 0.12
+# version  - 0.13
 
 app = func.FunctionApp()
 
@@ -372,6 +372,49 @@ def ScalingVMs(mytimer: func.TimerRequest) -> None:
         logging.error(f"Error executing time-triggered scaling logic: {str(e)}")
 
 
+# ===============================
+# Audit Tasks
+# ===============================
+
+
+@app.function_name(name="PurgeAuditLog")
+@app.timer_trigger(schedule="0 17 3 * * *", arg_name="mytimer", run_on_startup=False)
+def PurgeAuditLog(mytimer: func.TimerRequest) -> None:
+    """Remove audit entries older than the API's AUDIT_RETENTION_DAYS, once a day at 03:17 UTC."""
+    logging.info("Audit log purge started.")
+
+    if mytimer.past_due:
+        logging.info("The timer is past due!")
+
+    try:
+        if not API_BASE_URL:
+            logging.error("API_URL not set in environment variables.")
+            return
+
+        headers = get_headers()
+        if headers is None:
+            return
+
+        response = requests.post(
+            api_url("audit/purge"),
+            headers=headers,
+            timeout=LONG_REQUEST_TIMEOUT_SECONDS,
+        )
+
+        if response.status_code == 200:
+            logging.info(f"Audit log purge completed: {response.text}")
+        elif response.status_code == 404:
+            # An API older than the audit log has nothing to purge.
+            logging.warning("The broker API does not have an audit log yet; nothing to purge.")
+        else:
+            logging.error(
+                f"Failed to purge the audit log. Status code: {response.status_code}. Response: {response.text}"
+            )
+    except Exception as e:
+        logging.error(f"Error executing the audit log purge: {str(e)}")
+
+
 trigger_return_released_vms = ReturnReleasedVMs
 test_vm_connectivity = TestVMConnectivity
 time_triggered_scaling = ScalingVMs
+purge_audit_log = PurgeAuditLog

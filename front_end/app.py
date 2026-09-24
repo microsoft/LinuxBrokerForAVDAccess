@@ -19,6 +19,7 @@ from route_authentication import register_route_authentication
 from route_vm_management import register_route_vm_management
 from route_scaling_management import register_route_scaling_management
 from route_host_settings import register_route_host_settings
+from route_audit import register_route_audit
 
 # ===============================
 # Flask App
@@ -26,7 +27,7 @@ from route_host_settings import register_route_host_settings
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('FLASK_KEY')
 app.config['SESSION_TYPE'] = 'filesystem'
-app.config['VERSION'] = '0.115'
+app.config['VERSION'] = '0.116'
 # Tokens stay valid for the life of the session rather than expiring after an
 # hour, so a long-lived management page does not start rejecting submissions.
 app.config['WTF_CSRF_TIME_LIMIT'] = None
@@ -177,13 +178,14 @@ def ui_session():
 @app.route(f'{API_PREFIX}/dashboard')
 @login_required
 def ui_dashboard():
-    """Aggregate pool counters plus the most recent scaling activity.
+    """Aggregate pool counters, fleet health counters and the most recent scaling activity.
 
-    Registered here rather than in a route module because it spans both VM and
-    scaling data.
+    Registered here rather than in a route module because it spans VM, host and scaling
+    data.
     """
     stats = None
     recent_activity = []
+    fleet_health = None
     api_error = False
 
     try:
@@ -201,9 +203,19 @@ def ui_dashboard():
     except (NotAuthenticated, requests.exceptions.RequestException, ValueError) as e:
         logger.warning("Unable to load recent scaling activity for dashboard: %s", e)
 
+    # Also secondary, and absent when the broker API predates host heartbeats.
+    try:
+        health = api_get('/hosts/health', params={'summary': 'true'})
+        summary = health.get('Summary') if isinstance(health, dict) else None
+        if isinstance(summary, dict):
+            fleet_health = dict(summary, ExpectedAgentVersion=health.get('ExpectedAgentVersion'))
+    except (NotAuthenticated, requests.exceptions.RequestException, ValueError) as e:
+        logger.warning("Unable to load fleet health for dashboard: %s", e)
+
     return jsonify({
         "stats": stats,
         "recentActivity": recent_activity,
+        "fleetHealth": fleet_health,
         "apiError": api_error,
     })
 
@@ -282,6 +294,11 @@ register_route_scaling_management(app)
 # Linux Host Settings
 
 register_route_host_settings(app)
+
+# ===============================
+# Audit log
+
+register_route_audit(app)
 
 # ===============================
 # Main

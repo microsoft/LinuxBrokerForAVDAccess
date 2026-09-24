@@ -5,10 +5,16 @@ import { queryKeys } from '../lib/queryClient';
 import type {
   ActivityLogEntry,
   ApplySettingsResult,
+  AuditEntry,
   Dashboard,
+  DrainResult,
+  FleetHealth,
   HostSettings,
   HostSettingsPage,
+  HostSettingsVersion,
   Paged,
+  PowerActionResult,
+  PowerSyncResult,
   SaveSettingsResult,
   ScalingRule,
   ScalingRuleInput,
@@ -57,8 +63,8 @@ export function useVmHistory(search: string) {
 /**
  * Invalidate everything derived from the VM list.
  *
- * Any VM mutation can change the dashboard counters and the host settings drift
- * table as well as the list itself, so they are refreshed together.
+ * Any VM mutation can change the dashboard counters, the host settings drift table and
+ * fleet health as well as the list itself, so they are refreshed together.
  */
 function useVmInvalidation() {
   const queryClient = useQueryClient();
@@ -67,6 +73,7 @@ function useVmInvalidation() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.vms });
     void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard });
     void queryClient.invalidateQueries({ queryKey: queryKeys.hostSettings });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.fleetHealth });
   };
 }
 
@@ -146,6 +153,80 @@ export function useCheckoutVm() {
   });
 }
 
+/* ----------------------------------------------------------- host actions */
+
+export type PowerAction = 'start' | 'stop' | 'restart';
+
+export interface PowerActionInput {
+  vmid: number;
+  action: PowerAction;
+  /** The hostname, typed by an administrator acting on a host that is in use. */
+  confirm?: string;
+  mode?: 'PowerOff' | 'Deallocate';
+}
+
+export function usePowerAction() {
+  const invalidate = useVmInvalidation();
+
+  return useMutation({
+    mutationFn: ({ vmid, action, confirm, mode }: PowerActionInput) =>
+      apiPost<PowerActionResult>(`/vms/${vmid}/${action}`, {
+        ...(confirm ? { confirm } : {}),
+        ...(mode ? { mode } : {}),
+      }),
+    onSuccess: invalidate,
+  });
+}
+
+export function useSetVmDrain() {
+  const invalidate = useVmInvalidation();
+
+  return useMutation({
+    mutationFn: (input: { vmid: number; enabled: boolean }) =>
+      apiPost<DrainResult>(`/vms/${input.vmid}/${input.enabled ? 'drain' : 'undrain'}`),
+    onSuccess: invalidate,
+  });
+}
+
+export function useSyncPowerStates() {
+  const invalidate = useVmInvalidation();
+
+  return useMutation({
+    mutationFn: () => apiPost<PowerSyncResult>('/vms/sync'),
+    onSuccess: invalidate,
+  });
+}
+
+/* ------------------------------------------------------------ fleet health */
+
+export function useFleetHealth(refreshMs: number | false = false) {
+  return useQuery({
+    queryKey: queryKeys.fleetHealth,
+    queryFn: ({ signal }) => apiGet<FleetHealth>('/hosts/health', signal),
+    refetchInterval: refreshMs,
+  });
+}
+
+/** One host's heartbeat, for the host agent card on its details page. */
+export function useHostHealth(hostname: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.hostHealth(hostname ?? ''),
+    queryFn: ({ signal }) =>
+      apiGet<FleetHealth>(`/hosts/health?hostname=${encodeURIComponent(hostname ?? '')}`, signal),
+    enabled: Boolean(hostname),
+  });
+}
+
+/* --------------------------------------------------------------- audit log */
+
+export function useAuditLog(search: string) {
+  return useQuery({
+    queryKey: queryKeys.audit(search),
+    queryFn: ({ signal }) => apiGet<Paged<AuditEntry>>(`/audit${search}`, signal),
+    placeholderData: (previous) => previous,
+  });
+}
+
 /* ---------------------------------------------------------------- scaling */
 
 export function useScalingRules() {
@@ -220,6 +301,13 @@ export function useHostSettings() {
   return useQuery({
     queryKey: queryKeys.hostSettings,
     queryFn: ({ signal }) => apiGet<HostSettingsPage>('/hosts/settings', signal),
+  });
+}
+
+export function useHostSettingsHistory() {
+  return useQuery({
+    queryKey: queryKeys.hostSettingsHistory,
+    queryFn: ({ signal }) => apiGet<HostSettingsVersion[]>('/hosts/settings/history', signal),
   });
 }
 

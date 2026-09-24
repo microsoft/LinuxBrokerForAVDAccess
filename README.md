@@ -79,8 +79,10 @@ What an administrator can do depends on their role (see [RBAC Permissions](#rbac
 2. **Manage VMs**:
    - **Add VMs**: Register new Linux VMs into the system.
    - **Delete VMs**: Remove VMs from the system.
-   - **Maintenance**: Take an unassigned host out of rotation, and put it back.
+   - **Start, stop and restart**: Power a host on or off in Azure from its row's **Host** menu or its page. Stopping or restarting a host a user is signed in to needs `FullAccess` and the hostname typed to confirm, and stopping it ends the user's assignment.
+   - **Drain and return to service**: Take a host out of rotation without disturbing its current user. A draining host takes no new users and moves to maintenance when its assignment ends; an idle host moves to maintenance at once.
    - **Release and return**: End a user's assignment early. A returned host stays **Cleanup pending** until the user's account has been removed from it; cleanup is retried automatically, or on demand with **Retry cleanup**.
+   - **Sync power state**: Correct every host's recorded power state from Azure now.
    - **Repair VM records**: **Update attributes** edits what the broker has recorded for a host (FullAccess only). It does not start or stop the VM.
 3. **Manage Scaling**:
    - **Edit the scaling rule**: Set the minimum and maximum number of running VMs, the scale-up and scale-down thresholds and increments, and whether scale-down powers VMs off or deallocates them.
@@ -88,8 +90,11 @@ What an administrator can do depends on their role (see [RBAC Permissions](#rbac
    - **Edit the fleet-wide profile**: Change the reconnect grace period, whether disconnected sessions are kept alive, the reconcile interval, watcher timings, idle session timeout, and screen lock policy without editing or redeploying any script.
    - **Apply Now**: Optionally push the profile to hosts immediately instead of waiting for them to pick it up.
    - **Review drift**: See which hosts have applied the current settings version.
+   - **Version history**: See what changed in each saved version of the profile, and who saved it.
 5. **Monitor System**:
-   - **View VM Details**: Access detailed information about VMs.
+   - **View VM Details**: Access detailed information about VMs, including what the host's agent last reported.
+   - **Fleet health**: See each host's last heartbeat, agent version, OS, desktop, xrdp and NFS state, load, memory, disk and sessions, and which hosts need attention, without SSH.
+   - **Audit log**: See who did what: every portal action, every denied attempt, and the changes the broker makes on its own, with CSV export.
    - **View Scaling Activity Logs**: Monitor scaling activities and history, including why each run did or did not act.
    - **View VM History**: Track the usage and status changes of VMs.
 
@@ -101,9 +106,9 @@ The solution uses Role-Based Access Control (RBAC) to secure access. Every Broke
 
   | Role | Allows |
   | --- | --- |
-  | `Reader` | Viewing everything in the portal. |
-  | `Operator` | Everything `Reader` can do, plus releasing and returning hosts, retrying cleanup, turning maintenance on and off, and pushing host settings with **Apply Now**. |
-  | `FullAccess` | Everything `Operator` can do, plus adding and deleting VMs, repairing VM records, checking out a VM for testing, and editing the scaling rule and host settings. |
+  | `Reader` | Viewing everything in the portal, including fleet health and the audit log. |
+  | `Operator` | Everything `Reader` can do, plus releasing and returning hosts, retrying cleanup, draining hosts and returning them to service, starting hosts, stopping and restarting hosts no one is using, syncing power states, and pushing host settings with **Apply Now**. |
+  | `FullAccess` | Everything `Operator` can do, plus stopping and restarting hosts in use, adding and deleting VMs, repairing VM records, checking out a VM for testing, and editing the scaling rule and host settings. |
 
   The portal signs users in with the delegated `access_as_user` scope, but the scope alone no longer grants anything: a signed-in user without one of these roles sees a **No access** page. The deployment assigns `FullAccess` to the user who runs it. When upgrading, see [Upgrading an existing deployment](#upgrading-an-existing-deployment).
 - **Broker Agent (AVD Hosts)**:
@@ -285,17 +290,19 @@ Before running `azd up`, review the detailed guide and set any environment-speci
 
 ## Upgrading an existing deployment
 
-This release changes behavior you should plan for. The full procedure is in [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md#upgrading-to-role-based-access-and-working-scaling).
+Upgrading from a release before role-based access changes behavior you should plan for. The full procedure is in [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md#upgrading-to-role-based-access-and-working-scaling).
 
 - **Scaling starts and stops VMs.** Earlier releases recorded scaling decisions without sending them to Azure. Review the scaling rule (the minimum is now at least 1) before upgrading, because idle hosts above the minimum will be powered off.
 - **Portal access needs a role.** Assign `Reader`, `Operator` or `FullAccess` to every administrator before upgrading, or deploy once with `allowLegacyScopeAccess=true` and turn it off after the roles are assigned.
 - **Returned hosts are cleaned before reuse.** A host is not handed to the next user until the previous user's account is gone, and the released-VM sweep now follows the configured grace period instead of a fixed 30 minutes.
-- **Update the Linux hosts.** Run `deploy/Migrate-LinuxHostReleaseAgent.ps1` so hosts get single-call provisioning, the lease handling that keeps a signed-in user's host pending, and support for keeping sessions alive. Hosts that are not migrated keep working with the previous behavior.
+- **Update the Linux hosts.** Run `deploy/Migrate-LinuxHostReleaseAgent.ps1` so hosts get single-call provisioning, the lease handling that keeps a signed-in user's host pending, support for keeping sessions alive, and heartbeats. Hosts that are not migrated keep working with the previous behavior.
 - **Size the database.** The API now serves requests concurrently and caps its SQL connections per worker (`DB_MAX_CONCURRENCY`). The default Basic tier suits small pools; set `sqlDatabaseSkuName` to `S1` or higher for larger fleets.
+
+The admin console foundations (audit log, host actions and drain, fleet health) need no new Azure resources or roles. See [Upgrading To The Admin Console Foundations](deploy/DEPLOYMENT.md#upgrading-to-the-admin-console-foundations).
 
 ## Roadmap
 
-Planned work beyond this release, including a sessions view, fleet health, an audit log, scaling schedules, Ubuntu desktop and RHEL 10 support, and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
+Planned work beyond this release, including a sessions view, scaling schedules, usage trends, rolling maintenance, Ubuntu desktop and RHEL 10 support, and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contributing
 

@@ -40,9 +40,10 @@ Why the BFF stays:
 | `function_api.py` | Authenticated Broker API helpers, request timeouts, JSON decoding, dashboard VM summary retrieval, history filter parsing, and paged history calls. |
 | `function_bff.py` | Shared JSON plumbing: the `@broker_endpoint` error decorator, request-body helpers, and the paged history envelope. |
 | `route_authentication.py` | Sign in, token callback, and sign out. Browser redirects, not JSON. |
-| `route_vm_management.py` | VM JSON endpoints. |
+| `route_vm_management.py` | VM JSON endpoints, including the host actions (start, stop, restart, drain, return to service, power sync). |
 | `route_scaling_management.py` | Scaling rule and scaling history JSON endpoints. |
-| `route_host_settings.py` | Linux host settings JSON endpoints. |
+| `route_host_settings.py` | Linux host settings, settings history and fleet health JSON endpoints. |
+| `route_audit.py` | Audit log JSON and CSV export endpoints. |
 | `static/dist/` | Vite build output. **Generated, not committed.** |
 | `static/favicon.ico`, `static/images/` | The only hand-maintained static assets. |
 | `web/` | The React application. |
@@ -53,9 +54,9 @@ Inside `web/`:
 | Path | Purpose |
 | --- | --- |
 | `src/styles/theme.css` | The whole design system: tokens, glass surfaces, badges, controls, tables, and the accessibility fallbacks. |
-| `src/lib/` | `api.ts` (fetch wrapper, CSRF, 401 handling), `queryClient.ts`, `format.ts`, `theme.ts`, `vmLifecycle.ts`. |
+| `src/lib/` | `api.ts` (fetch wrapper, CSRF, 401 handling), `queryClient.ts`, `format.ts`, `theme.ts`, `vmLifecycle.ts`, `settingsDiff.ts`. |
 | `src/types/broker.ts` | Every shape the BFF returns. |
-| `src/hooks/` | `useSession`, `useBroker` (all TanStack Query hooks), `useHistoryQuery`, `useAutoRefresh`, `useConfirm`. |
+| `src/hooks/` | `useSession`, `useBroker` (all TanStack Query hooks), `useHistoryQuery`, `useAutoRefresh`, `useConfirm`, `useHostActions`. |
 | `src/components/Icon.tsx` | The 37 hand-authored inline SVG icons. |
 | `src/components/ui/` | Design system primitives. |
 | `src/components/layout/` | App shell, nav, breadcrumbs, theme toggle. |
@@ -71,7 +72,7 @@ a path that serves the SPA shell.
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/ui/session` | Bootstrap: `authenticated`, `user`, `version`, `csrfToken`, `roles`, `permissions`, `legacyAccess`, `permissionsUnavailable`. Not behind `@login_required`, because the signed-out landing page needs a `200`. |
-| GET | `/api/ui/dashboard` | `{stats, recentActivity, apiError}`. |
+| GET | `/api/ui/dashboard` | `{stats, recentActivity, fleetHealth, apiError}`. `fleetHealth` is the broker's fleet health summary, or `null` when the broker predates heartbeats. |
 | GET | `/api/ui/vms` | |
 | GET | `/api/ui/vms/<vmid>` | |
 | POST | `/api/ui/vms` | Returns `201`. |
@@ -81,6 +82,12 @@ a path that serves the SPA shell.
 | POST | `/api/ui/vms/<vmid>/return` | Keyed by **VMID**, matching the broker. |
 | POST | `/api/ui/vms/<vmid>/cleanup` | Retries cleanup for a pending previous assignment. |
 | POST | `/api/ui/vms/<vmid>/maintenance` | Body `{enabled: boolean}`. |
+| POST | `/api/ui/vms/<vmid>/start` | |
+| POST | `/api/ui/vms/<vmid>/stop` | Body `{mode?: "PowerOff" \| "Deallocate", confirm?: hostname}`. The broker requires `confirm`, and the Admin role, for a host in use. |
+| POST | `/api/ui/vms/<vmid>/restart` | Body `{confirm?: hostname}`, as for stop. |
+| POST | `/api/ui/vms/<vmid>/drain` | |
+| POST | `/api/ui/vms/<vmid>/undrain` | Return to service. |
+| POST | `/api/ui/vms/sync` | Corrects recorded power states from Azure; allows the broker 60 seconds. |
 | POST | `/api/ui/vms/checkout` | Strips `password` and `LeaseId` before returning the broker response. |
 | GET | `/api/ui/vms/history` | Paged. Filters in the query string. |
 | GET | `/api/ui/scaling/rules` | |
@@ -93,6 +100,10 @@ a path that serves the SPA shell.
 | GET | `/api/ui/hosts/settings` | `{settings, hosts}`. |
 | POST | `/api/ui/hosts/settings` | |
 | POST | `/api/ui/hosts/settings/apply` | Returns a `message` and `tone` the client shows verbatim; uses `APPLY_TIMEOUT_SECONDS`. |
+| GET | `/api/ui/hosts/settings/history` | Every saved settings version, newest first. |
+| GET | `/api/ui/hosts/health` | Fleet health, passed through; `?hostname=` for one host. |
+| GET | `/api/ui/audit` | Paged. Filters `from`, `to`, `actor`, `action`, `targetType`, `target`, `outcome` in the query string. |
+| GET | `/api/ui/audit/export.csv` | Every entry matching the filters, up to 10,000, as CSV. Cells that a spreadsheet would run as a formula are prefixed with `'`. |
 
 Server-rendered routes that are **not** JSON: `/login`, `/getAToken`, `/logout`, `/health`,
 `/favicon.ico`.
@@ -112,9 +123,9 @@ when the Flask session lacks cached permissions. Anonymous sessions always retur
 - `legacyAccess`: true when the API granted access via the legacy delegated scope toggle.
 - `permissionsUnavailable`: true when `/me` could not be fetched; the shell shows a retry panel.
 
-Gating convention: `read` can view pages, `operate` can run VM lifecycle actions and Apply Now,
-and `admin` can create/delete/edit broker records or save settings. Authenticated users without
-`read` see the No access page.
+Gating convention: `read` can view pages, `operate` can run VM lifecycle and host actions and
+Apply Now, and `admin` can create/delete/edit broker records, save settings, and stop or restart a
+host a user is signed in to. Authenticated users without `read` see the No access page.
 
 ### Error contract
 
@@ -149,6 +160,13 @@ Routes mirror the URLs the Jinja portal served, so existing bookmarks and runboo
 resolve: `/`, `/profile`, `/vms`, `/vms/add`, `/vms/checkout`, `/vms/history`, `/vms/:vmid`,
 `/vms/:vmid/update`, `/scaling/rules`, `/scaling/rules/create`, `/scaling/rules/history`,
 `/scaling/rules/:ruleid`, `/scaling/rules/:ruleid/update`, `/scaling/log`, `/settings/hosts`.
+Phase 2 added `/vms/health` (fleet health, filterable with `?show=`) and `/audit`.
+
+Host actions (Start, Stop, Stop and deallocate, Restart, Drain, Return to service) share one
+definition in `useHostActions`: the host list offers them in each row's **Host** menu
+(`ActionMenu`), and the host's page lists them in its Actions card. Every confirmation names the
+host and its current user. Stopping or restarting a host a user is signed in to also asks for the
+hostname to be typed (`ConfirmDialog`'s `requireText`), which the broker requires too.
 
 ## Design System
 

@@ -3,22 +3,25 @@ import { Link } from 'react-router-dom';
 
 import { DataTable } from '../../components/data/DataTable';
 import type { Column } from '../../components/data/DataTable';
+import { ActionMenu } from '../../components/ui/ActionMenu';
 import { Badge, NetworkBadge, PowerBadge, VmStatusBadge } from '../../components/ui/Badge';
 import { Button, ButtonLink } from '../../components/ui/Button';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader } from '../../components/ui/Feedback';
 import { useConfirm } from '../../hooks/useConfirm';
-import { useCleanupVm, useDeleteVm, useReleaseVm, useReturnVm, useSetVmMaintenance, useVms } from '../../hooks/useBroker';
+import { useCleanupVm, useDeleteVm, useReleaseVm, useReturnVm, useSyncPowerStates, useVms } from '../../hooks/useBroker';
+import { useHostActions } from '../../hooks/useHostActions';
 import { useToast } from '../../components/ui/Toast';
 import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
 import { valueOrDash } from '../../lib/format';
-import { canRelease, canRetryCleanup, canReturn, canToggleMaintenance } from '../../lib/vmLifecycle';
+import { canRelease, canRetryCleanup, canReturn } from '../../lib/vmLifecycle';
 import type { Vm } from '../../types/broker';
 
 export function VmList() {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const { confirm, dialog } = useConfirm();
+  const hostActions = useHostActions();
   const { data: vms, isPending, error } = useVms();
   const can = useCan();
 
@@ -26,7 +29,16 @@ export function VmList() {
   const returnVm = useReturnVm();
   const deleteVm = useDeleteVm();
   const cleanupVm = useCleanupVm();
-  const maintenanceVm = useSetVmMaintenance();
+  const syncPower = useSyncPowerStates();
+
+  async function syncPowerStates() {
+    try {
+      const result = await syncPower.mutateAsync();
+      showToast(result.message, result.PowerSyncFailed ? 'warning' : 'success');
+    } catch (cause) {
+      showToast(errorMessage(cause, 'Unable to sync power states from Azure.'), 'danger');
+    }
+  }
 
   function confirmRelease(vm: Vm) {
     confirm({
@@ -80,28 +92,12 @@ export function VmList() {
     });
   }
 
-  function confirmMaintenance(vm: Vm) {
-    const enabled = vm.VmStatus !== 'Maintenance';
-    confirm({
-      title: `${enabled ? 'Enable' : 'Disable'} maintenance for ${vm.Hostname}`,
-      body: `${enabled ? 'Put' : 'Return'} ${vm.Hostname} ${enabled ? 'in maintenance' : 'to available'}?`,
-      confirmLabel: enabled ? 'Enable maintenance' : 'Disable maintenance',
-      variant: enabled ? 'warning' : 'primary',
-      onConfirm: async () => {
-        try {
-          const result = await maintenanceVm.mutateAsync({ vmid: vm.VMID, enabled });
-          showToast(result.message || `Maintenance ${enabled ? 'enabled' : 'disabled'} for '${vm.Hostname}'.`, 'success');
-        } catch (cause) {
-          showToast(errorMessage(cause, `Unable to update maintenance for '${vm.Hostname}'.`), 'danger');
-        }
-      },
-    });
-  }
-
   function confirmDelete(vm: Vm) {
     confirm({
       title: `Delete ${vm.Hostname}`,
-      body: `Permanently delete ${vm.Hostname} (VMID ${vm.VMID}) from the broker? This cannot be undone.`,
+      body: vm.Username
+        ? `Permanently delete ${vm.Hostname} (VMID ${vm.VMID}) from the broker? ${vm.Username} is assigned to it, and the broker stops tracking that assignment. This cannot be undone.`
+        : `Permanently delete ${vm.Hostname} (VMID ${vm.VMID}) from the broker? This cannot be undone.`,
       confirmLabel: 'Delete',
       variant: 'danger',
       onConfirm: async () => {
@@ -165,6 +161,9 @@ export function VmList() {
       render: (vm) => (
         <span className="flex flex-wrap gap-1">
           <VmStatusBadge value={vm.VmStatus} />
+          {vm.DrainRequested ? (
+            <Badge tone="warn" icon="box-arrow-right">Draining</Badge>
+          ) : null}
           {vm.CleanupPending ? (
             <Badge tone="warn" icon="alert-triangle">Cleanup pending</Badge>
           ) : null}
@@ -225,11 +224,7 @@ export function VmList() {
               Retry cleanup
             </Button>
           ) : null}
-          {can.operate && canToggleMaintenance(vm) ? (
-            <Button size="sm" variant="warning" icon="wrench" onClick={() => confirmMaintenance(vm)} aria-label={`Toggle maintenance for ${vm.Hostname}`}>
-              {vm.VmStatus === 'Maintenance' ? 'End maintenance' : 'Maintenance'}
-            </Button>
-          ) : null}
+          <ActionMenu label={`Host actions for ${vm.Hostname}`} text="Host" items={hostActions.actionsFor(vm)} />
           {can.admin ? (
             <Button
               size="sm"
@@ -254,9 +249,17 @@ export function VmList() {
         icon="server"
         actions={
           <>
+            <ButtonLink to="/vms/health" size="sm" icon="activity">
+              Fleet health
+            </ButtonLink>
             <ButtonLink to="/vms/history" size="sm" icon="clock">
               History
             </ButtonLink>
+            {can.operate ? (
+              <Button size="sm" icon="refresh" disabled={syncPower.isPending} onClick={() => void syncPowerStates()}>
+                {syncPower.isPending ? 'Syncing…' : 'Sync power state'}
+              </Button>
+            ) : null}
             {can.admin ? (
               <>
                 <ButtonLink to="/vms/checkout" size="sm" icon="person">
@@ -305,6 +308,7 @@ export function VmList() {
       ) : null}
 
       {dialog}
+      {hostActions.dialog}
     </>
   );
 }

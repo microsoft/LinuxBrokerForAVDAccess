@@ -85,6 +85,59 @@ const HOST_SETTINGS = {
 
 const EMPTY_PAGE = { items: [], page: 1, perPage: 10, total: 0, totalPages: 0 };
 
+const FLEET_HEALTH = {
+  ExpectedAgentVersion: '1.0.0',
+  CurrentSettingsVersion: 3,
+  StaleAfterSeconds: 180,
+  Summary: {
+    Total: 2, PoweredOn: 2, Reporting: 1, Healthy: 1, Attention: 1, Off: 0, NoHeartbeat: 1,
+    Stale: 0, XrdpDown: 0, NfsUnreachable: 0, LowDisk: 0, AgentOutdated: 0, SettingsDrift: 0,
+  },
+  Hosts: [
+    {
+      VMID: 1, Hostname: 'linux-host-01', PowerState: 'On', NetworkStatus: 'Reachable', VmStatus: 'Available',
+      DrainRequested: false, CleanupPending: false, Username: null, Status: 'healthy', Flags: [], Reporting: true,
+      LastHeartbeatUtc: '2026-09-24T12:00:00.000Z', HeartbeatAgeSeconds: 30, AgentVersion: '1.0.0',
+      ScriptVersions: { 'release-session.sh': '1.0.0' }, AppliedSettingsVersion: 3, CurrentSettingsVersion: 3,
+      OsId: 'rhel', OsVersion: '9.4', OsName: 'Red Hat Enterprise Linux 9.4', KernelVersion: '5.14.0',
+      Desktop: 'gnome', XrdpVersion: '0.10.1', XrdpActive: true, NfsReachable: true, NfsMountCount: 1,
+      LoadAverage: 0.25, CpuCount: 4, MemoryAvailableMb: 8000, MemoryTotalMb: 16000, RootDiskFreePct: 70,
+      UptimeSeconds: 3600, SessionCount: 0, Sessions: [],
+    },
+    {
+      VMID: 2, Hostname: 'linux-host-02', PowerState: 'On', NetworkStatus: 'Reachable', VmStatus: 'CheckedOut',
+      DrainRequested: false, CleanupPending: false, Username: 'alice@contoso.com', Status: 'attention',
+      Flags: ['no-heartbeat'], Reporting: false, LastHeartbeatUtc: null, HeartbeatAgeSeconds: null,
+      AgentVersion: null, ScriptVersions: null, AppliedSettingsVersion: 3, CurrentSettingsVersion: 3,
+      OsId: null, OsVersion: null, OsName: null, KernelVersion: null, Desktop: null, XrdpVersion: null,
+      XrdpActive: null, NfsReachable: null, NfsMountCount: null, LoadAverage: null, CpuCount: null,
+      MemoryAvailableMb: null, MemoryTotalMb: null, RootDiskFreePct: null, UptimeSeconds: null,
+      SessionCount: null, Sessions: [],
+    },
+  ],
+};
+
+const AUDIT_PAGE = {
+  items: [
+    {
+      AuditId: 7, OccurredAtUtc: '2026-09-24T12:00:00.000Z', ActorOid: 'oid-alice', ActorName: 'alice@contoso.com',
+      ActorType: 'user', Action: 'vm.stop', TargetType: 'vm', TargetId: 'linux-host-02', Outcome: 'success',
+      Detail: { endedAssignment: true, status: 202 }, CorrelationId: 'abc123',
+    },
+    {
+      AuditId: 6, OccurredAtUtc: '2026-09-24T11:00:00.000Z', ActorOid: 'oid-task', ActorName: 'task-linuxbroker',
+      ActorType: 'service', Action: 'scaling.power_on', TargetType: 'vm', TargetId: 'linux-host-01', Outcome: 'failure',
+      Detail: null, CorrelationId: null,
+    },
+  ],
+  page: 1, perPage: 25, total: 2, totalPages: 1,
+};
+
+const SETTINGS_HISTORY = [
+  { ...HOST_SETTINGS.settings, SettingsVersion: 3, UpdatedBy: 'alice@contoso.com', ValidFromUtc: '2026-09-01T10:00:00Z', ValidToUtc: null, IsCurrent: true },
+  { ...HOST_SETTINGS.settings, SettingsVersion: 2, GracePeriodSeconds: 600, UpdatedBy: null, ValidFromUtc: '2026-08-01T10:00:00Z', ValidToUtc: '2026-09-01T10:00:00Z', IsCurrent: false },
+];
+
 function jsonResponse(body: unknown, status = 200) {
   return {
     ok: status < 400,
@@ -94,6 +147,7 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 let session: typeof SESSION = SESSION;
+let dashboard: typeof DASHBOARD & { fleetHealth?: unknown } = DASHBOARD;
 const requests: string[] = [];
 
 function stubFetch() {
@@ -102,14 +156,19 @@ function stubFetch() {
     requests.push(url);
 
     if (url.startsWith('/api/ui/session')) return jsonResponse(session);
-    if (url.startsWith('/api/ui/dashboard')) return jsonResponse(DASHBOARD);
+    if (url.startsWith('/api/ui/dashboard')) return jsonResponse(dashboard);
     if (url.startsWith('/api/ui/vms/history')) return jsonResponse(EMPTY_PAGE);
+    const action = /^\/api\/ui\/vms\/(\d+)\/(start|stop|restart|drain|undrain)$/.exec(url);
+    if (action) return jsonResponse({ VMID: Number(action[1]), Hostname: 'linux-host-02', message: `${action[2]} requested.` });
     if (url.startsWith('/api/ui/vms/')) return jsonResponse(VMS[0]);
     if (url.startsWith('/api/ui/vms')) return jsonResponse(VMS);
     if (url.startsWith('/api/ui/scaling/rules/history')) return jsonResponse(EMPTY_PAGE);
     if (url.startsWith('/api/ui/scaling/log')) return jsonResponse(EMPTY_PAGE);
     if (url.startsWith('/api/ui/scaling/rules')) return jsonResponse(RULES);
+    if (url.startsWith('/api/ui/hosts/health')) return jsonResponse(FLEET_HEALTH);
+    if (url.startsWith('/api/ui/hosts/settings/history')) return jsonResponse(SETTINGS_HISTORY);
     if (url.startsWith('/api/ui/hosts/settings')) return jsonResponse(HOST_SETTINGS);
+    if (url.startsWith('/api/ui/audit')) return jsonResponse(AUDIT_PAGE);
 
     return jsonResponse({ error: 'Unexpected request' }, 404);
   });
@@ -133,6 +192,7 @@ function renderApp(route: string) {
 
 beforeEach(() => {
   session = SESSION;
+  dashboard = DASHBOARD;
   requests.length = 0;
   setCsrfToken(null);
   vi.stubGlobal('fetch', stubFetch());
@@ -234,6 +294,8 @@ describe('App', () => {
     ['/scaling/rules/history', 'Scaling rule history'],
     ['/scaling/log', 'Scaling activity log'],
     ['/settings/hosts', 'Linux host settings'],
+    ['/vms/health', 'Fleet health'],
+    ['/audit', 'Audit log'],
   ])('mounts %s', async (route, heading) => {
     renderApp(route);
     expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
@@ -349,5 +411,104 @@ describe('App', () => {
     expect(
       await screen.findByText('Unable to delete VM. Please try again later.'),
     ).toBeInTheDocument();
+  });
+
+  it('stops a host in use only after the administrator types its hostname', async () => {
+    renderApp('/vms');
+    await userEvent.click(await screen.findByRole('button', { name: 'Host actions for linux-host-02' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Stop' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/alice@contoso.com is signed in to linux-host-02/)).toBeInTheDocument();
+    const stop = within(dialog).getByRole('button', { name: 'Stop' });
+    expect(stop).toBeDisabled();
+
+    await userEvent.type(within(dialog).getByLabelText(/to confirm/), 'linux-host-02');
+    await userEvent.click(stop);
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/vms/2/stop',
+      );
+      expect(call).toBeDefined();
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ confirm: 'linux-host-02' });
+    });
+    expect(await screen.findByText('stop requested.')).toBeInTheDocument();
+  });
+
+  it('lets an operator drain a host in use but not stop it', async () => {
+    session = { ...SESSION, roles: ['Operator'], permissions: { read: true, operate: true, admin: false } };
+    renderApp('/vms');
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Host actions for linux-host-02' }));
+    const inUse = screen.getAllByRole('menuitem').map((item) => item.textContent);
+    expect(inUse).toEqual(['Drain']);
+    await userEvent.keyboard('{Escape}');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Host actions for linux-host-01' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Restart', 'Stop', 'Stop and deallocate', 'Drain',
+    ]);
+
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Drain' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/It has no user, so it moves to maintenance now/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Drain' }));
+    await waitFor(() => expect(requests).toContain('/api/ui/vms/1/drain'));
+  });
+
+  it('hides host actions from readers', async () => {
+    session = { ...SESSION, roles: ['Reader'], permissions: { read: true, operate: false, admin: false } };
+    renderApp('/vms');
+    await screen.findByRole('link', { name: 'linux-host-01' });
+    expect(screen.queryByRole('button', { name: /Host actions for/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sync power state' })).not.toBeInTheDocument();
+  });
+
+  it('summarises fleet health on the dashboard when the broker reports it', async () => {
+    dashboard = { ...DASHBOARD, fleetHealth: { ...FLEET_HEALTH.Summary, ExpectedAgentVersion: '1.0.0' } };
+    renderApp('/');
+
+    expect(await screen.findByText('1 of 2 powered-on hosts reporting')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '1 no heartbeat' })).toHaveAttribute('href', '/vms/health?show=no-heartbeat');
+  });
+
+  it('filters fleet health by flag', async () => {
+    renderApp('/vms/health');
+
+    expect(await screen.findByRole('link', { name: 'linux-host-02' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'linux-host-01' })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /No heartbeat/ }));
+
+    expect(screen.getByRole('button', { name: /No heartbeat/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('link', { name: 'linux-host-01' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'linux-host-02' })).toBeInTheDocument();
+  });
+
+  it('shows the host agent card on a host page', async () => {
+    renderApp('/vms/1');
+    expect(await screen.findByText('Red Hat Enterprise Linux 9.4')).toBeInTheDocument();
+    expect(requests).toContain('/api/ui/hosts/health?hostname=linux-host-01');
+  });
+
+  it('lists audit entries with filters that can be exported', async () => {
+    renderApp('/audit?action=vm.&outcome=success');
+
+    expect(await screen.findByText('vm.stop')).toBeInTheDocument();
+    expect(screen.getByText('Service identity')).toBeInTheDocument();
+    expect(requests.some((url) => url.startsWith('/api/ui/audit?action=vm.&outcome=success&page=1&per_page=25'))).toBe(true);
+    expect(screen.getByRole('link', { name: 'Export CSV' })).toHaveAttribute(
+      'href',
+      '/api/ui/audit/export.csv?action=vm.&outcome=success',
+    );
+  });
+
+  it('shows what changed in each settings version', async () => {
+    renderApp('/settings/hosts');
+
+    expect(await screen.findByRole('heading', { name: 'Version history' })).toBeInTheDocument();
+    expect(await screen.findByText('Saved by alice@contoso.com', { exact: false })).toBeInTheDocument();
+    expect(screen.getByText('600 s (10 minutes)', { exact: false })).toBeInTheDocument();
   });
 });
