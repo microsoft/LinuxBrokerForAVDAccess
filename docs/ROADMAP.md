@@ -88,7 +88,8 @@ The portal today is a well-built view over the broker's tables. Phase 2 turns it
 operations console: it shows live state, offers actions that change the real world, and
 answers "who did what".
 
-**Status: In progress.** 2.1, 2.2 and 2.4 are done; the other items are planned.
+**Status: Done.** Every item has shipped. Each has a **Shipped** note on where it differs from the design
+below it.
 
 ### 2.1 Real host actions and drain
 
@@ -103,12 +104,13 @@ design below:
   Azure refuses the stop, the assignment is given back along with the power state.
 - Stop and restart of an assigned host both need Admin plus the hostname typed to confirm. The
   procedure re-checks the assignment, so a race cannot slip past the check.
-- Drain has **no deadline**. Forcing a signed-in user off needs `session-control.sh` (2.3).
+- Drain has **no deadline**. An operator can sign the user out (2.3), and a maintenance run can set a
+  deadline after a warning (2.9).
 - Scaling leaves draining hosts out of capacity entirely, so a drained pool starts replacements
   within `MaxVMs` rather than looking healthy.
 - Drain and Return to service replace the Phase 1 maintenance toggle in the portal. The
   maintenance endpoint stays for compatibility and now clears the drain flag.
-- No broadcast before a restart yet; that comes with 2.10.
+- No broadcast before a restart. An operator can message the host's sessions first (2.10).
 
 **Why.** "Update attributes" (`front_end/web/src/pages/vm/UpdateVmAttributes.tsx`,
 `sql_queries/017_create_procedure-UpdateVmAttributes.sql`) edits `PowerState`,
@@ -193,7 +195,29 @@ every host reports its agent version.
 
 ### 2.3 Sessions and users
 
-**Status: Planned** · depends on 2.2 (heartbeat carries session state) and Phase 1 roles
+**Status: Done** · depends on 2.2 (heartbeat carries session state) and Phase 1 roles
+
+**Shipped.** `sql_queries/088`–`100`, the sessions, users and session action endpoints, the allowlisted
+`session-control.sh` in host agent 1.1.0, and the portal's **Sessions** and user pages. Where it
+differs from the design below:
+
+- **Sign-out** ends the desktop through `session-control.sh`, then the API releases the host itself
+  through the lease-qualified `ReleaseVm`, so the grace period starts without depending on the
+  agent's one-shot release. "And return the host" also ends the assignment.
+- **A profile reset is requested, then applied at the user's next new assignment**, on the assigned
+  host, just before `create-user.sh` mounts the home, instead of renaming the home at once. That
+  removes the race with a concurrent checkout and needs no separate runner host. It is applied only
+  when this is the user's only assignment, no host is still cleaning them up, and no current
+  heartbeat reports them elsewhere; otherwise it stays pending. The request can be cancelled.
+- The old profile is kept as `<user>.reset-<UTC timestamp>` on the share and never deleted. Removing
+  old profiles is manual (see `deploy/DEPLOYMENT.md`).
+- The API derives each session's state: active, disconnected, released (grace running), connecting,
+  not connected, cleanup pending, unmanaged and unknown. The dashboard's Attention panel (2.6) flags
+  users who were given a host and never connected.
+- `session-control.sh` acts only on broker accounts: a UID of at least 1000, a member of `tsusers`,
+  and never `root` or `avdadmin`. A host with an older agent answers `409`, naming the migration
+  script, and `Migrate-LinuxHostReleaseAgent.ps1` now carries on past a failed or powered-off host.
+- **Deferred:** a "reconnect to a specific host" override for support cases.
 
 **Why.** The commonest helpdesk question is "where is this user and why can't they
 connect?" Today you search the VM list for a username, and nothing shows connected versus
@@ -268,7 +292,28 @@ attributable.
 
 ### 2.5 Scaling policy and schedules
 
-**Status: Planned** · depends on Phase 1 scaling fixes
+**Status: Done** · depends on Phase 1 scaling fixes
+
+**Shipped.** `sql_queries/101`–`114`, the scaling policy, schedule and preview endpoints, and the
+portal's **Scaling policy** page, now the first page of the Scaling section. Where it differs from the
+design below:
+
+- **Windows override the default rule** and keep its up/down ratios, rather than copying AVD's phases
+  and capacity threshold. Outside every enabled window the default rule applies. "Add business day
+  windows" creates ramp-up, peak and ramp-down windows from the default rule.
+- **One policy time zone** for every window (a Windows zone name from `sys.time_zone_info`, `UTC` by
+  default), not one per schedule. Windows may run past midnight. Enabled windows may not overlap,
+  which SQL checks under a lock and the API and the editor report, so no contiguity rule is needed.
+- The preview is `TriggerScalingLogic` itself as a dry run, so it can never disagree with a real run.
+  It can also resolve another time or try proposed values before they are saved.
+- **`MinVMs` wins over `MaxVMs`:** the over-maximum scale-down never takes serviceable hosts below
+  the minimum. Draining and maintenance hosts count toward the maximum, so without this a drain or a
+  maintenance run could make scaling stop ready hosts.
+- Each run waits briefly for the scaling lock instead of skipping, stamps `StartRequestedAt` on every
+  start (2.6 measures start-to-ready from it), and logs its phase and counts. A manual stop uses the
+  active phase's stop mode.
+- **Deferred:** a per-phase "force sign-out of idle or disconnected users" for off-peak. The grace and
+  idle timeout host settings already reclaim those sessions fleet-wide.
 
 **Why.** Phase 1 makes a single rule authoritative. Real pools have daily patterns, and AVD
 scaling plans solve that with ramp-up, peak, ramp-down and off-peak phases in a named time
@@ -293,7 +338,25 @@ effect before saving.
 
 ### 2.6 Dashboard trends and unmet demand
 
-**Status: Planned** · depends on Phase 1 scaling fixes
+**Status: Done** · depends on Phase 1 scaling fixes
+
+**Shipped.** `sql_queries/115`–`123`, `GET /api/metrics/utilization` and `/api/metrics/attention`, and
+the dashboard's **Capacity**, **Checkout health** and **Attention** panels. Where it differs from the
+design below:
+
+- Checkout outcomes are `Assigned`, `Reused`, `NoneAvailable`, `ProvisionFailed` and `Error`.
+  Recording one never fails the checkout.
+- Start-to-ready is measured for every start, by scaling or by hand: the start stamps
+  `StartRequestedAt`, and `SetVmNetworkStatus` records the time to the first reachable probe in
+  `dbo.HostStartEvents`. A restarting host that has not gone down yet keeps its stamp, and stamps
+  older than two hours are ignored.
+- Events are kept for `CHECKOUT_EVENT_RETENTION_DAYS` (default 90) and purged by the daily audit
+  purge call, so an older task build purges them too.
+- The chart is an inline SVG component with a dash pattern per line, markers for denied checkouts, a
+  pointer readout and a table view. No chart library.
+- The Attention panel also covers hosts stuck in cleanup, users given a host who never connected,
+  hosts a maintenance run could not patch (2.9), and the fleet health flags, grouped. It appears only
+  when something needs an operator.
 
 **Why.** The dashboard shows point-in-time counts. `VmScalingActivityLog` already has a
 row every 5 minutes (running, in use, actions), which is enough for utilization trends.
@@ -316,7 +379,26 @@ What's missing is **unmet demand**: users who were told "No Linux host is availa
 
 ### 2.7 Operator-grade host list
 
-**Status: Planned** · depends on 2.1
+**Status: Done** · depends on 2.1
+
+**Shipped.** `sql_queries/141`–`143`, the paged `GET /api/vms`, `GET /api/vms/import/candidates` and
+`POST /api/vms/import`, the rebuilt **Hosts** list, and the **Import from Azure** page. Where it
+differs from the design below:
+
+- The list always pages, filters and sorts on the server, with its view in the URL. The BFF pages
+  the bare list of an older API itself.
+- Status chips also cover Draining and Cleanup pending. The optional columns are IP address, OS,
+  agent, settings, last heartbeat, sessions, VMID and last updated, remembered per browser.
+- The bulk bar also offers Return to service, Send message (2.10) and Start maintenance (2.9, which
+  opens a new run with the hosts chosen). Hosts an action does not apply to are skipped and named,
+  the rest run four at a time, and each host's outcome is reported. Bulk delete needs `delete` typed.
+- **Import needs DNS.** A candidate must resolve as `<hostname>.<DOMAIN_NAME>`, the name every SSH
+  call uses: the API cannot read NICs, and a typed-in IP would let the IP-based probe mark a host
+  ready that every SSH call fails on. Imports go through a new `ImportLinuxHostVm` rather than
+  `RegisterLinuxHostVm`, and start `Unreachable` with Azure's power state, so no one is given a host
+  before the probe confirms it.
+- **Test brokering** sits in the host list's Admin **Tools** menu with Import from Azure and Add a
+  host manually.
 
 **Design.**
 - Row selection with bulk actions: Drain, Start, Stop, Apply settings, Delete (Admin).
@@ -333,7 +415,15 @@ What's missing is **unmet demand**: users who were told "No Linux host is availa
 
 ### 2.8 Navigation and readability
 
-**Status: Planned** · after 2.3, so the new sections exist
+**Status: Done** · after 2.3, so the new sections exist
+
+**Shipped.** Every URL is unchanged. Where it differs from the list below:
+
+- Hosts and Scaling show their pages as tabs under the navigation.
+- Broker timestamps are read as UTC, as Azure SQL stores them, in every format the API returns.
+  History and audit tables also show the absolute time.
+- Shortcuts: `/` to search, `g` then a letter to change section, `?` for help. They never fire while
+  typing and can be turned off in Profile (WCAG 2.1.4). Compact rows are set in Profile too.
 
 - Navigation: **Overview · Hosts · Sessions · Scaling · Settings · Audit**.
 - Hostname-first identifiers. VMID becomes a secondary detail.
@@ -349,7 +439,29 @@ What's missing is **unmet demand**: users who were told "No Linux host is availa
 
 ### 2.9 Rolling maintenance and patching
 
-**Status: Planned** · depends on 2.1 (drain) and 2.2 (health)
+**Status: Done** · depends on 2.1 (drain) and 2.2 (health)
+
+**Shipped.** `sql_queries/124`–`140`, the maintenance endpoints, the allowlisted `patch-host.sh` in host
+agent 1.1.0, the task's `AdvanceMaintenance` timer (every minute, task 0.14), and the portal's
+**Maintenance** pages. Where it differs from the design below:
+
+- **Patching runs over SSH** through `patch-host.sh` (dnf on RHEL 8 and 9, yum on RHEL 7, apt on
+  Ubuntu; security updates or all), not Azure Update Manager or Run Command. It needs no new Azure
+  permission and works in sovereign and air-gapped clouds. The reboot is the Azure restart the API
+  already has. Restart-only runs work with older agents.
+- Hosts are chosen from a list, with a helper that picks a share of those shown, rather than by a
+  saved filter.
+- A run waits for users by default. **Forced sign-out happens only in a run** whose admin set a
+  deadline, after a warning message; manual Drain keeps no deadline.
+- Admission shares the scaling lock and takes a ready host only while more than the minimum are
+  ready (the run's override, or the phase's `MinVMs`). While a ready host waits for a spare, scaling
+  keeps one more host on, never past `MaxVMs`.
+- Verification needs the host reachable, a heartbeat whose boot time is after the restart, and xrdp
+  active. Each host is put back the way it was found, including stopping one that was off.
+- A failed host stays drained for inspection and appears in the dashboard's Attention panel. A run
+  stops after too many failures and can pause after canary hosts.
+- Returning a host to service by hand is refused while the run is patching, restarting or verifying
+  it; before that, a manual return skips it.
 
 **Why.** Each host is single-user and has a live session. Patching means waiting for users
 to leave, which nobody wants to babysit.
@@ -371,7 +483,16 @@ Ubuntu, but needs extra permissions and is region-dependent in sovereign clouds.
 
 ### 2.10 Broadcast messages
 
-**Status: Planned** · depends on the 2.3 host script
+**Status: Done** · depends on the 2.3 host script
+
+**Shipped.** `POST /api/sessions/broadcast`, **Message everyone** on the Sessions page, and **Send
+message** in the host list's bulk bar. Where it differs from the design below:
+
+- Hosts run `session-control.sh message-all` in parallel, within a concurrency limit and a deadline
+  as Apply Now does. The result names each host's outcome (delivered, no session, agent too old,
+  failed) and the hosts there was no time to try. Every message is audited.
+- A restart does not broadcast by itself. Warning and then acting is what a maintenance run with a
+  deadline does (2.9).
 
 A portal action sends a notification to every active session, or to a filtered set ("host
 restarts in 10 minutes"). It reuses the `notify-send`/`xmessage` path in
@@ -741,6 +862,15 @@ A separate track, prioritized independently of the phases.
 | 2026-09 | Audit entries stay in SQL for `AUDIT_RETENTION_DAYS` (default 365) and are also sent to Application Insights. Routine agent traffic is not audited; denials are, up to 30 a minute per caller in each worker process. |
 | 2026-09 | Stopping a host a user is signed in to needs Admin and the typed hostname, and ends the assignment so the user gets a running host next time. Restart needs the same and keeps the assignment. |
 | 2026-09 | Drain has no deadline until forced sign-out exists (2.3). Draining hosts are left out of scaling capacity. |
+| 2026-09 | The rest of Phase 2 (2.3 and 2.5–2.10) ships in one PR, one commit per item, with one host agent rollout (1.1.0, adding `session-control.sh` and `patch-host.sh`). |
+| 2026-09 | Patching runs over SSH through the allowlisted `patch-host.sh`, not Azure Update Manager or Run Command: no new permissions, and it works in sovereign and air-gapped clouds. The reboot is the Azure restart the API already has. |
+| 2026-09 | Scaling schedules are time windows that override the single default rule, in one policy time zone, keeping the up/down ratios. Enabled windows may not overlap. |
+| 2026-09 | Forced sign-out happens only inside a maintenance run whose admin set a deadline, after a warning. The default is to wait, and manual Drain keeps no deadline. Off-peak forced sign-out per phase is deferred. |
+| 2026-09 | Sign-out releases the host through the broker, not the host agent. A profile reset is applied at the user's next new assignment and keeps the old profile, renamed; removing old profiles is manual. No "reconnect to a specific host" override yet. |
+| 2026-09 | Scale-down honors `MinVMs` over `MaxVMs`, and maintenance admission shares the scaling lock, so neither can take ready capacity below the minimum. |
+| 2026-09 | Import from Azure requires DNS (`<hostname>.<DOMAIN_NAME>`); there are no typed-in IPs, and imported hosts start unreachable until the probe reaches them. |
+| 2026-09 | Checkout and host-start events are kept for `CHECKOUT_EVENT_RETENTION_DAYS` (default 90) and purged with the audit log. |
+| 2026-09 | Broker timestamps are UTC; the portal shows relative times with the absolute UTC time as a tooltip. Keyboard shortcuts can be turned off. |
 
 ## Glossary
 

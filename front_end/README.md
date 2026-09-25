@@ -73,7 +73,9 @@ a path that serves the SPA shell.
 | --- | --- | --- |
 | GET | `/api/ui/session` | Bootstrap: `authenticated`, `user`, `version`, `csrfToken`, `roles`, `permissions`, `legacyAccess`, `permissionsUnavailable`. Not behind `@login_required`, because the signed-out landing page needs a `200`. |
 | GET | `/api/ui/dashboard` | `{stats, recentActivity, fleetHealth, apiError}`. `fleetHealth` is the broker's fleet health summary, or `null` when the broker predates heartbeats. |
-| GET | `/api/ui/vms` | |
+| GET | `/api/ui/vms` | With any of `page`, `per_page`, `q`, `status`, `sort` or `dir`, one page of the host list with status `counts`. When the broker API predates paging it answers a bare list, which the BFF filters, sorts and pages itself, adding `legacy: true`. Without those parameters, the bare list. |
+| GET | `/api/ui/vms/import/candidates` | Tagged Linux host VMs the broker does not know yet; allows the broker 90 seconds. |
+| POST | `/api/ui/vms/import` | Body `{hostnames: string[]}`, 1 to 100 valid hostnames. |
 | GET | `/api/ui/vms/<vmid>` | |
 | POST | `/api/ui/vms` | Returns `201`. |
 | POST | `/api/ui/vms/<vmid>/update-attributes` | |
@@ -97,6 +99,27 @@ a path that serves the SPA shell.
 | POST | `/api/ui/scaling/rules/<ruleid>/delete` | |
 | GET | `/api/ui/scaling/log` | Paged. |
 | GET | `/api/ui/scaling/rules/history` | Paged. |
+| GET | `/api/ui/scaling/policy` | The time zone, the default rule, the windows, and what applies now and next. |
+| POST | `/api/ui/scaling/policy` | Body `{timezone}`. |
+| GET | `/api/ui/scaling/timezones` | |
+| POST | `/api/ui/scaling/schedules` | Adds a window. |
+| POST | `/api/ui/scaling/schedules/<scheduleid>/update` | |
+| POST | `/api/ui/scaling/schedules/<scheduleid>/delete` | |
+| GET, POST | `/api/ui/scaling/preview` | What the next scaling run would do; a `POST` previews proposed values. |
+| GET | `/api/ui/metrics/utilization` | `?hours=24` or `168`. `{Available: false}` when the broker predates it, so the dashboard hides the charts. |
+| GET | `/api/ui/metrics/attention` | `{Available: false}` when the broker predates it. |
+| GET | `/api/ui/sessions` | `?state=` one session state. |
+| GET | `/api/ui/users` | `?q=` any part of the name. |
+| GET | `/api/ui/users/<username>` | |
+| POST | `/api/ui/sessions/<hostname>/<username>/signout` | Body `{returnHost?: boolean}`; allows the broker 120 seconds. |
+| POST | `/api/ui/sessions/<hostname>/<username>/message` | Body `{message}`, at most 500 characters. |
+| POST | `/api/ui/sessions/broadcast` | Body `{message, hostnames?}`; without `hostnames`, every host in use. |
+| POST | `/api/ui/users/<username>/reset-profile` | |
+| POST | `/api/ui/users/<username>/reset-profile/cancel` | |
+| GET | `/api/ui/maintenance/runs` | `{Available: false}` when the broker predates maintenance runs. |
+| GET | `/api/ui/maintenance/runs/<run_id>` | |
+| POST | `/api/ui/maintenance/runs` | Starts a run. |
+| POST | `/api/ui/maintenance/runs/<run_id>/<action>` | `pause`, `resume` or `cancel`. |
 | GET | `/api/ui/hosts/settings` | `{settings, hosts}`. |
 | POST | `/api/ui/hosts/settings` | |
 | POST | `/api/ui/hosts/settings/apply` | Returns a `message` and `tone` the client shows verbatim; uses `APPLY_TIMEOUT_SECONDS`. |
@@ -160,12 +183,22 @@ Routes mirror the URLs the Jinja portal served, so existing bookmarks and runboo
 resolve: `/`, `/profile`, `/vms`, `/vms/add`, `/vms/checkout`, `/vms/history`, `/vms/:vmid`,
 `/vms/:vmid/update`, `/scaling/rules`, `/scaling/rules/create`, `/scaling/rules/history`,
 `/scaling/rules/:ruleid`, `/scaling/rules/:ruleid/update`, `/scaling/log`, `/settings/hosts`.
-Phase 2 added `/vms/health` (fleet health, filterable with `?show=`) and `/audit`.
+Phase 2 added `/vms/health` (fleet health, filterable with `?show=`), `/vms/import` (Admin),
+`/vms/maintenance`, `/vms/maintenance/new` (Admin; `?hosts=a,b` preselects hosts), `/vms/maintenance/:runid`,
+`/sessions`, `/users/:username`, `/scaling` (the scaling policy), `/scaling/schedules/new` and
+`/scaling/schedules/:scheduleid` (Admin), and `/audit`. `/vms/checkout` is now **Test brokering**, reached
+from the host list's Tools menu.
+
+The navigation is **Overview · Hosts · Sessions · Scaling · Settings · Audit**. Hosts and Scaling
+show their pages as tabs (`SectionTabs`). Keyboard shortcuts (`/` to search, `g` then a letter
+to change section, `?` for help) and compact table rows are set in Profile and kept in
+`localStorage` (`lb-shortcuts`, `lb-density`); shortcuts never fire while typing and can be
+turned off.
 
 Host actions (Start, Stop, Stop and deallocate, Restart, Drain, Return to service) share one
-definition in `useHostActions`: the host list offers them in each row's **Host** menu
-(`ActionMenu`), and the host's page lists them in its Actions card. Every confirmation names the
-host and its current user. Stopping or restarting a host a user is signed in to also asks for the
+definition in `useHostActions`: the host list offers them, with release, return, retry cleanup, edit
+and delete, in each row's **Actions** menu (`useHostRowActions`), and the host's page lists them in its
+Actions card. Every confirmation names the host and its current user. Stopping or restarting a host a user is signed in to also asks for the
 hostname to be typed (`ConfirmDialog`'s `requireText`), which the broker requires too.
 
 ## Design System
@@ -220,6 +253,13 @@ Glassmorphism is easy to make unreadable. These are requirements, not preference
 | `HistoryView` | Filter bar + table + pager. The three history pages differ only by their columns. |
 | `ConfirmDialog` / `useConfirm` | Focus trap, Escape to cancel, restores focus on close. Names the specific resource. |
 | `ToastProvider` / `useToast` | Replaces Flask flash messages. |
+| `ActionMenu` | A menu button: arrow keys, Home and End move between items, Escape and Tab close it, and focus returns to the trigger. Renders nothing when there are no items. |
+| `MessageDialog` / `useBroadcastDialog` | Composes a message for one session or many, with the character limit the broker enforces. |
+| `RelativeTime` | "5 min ago" in a `<time>` element with the absolute UTC time as its tooltip, on one shared 30-second clock. Broker times are read as UTC whatever their format. |
+| `TimeSeriesChart` | Inline SVG line chart for the dashboard: a dash pattern per line, markers, a pointer readout and a table view. No chart library. |
+| `SectionTabs` | The tabs under the navigation for the Hosts and Scaling sections; the Import tab is Admin-only. |
+| `StatusChips`, `ColumnChooser`, `SortHeader`, `BulkResults` | The host list's status filter with counts, its optional columns (kept in `localStorage` under `lb-host-columns`), server-sorted headers with `aria-sort`, and each host's outcome after a bulk action. |
+| `LifecycleExplainer` | Available → Checked out → Released, and what release, return, cleanup, drain and maintenance each do. |
 
 ## Filters Live in the URL
 
@@ -232,6 +272,10 @@ each other's criteria, and keeps the session small. Dates are entered as `YYYY-M
 converted to the `MM/DD/YYYY` the stored procedures expect; the ignore flags omit the filter
 rather than sending the legacy `"null"` sentinel. `page` and `per_page` are clamped identically on
 both sides (`per_page` caps at 200), so the client and the BFF never disagree.
+
+The host list keeps its view in the URL the same way: `q`, `status`, `sort`, `dir`, `page` and
+`per_page`, leaving out the defaults so shared links stay short. The search is sent once typing
+pauses for 300 ms. The request to the BFF always carries every field, so it always answers a page.
 
 ## CSRF
 
@@ -344,7 +388,8 @@ Behaviour is tested on whichever side now owns it. Broadly: date conversion, ign
 semantics, pagination parameters, the legacy bare-list fallback, dashboard summary preference and
 degradation, CSRF, and the error-status mapping are **pytest**; VM lifecycle rules, pagination
 windowing, table sort and filter, the filter round-trip through the URL, badge accessibility,
-confirm-dialog behaviour, theme persistence, and the error page are **Vitest**.
+confirm-dialog behaviour, theme persistence, the error page, the chart, the schedule timeline,
+relative times, the host list's view, chips, columns and bulk actions, and the shortcuts are **Vitest**.
 
 `web/src/App.test.tsx` is the integration layer: it mounts the real `App` with `fetch` stubbed and
 walks every authenticated route, so a page that throws on mount, a missing provider, or a hook used
@@ -368,6 +413,8 @@ page.
 9. Report the outcome with `useToast`, using the `error` string from the BFF on failure.
 10. If the page belongs to a nav section, make sure its path is matched by `NAV_ITEMS` in
    `web/src/components/layout/NavBar.tsx`, or the active highlight will be wrong.
+   A page of the Hosts or Scaling section also needs its tab in `SECTIONS` in
+   `web/src/components/layout/SectionTabs.tsx`.
 
 ## What the Rewrite Changed
 
