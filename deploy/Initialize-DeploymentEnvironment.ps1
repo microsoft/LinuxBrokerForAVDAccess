@@ -1054,7 +1054,7 @@ Ensure-DefaultEnvValue -Key 'LINUX_HOST_SSH_PUBLIC_KEY' -ValueFactory { '' } | O
 Ensure-DefaultEnvValue -Key 'LINUX_HOST_SSH_PRIVATE_KEY' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostSshPublicKey' -ValueFactory { Get-AzdEnvValue -Key 'LINUX_HOST_SSH_PUBLIC_KEY' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostSshPrivateKey' -ValueFactory { Get-AzdEnvValue -Key 'LINUX_HOST_SSH_PRIVATE_KEY' } | Out-Null
-Ensure-DefaultEnvValue -Key 'linuxHostOsVersion' -ValueFactory { '24_04-lts' } | Out-Null
+Ensure-DefaultEnvValue -Key 'linuxHostOsVersion' -ValueFactory { '9-LVM' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostDisableScreenLock' -ValueFactory { 'true' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostVmSize' -ValueFactory { 'Standard_D2s_v5' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdVmSize' -ValueFactory { 'Standard_D8s_v5' } | Out-Null

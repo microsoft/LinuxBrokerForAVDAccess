@@ -100,7 +100,7 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `avdSessionHostCount`: number of AVD hosts to provision.
 - `linuxHostVmSize`: Linux host VM size.
 - `avdVmSize`: AVD host VM size.
-- `linuxHostOsVersion`: Linux image SKU. The RHEL options (`8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires.
+- `linuxHostOsVersion`: Linux image SKU. Defaults to `9-LVM` (RHEL 9). The RHEL options (`8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires.
 - `linuxHostDisableScreenLock`: `true` or `false`. Disables the GNOME screen saver and screen lock on RHEL hosts. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - `azureCloudName`: `AzurePublic`, `AzureUSGovernment`, or `AzureCustom`. See [Choosing The Target Azure Cloud](#choosing-the-target-azure-cloud).
 - `scriptSourceRoot`: root URL the Linux host and AVD host bootstrap scripts are downloaded from.
@@ -558,6 +558,7 @@ Every layer tolerates the others being one release behind during the rollout. Th
 
 This release changes which Linux distributions and desktops the deployment offers (items 3.1–3.4, 3.6 and 3.7 of the [roadmap](../docs/ROADMAP.md)).
 
+- **RHEL 9 is the default Linux host.** New azd environments, and templates deployed without a value, now use `linuxHostOsVersion=9-LVM` instead of `24_04-lts`, which deployed an Ubuntu server with no desktop. An existing environment keeps the value it stored; check it with `azd env get-value linuxHostOsVersion`.
 - **RHEL 7 is no longer offered.** `7-LVM` is removed from `linuxHostOsVersion`, along with `Configure-RHEL7-Host.sh`; RHEL 7 left maintenance on June 30, 2024. An azd environment that still stores `linuxHostOsVersion=7-LVM` fails template validation at the next `azd provision`, even with `deployLinuxHosts=false`, so set it to a supported value first. A VM's image cannot be changed in place, so for existing RHEL 7 hosts either also set `deployLinuxHosts=false`, which leaves them as they are, or replace them: drain them, delete the VMs in Azure and their records in the portal, and run `azd provision`. Existing RHEL 7 hosts keep working with the broker, and `patch-host.sh` and the host migration still support them.
 
 ## Manual Steps After `azd up`

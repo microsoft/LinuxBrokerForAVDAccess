@@ -123,7 +123,7 @@
       "value": "SSH"
     },
     "linuxHostOsVersion": {
-      "value": "24_04-lts"
+      "value": "9-LVM"
     },
     "linuxHostDisableScreenLock": {
       "value": true

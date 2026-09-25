@@ -85,7 +85,7 @@ param linuxHostSshPublicKey string = ''
   '9-LVM'
   '24_04-lts'
 ])
-param linuxHostOsVersion string = '24_04-lts'
+param linuxHostOsVersion string = '9-LVM'
 
 @description('Disable the GNOME screen saver and screen lock on RHEL hosts. Set to false to keep the lock screen.')
 param linuxHostDisableScreenLock bool = true

@@ -148,7 +148,7 @@ param linuxHostSshPublicKey string = ''
   '24_04-lts'
 ])
 @description('Linux host OS image SKU.')
-param linuxHostOsVersion string = '24_04-lts'
+param linuxHostOsVersion string = '9-LVM'
 
 @description('Disable the GNOME screen saver and screen lock on RHEL hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control. Has no effect on the Ubuntu server image, which has no desktop.')
 param linuxHostDisableScreenLock bool = true
