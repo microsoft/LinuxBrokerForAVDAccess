@@ -186,15 +186,16 @@ The custom script extension for the AVD host:
 The custom script extensions support the following Linux distributions:
 
 - **Red Hat Enterprise Linux (RHEL) 8 and 9**
+- **Rocky Linux 9 and AlmaLinux 9**: rebuilds of RHEL 9 that need no Red Hat subscription, set up by the RHEL 9 script
 - **Ubuntu 24.04**: Canonical's server image, with a desktop added
 
 Each deployment chooses the desktop its hosts run with `linuxHostDesktop`:
 
-- **GNOME**, the default: the `Server with GUI` group on RHEL, and on Ubuntu the Ubuntu desktop, which xrdp sessions run as Ubuntu on Xorg
+- **GNOME**, the default: the `Server with GUI` group on RHEL and its rebuilds, and on Ubuntu the Ubuntu desktop, which xrdp sessions run as Ubuntu on Xorg
 - **Xfce**
 - **MATE**
 
-On RHEL, Xfce and MATE come from EPEL.
+On RHEL, Rocky Linux and AlmaLinux, Xfce and MATE come from EPEL. Rocky Linux and AlmaLinux install EPEL from their own repositories.
 
 These scripts:
 

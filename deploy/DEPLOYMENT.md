@@ -100,8 +100,8 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `avdSessionHostCount`: number of AVD hosts to provision.
 - `linuxHostVmSize`: Linux host VM size.
 - `avdVmSize`: AVD host VM size.
-- `linuxHostOsVersion`: Linux image SKU. Defaults to `9-LVM` (RHEL 9). The RHEL options (`8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires. `24_04-lts` deploys Canonical's Ubuntu 24.04 server image and adds the Ubuntu desktop, which xrdp sessions run as Ubuntu on Xorg.
-- `linuxHostDesktop`: `gnome`, `xfce` or `mate`. The desktop the Linux hosts run in xrdp sessions. Defaults to `gnome`, which is the `Server with GUI` group on RHEL and the Ubuntu desktop on Ubuntu. Xfce and MATE come from EPEL on RHEL and from Ubuntu's own packages on Ubuntu. Changing it on existing hosts runs their bootstrap again at the next `azd provision`, so drain them first. See [Upgrading To Distribution And Desktop Support](#upgrading-to-distribution-and-desktop-support).
+- `linuxHostOsVersion`: Linux image SKU. Defaults to `9-LVM` (RHEL 9). The RHEL options (`8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires. `rocky-9` and `alma-9` deploy Rocky Linux 9 and AlmaLinux 9, rebuilds of RHEL 9 that need no Red Hat subscription, and run the RHEL 9 bootstrap, with CRB and EPEL from the distribution's own repositories; their hosts get the 64 GB OS disk that RHEL hosts have. Rocky Linux 9 is a free Azure Marketplace image with a purchase plan: `preprovision` accepts its terms in the deployment subscription, and the subscription must be allowed to buy Marketplace images. Where it is not, use `alma-9`, whose image has no plan; see [A Rocky Linux host deployment failed with `MarketplacePurchaseEligibilityFailed`](#a-rocky-linux-host-deployment-failed-with-marketplacepurchaseeligibilityfailed). `24_04-lts` deploys Canonical's Ubuntu 24.04 server image and adds the Ubuntu desktop, which xrdp sessions run as Ubuntu on Xorg.
+- `linuxHostDesktop`: `gnome`, `xfce` or `mate`. The desktop the Linux hosts run in xrdp sessions. Defaults to `gnome`, which is the `Server with GUI` group on RHEL, Rocky Linux and AlmaLinux, and the Ubuntu desktop on Ubuntu. Xfce and MATE come from EPEL on RHEL, Rocky Linux and AlmaLinux, and from Ubuntu's own packages on Ubuntu. Changing it on existing hosts runs their bootstrap again at the next `azd provision`, so drain them first. See [Upgrading To Distribution And Desktop Support](#upgrading-to-distribution-and-desktop-support).
 - `linuxHostDisableScreenLock`: `true` or `false`. Disables the screen saver and screen lock on the Linux hosts, whichever desktop they run. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - `azureCloudName`: `AzurePublic`, `AzureUSGovernment`, or `AzureCustom`. See [Choosing The Target Azure Cloud](#choosing-the-target-azure-cloud).
 - `scriptSourceRoot`: root URL the Linux host and AVD host bootstrap scripts are downloaded from.
@@ -371,6 +371,7 @@ It currently does all of the following:
 - When AVD hosts are deployed, enables Microsoft Entra authentication for RDP on the Windows Cloud Login service principal if it is not already enabled. The host pool turns on Entra single sign-on, which depends on this tenant-wide setting. `preprovision` never disables it.
 - Creates or reuses frontend and API client secrets.
 - Generates or reuses Linux host SSH keys.
+- When Linux hosts are deployed with `linuxHostOsVersion=rocky-9`, accepts the Azure Marketplace terms of the Rocky Linux 9 image in the deployment subscription unless they are accepted already.
 - Writes resolved values back into the azd environment in both uppercase and camelCase forms expected by the deployment.
 
 The API app registration is also configured with the Graph application permissions the API uses to validate host and group membership.
@@ -389,7 +390,7 @@ Important deployment characteristics:
 - Linux host auth defaults to `SSH`.
 - Linux hosts register their names in the `linuxbroker.internal` private DNS zone unless `domainName` is set, and the API's `DOMAIN_NAME` setting points at whichever suffix is in effect.
 - The API's `NFS_SHARE` setting points at the provisioned Azure Files share unless `nfsShare` is set. The storage account disables public network access and shared key access, and it allows non-HTTPS traffic because NFS does not use HTTPS; the private endpoint is the only path to it.
-- RHEL hosts use Generation 2 images so they can run with Trusted Launch.
+- RHEL, Rocky Linux and AlmaLinux hosts use Generation 2 images so they can run with Trusted Launch.
 - The AVD host pool prefers RemoteApp and sets RDP properties that enable Microsoft Entra single sign-on to the Microsoft Entra joined session hosts.
 - Linux hosts run the desktop that `linuxHostDesktop` names, GNOME by default, with the screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - Key Vault stores `db-password` and `linux-host`.
@@ -596,6 +597,7 @@ This release changes which Linux distributions and desktops the deployment offer
 
 - **Hosts can run Xfce or MATE.** The new `linuxHostDesktop` parameter chooses the desktop: `gnome`, the default and the only desktop until now, `xfce` or `mate`. The bootstrap installs it, from EPEL on RHEL and from Ubuntu's own packages on Ubuntu, and records it in `/etc/linuxbroker/desktop.conf`. `xrdp-startwm.sh` starts the desktop named there, and the heartbeat reports it in **Fleet health**. The host settings apply to all three desktops; see [Linux Host Screen Lock](#linux-host-screen-lock) for how MATE and Xfce count the screen delays in minutes and when Xfce sessions pick up a change. With `gnome` the extension command is unchanged, so an environment that keeps the default sees no change to its hosts. Changing the value changes the extension command, so the next `azd provision` runs the bootstrap again on existing hosts. It adds the new desktop next to the old one, and the sessions that start afterwards use the new desktop. Drain the hosts first, because the bootstrap also updates every package and reinstalls the release agent, and on Ubuntu it restarts xrdp. To choose Xfce or MATE when you run a bootstrap script by hand, set `LINUXBROKER_DESKTOP=xfce` or `LINUXBROKER_DESKTOP=mate` in its environment.
 - **xpra is removed.** The broker only ever connected through xrdp, and `Connect-LinuxBroker.ps1` never started an xpra application, so the bootstrap no longer adds the xpra repository, installs xpra or opens TCP 443; the host firewall allows only SSH and RDP. The RHEL 8 bootstrap is now built from the RHEL 9 one, so it also stops at the first step that fails, as the RHEL 9 bootstrap does. The extension command is unchanged, so `azd provision` does not run the bootstrap again on existing hosts. Instead, [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) from this release removes xpra from them: it stops and disables the xpra services and sockets, deletes `/etc/yum.repos.d/xpra.repo` and the xpra.org signing key, removes xpra's own packages but not the libraries they brought in, and closes TCP 443 in firewalld or ufw. Each step is best effort and reported in the migration output, and a host where one fails is still migrated. If a host serves something else on TCP 443, open it again after the migration. `Connect-LinuxBroker.ps1` now opens the desktop whatever `-Mode` it is given, and logs a warning for any value other than `desktop`.
+- **Rocky Linux 9 and AlmaLinux 9 hosts.** `linuxHostOsVersion` accepts `rocky-9` and `alma-9`. Both run the RHEL 9 bootstrap, which skips the subscription registration on them, enables their CRB repository, installs EPEL from their own `epel-release` package and adds firewalld, which their Azure images leave out. The existing values set no purchase plan or disk size, so the template leaves existing hosts as they are. A VM's image cannot be changed in place, so to move an environment to one of them, replace its hosts as described for RHEL 7 above. Rocky Linux 9 is an Azure Marketplace image with a purchase plan, so the subscription must be allowed to buy Marketplace images; see [A Rocky Linux host deployment failed with `MarketplacePurchaseEligibilityFailed`](#a-rocky-linux-host-deployment-failed-with-marketplacepurchaseeligibilityfailed).
 
 ## Manual Steps After `azd up`
 
@@ -806,7 +808,18 @@ az functionapp start --name <task-app> --resource-group <resource-group>
 
 ### The Linux host deployment failed with a Trusted Launch error
 
-Trusted Launch requires Generation 2 images. The RHEL options map to Gen2 SKUs; if you customized the image, choose a Gen2 SKU.
+Trusted Launch requires Generation 2 images. The RHEL, Rocky Linux and AlmaLinux options map to Gen2 images; if you customized the image, choose a Gen2 SKU.
+
+### A Rocky Linux host deployment failed with `MarketplacePurchaseEligibilityFailed`
+
+The Rocky Linux 9 image is a free Azure Marketplace offer from the Rocky Enterprise Software Foundation, and Azure checks that the subscription may buy it before it creates the VM. `preprovision` accepts the image's terms, so when the check still fails, the subscription cannot buy Marketplace offers at all: its billing account turns off Azure Marketplace purchases, its offer type does not allow them, or a private Azure Marketplace does not list the offer. Confirm the terms with `az vm image terms show --urn resf:rockylinux-x86_64:9-base:latest --query accepted`, then either have the billing account's administrator allow the purchase, or switch to AlmaLinux 9, whose image has no purchase plan:
+
+```powershell
+azd env set linuxHostOsVersion alma-9
+azd provision
+```
+
+If the failed deployment left a Linux host VM behind, delete it before you run `azd provision` again, because Azure cannot change the image of an existing VM.
 
 ### A VM deployment failed with `SkuNotAvailable`
 

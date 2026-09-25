@@ -26,6 +26,8 @@ param sshPublicKey string = ''
 @allowed([
   '8-LVM'
   '9-LVM'
+  'rocky-9'
+  'alma-9'
   '24_04-lts'
 ])
 param OSVersion string
@@ -73,6 +75,12 @@ var linuxConfiguration = authType == 'SSH'
 
 // The VMs below use Trusted Launch, which requires Generation 2 images. The RHEL SKUs named
 // by OSVersion (8-LVM, 9-LVM) are Generation 1, so each maps to its Gen2 equivalent.
+// Rocky Linux and AlmaLinux, rebuilds of RHEL, run the RHEL 9 bootstrap. Their images have
+// 10 GB and 30 GB disks, so their hosts get the 64 GB OS disk of RHEL hosts, and cloud-init
+// grows the root partition at first boot. Rocky's is a Marketplace image with a purchase plan:
+// it costs nothing, but the subscription must accept its terms and be allowed to buy
+// Marketplace images. The other images set no plan or size, which keeps existing hosts as
+// they are.
 var imageConfigs = {
   '8-LVM': {
     image: {
@@ -93,6 +101,37 @@ var imageConfigs = {
       sku: '9-lvm-gen2'
       version: 'latest'
     }
+    script: {
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL9-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL9-Host.sh ${bootstrapArgs}'
+    }
+  }
+  'rocky-9': {
+    image: {
+      publisher: 'resf'
+      offer: 'rockylinux-x86_64'
+      sku: '9-base'
+      version: 'latest'
+    }
+    plan: {
+      name: '9-base'
+      product: 'rockylinux-x86_64'
+      publisher: 'resf'
+    }
+    osDiskSizeGB: 64
+    script: {
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL9-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL9-Host.sh ${bootstrapArgs}'
+    }
+  }
+  'alma-9': {
+    image: {
+      publisher: 'almalinux'
+      offer: 'almalinux-x86_64'
+      sku: '9-gen2'
+      version: 'latest'
+    }
+    osDiskSizeGB: 64
     script: {
       uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL9-Host.sh'
       cmd: '${bootstrapEnv} bash Configure-RHEL9-Host.sh ${bootstrapArgs}'
@@ -154,6 +193,7 @@ resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
     name: name
     location: location
     tags: tags
+    plan: selectedConfig.?plan
     identity: {
       type: 'SystemAssigned'
     }
@@ -177,6 +217,7 @@ resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
         imageReference: selectedConfig.image
         osDisk: {
           createOption: 'FromImage'
+          diskSizeGB: selectedConfig.?osDiskSizeGB
         }
       }
       securityProfile: {

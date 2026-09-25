@@ -145,9 +145,11 @@ param linuxHostSshPublicKey string = ''
 @allowed([
   '8-LVM'
   '9-LVM'
+  'rocky-9'
+  'alma-9'
   '24_04-lts'
 ])
-@description('Linux host OS image SKU.')
+@description('Linux host image: 8-LVM (RHEL 8), 9-LVM (RHEL 9), rocky-9 (Rocky Linux 9), alma-9 (AlmaLinux 9) or 24_04-lts (Ubuntu 24.04). Rocky Linux 9 is a Marketplace image: the subscription must accept its terms once and be allowed to buy Marketplace images, even though it costs nothing.')
 param linuxHostOsVersion string = '9-LVM'
 
 @description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')

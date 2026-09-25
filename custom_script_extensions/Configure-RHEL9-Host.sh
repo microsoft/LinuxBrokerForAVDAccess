@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Installs and configures the necessary packages for Linux Broker for AVD Access on RHEL 9
+# Installs and configures the necessary packages for Linux Broker for AVD Access on RHEL 9 and
+# on its rebuilds, Rocky Linux 9 and AlmaLinux 9
 
 LINUXBROKER_API_BASE_URL="${1:-}"
 LINUXBROKER_API_CLIENT_ID="${2:-}"
@@ -44,6 +45,18 @@ xrdp_startwm_script_url="$script_source_root/linux_host/xrdp-startwm.sh"
 xrdp_startwm_script="/usr/local/bin/xrdp-startwm.sh"
 
 arch=$( /bin/arch )
+
+# Rocky Linux and AlmaLinux have no subscription to register. They ship the EPEL release
+# package in their extras repository, and EPEL needs their CRB repository, which is disabled.
+os_id=""
+if [ -r /etc/os-release ]; then
+    os_id=$(. /etc/os-release && echo "${ID:-}")
+fi
+
+case "$os_id" in
+    rocky|almalinux) rebuild="true" ;;
+    *) rebuild="false" ;;
+esac
 
 # Disable the screen saver and screen lock on this host. Enabled by default because a
 # locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which
@@ -101,7 +114,9 @@ YOUR_LINUXBROKER_API_BASE_URL="$LINUXBROKER_API_BASE_URL"
 
 set -e  # Exit immediately if a command exits with a non-zero status
 
-if [ -n "$orgId" ] && [ -n "$activationKey" ]; then
+if [ "$rebuild" = "true" ]; then
+    echo "Skipping system registration, which only RHEL needs."
+elif [ -n "$orgId" ] && [ -n "$activationKey" ]; then
     echo "Registering the system..."
     sudo subscription-manager register --org="$orgId" --activationkey="$activationKey"
     sudo subscription-manager repos --enable "codeready-builder-for-rhel-9-${arch}-rpms" --enable "rhel-9-for-x86_64-appstream-rpms" --enable "rhel-9-for-x86_64-baseos-rpms"
@@ -112,14 +127,24 @@ fi
 echo "Updating and upgrading system packages..."
 sudo dnf update -y && sudo dnf upgrade -y
 
-echo "Installing EPEL repository..."
-sudo dnf install -y "$epel_url"
+if [ "$rebuild" = "true" ]; then
+    echo "Enabling the CRB repository..."
+    sudo dnf install -y dnf-plugins-core
+    sudo dnf config-manager --set-enabled crb
+
+    echo "Installing EPEL repository..."
+    sudo dnf install -y epel-release
+else
+    echo "Installing EPEL repository..."
+    sudo dnf install -y "$epel_url"
+fi
 
 echo "Installing Microsoft repository..."
 sudo dnf install -y "$microsoft_packages_url"
 
+# The Azure images of Rocky Linux and AlmaLinux leave out firewalld, which RHEL's includes.
 echo "Installing essential packages..."
-sudo dnf install -y wget util-linux azure-cli xorgxrdp nfs-utils curl jq dconf
+sudo dnf install -y wget util-linux azure-cli xorgxrdp nfs-utils curl jq dconf firewalld
 
 # Idle session enforcement degrades gracefully without xprintidle, so a host that cannot
 # install it must still finish provisioning rather than fail the extension.

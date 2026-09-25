@@ -83,6 +83,8 @@ param linuxHostSshPublicKey string = ''
 @allowed([
   '8-LVM'
   '9-LVM'
+  'rocky-9'
+  'alma-9'
   '24_04-lts'
 ])
 param linuxHostOsVersion string = '9-LVM'
