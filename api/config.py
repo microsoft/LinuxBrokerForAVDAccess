@@ -209,3 +209,10 @@ SESSION_AUDIT_MESSAGE_CHARS = 200
 # A checkout this recent with no session reported yet is still connecting, not stuck.
 SESSION_CONNECTING_SECONDS = 180
 USER_SEARCH_MAX_RESULTS = 200
+
+# Broadcast messages go to many hosts at once, in parallel and bounded like Apply Now, so one
+# unreachable host cannot hold up the rest.
+BROADCAST_CONCURRENCY = env_int('BROADCAST_CONCURRENCY', 10, minimum=1, maximum=64)
+BROADCAST_HOST_TIMEOUT_SECONDS = env_int('BROADCAST_HOST_TIMEOUT_SECONDS', 20, minimum=5, maximum=60)
+BROADCAST_DEADLINE_SECONDS = env_int('BROADCAST_DEADLINE_SECONDS', 60, minimum=10, maximum=100)
+BROADCAST_MAX_HOSTNAMES = 500

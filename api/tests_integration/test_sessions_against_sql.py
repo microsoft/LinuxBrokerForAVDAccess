@@ -93,3 +93,18 @@ def test_user_search_finds_provisioned_users(client, db, remote):
     _checkout(client, "erin")
     found = client.get("/api/users?q=eri").get_json()["Users"]
     assert found[0]["Username"] == "erin" and found[0]["CurrentHostname"] == "lnxhost-01"
+
+
+def test_a_broadcast_reaches_the_hosts_in_use(client, db, remote):
+    db.add_vm("lnxhost-01")
+    db.add_vm("lnxhost-02")
+    db.add_vm("lnxhost-03")
+    _checkout(client, "frank")
+    _heartbeat(client, "lnxhost-02", [{"username": "admin1", "state": "active"}])
+
+    body = client.post("/api/sessions/broadcast", json={"message": "Maintenance at 18:00"}).get_json()
+
+    assert body["TargetCount"] == 2, body
+    messaged = sorted(hostname for hostname, kind in remote.calls if kind == "message-all")
+    assert messaged == ["lnxhost-01", "lnxhost-02"]
+    assert "Maintenance at 18:00" in remote.stdin

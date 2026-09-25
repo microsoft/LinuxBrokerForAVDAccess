@@ -6,6 +6,7 @@ import type {
   ActivityLogEntry,
   ApplySettingsResult,
   AuditEntry,
+  BroadcastResult,
   BrokerUserDetails,
   Dashboard,
   DrainResult,
@@ -317,6 +318,14 @@ export function useProfileReset() {
         cancel ? undefined : { confirm: username },
       ),
     onSuccess: invalidate,
+  });
+}
+
+/** A message for every session, or for every session on the named hosts. */
+export function useBroadcast() {
+  return useMutation({
+    mutationFn: ({ message, hostnames }: { message: string; hostnames?: string[] }) =>
+      apiPost<BroadcastResult>('/sessions/broadcast', hostnames ? { message, hostnames } : { message }),
   });
 }
 

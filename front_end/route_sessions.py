@@ -21,9 +21,12 @@ SESSION_STATES = (
 MESSAGE_MAX_CHARS = 500
 
 # Signing out and returning runs the sign-out, the release, the return and the host cleanup,
-# each bounded by the broker; a message is one SSH call.
+# each bounded by the broker; a message is one SSH call. A broadcast is bounded by the
+# broker's own deadline, which stays under this.
 SIGNOUT_TIMEOUT_SECONDS = 120
 MESSAGE_TIMEOUT_SECONDS = 45
+BROADCAST_TIMEOUT_SECONDS = 110
+BROADCAST_MAX_HOSTNAMES = 500
 
 
 def _hostname(value):
@@ -101,6 +104,20 @@ def register_route_sessions(app):
             f'/sessions/{_hostname(hostname)}/{_username(username)}/message', {'message': message},
             timeout=MESSAGE_TIMEOUT_SECONDS,
         ))
+
+    @app.route(f'{API_PREFIX}/sessions/broadcast', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to send the message. Please try again later.")
+    def ui_broadcast():
+        payload = json_body()
+        body = {'message': _message(payload)}
+        hostnames = payload.get('hostnames')
+        if hostnames is not None:
+            if (not isinstance(hostnames, list) or not hostnames or len(hostnames) > BROADCAST_MAX_HOSTNAMES
+                    or not all(isinstance(name, str) and HOSTNAME_RE.match(name) for name in hostnames)):
+                raise BadRequest(f"hostnames must be a list of 1 to {BROADCAST_MAX_HOSTNAMES} hostnames.")
+            body['hostnames'] = hostnames
+        return jsonify(api_post('/sessions/broadcast', body, timeout=BROADCAST_TIMEOUT_SECONDS))
 
     @app.route(f'{API_PREFIX}/users/<username>/reset-profile', methods=['POST'])
     @login_required

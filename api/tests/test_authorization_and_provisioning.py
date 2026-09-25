@@ -58,6 +58,7 @@ EXPECTED_ROLES = {
     "message_session": OPERATE,
     "request_profile_reset": ADMIN,
     "cancel_profile_reset": ADMIN,
+    "broadcast_message": OPERATE,
 }
 
 EXPECTED_GROUPS = {

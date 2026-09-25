@@ -310,6 +310,16 @@ export interface ProfileResetResult {
   Result?: string;
 }
 
+export interface BroadcastResult {
+  TargetCount: number;
+  Delivered: number;
+  Results: Array<{ Hostname: string; Result: 'Delivered' | 'NoSession' | 'AgentOutdated' | 'Failed'; Sessions: number; Delivered: number }>;
+  NotAttempted: string[];
+  UnknownHostnames: string[];
+  SkippedHostnames: string[];
+  message: string;
+}
+
 /** One saved version of the host settings profile. */
 export interface HostSettingsVersion extends HostSettings {
   UpdatedBy: string | null;

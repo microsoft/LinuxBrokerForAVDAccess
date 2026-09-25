@@ -103,3 +103,26 @@ def test_session_actions_require_the_csrf_token(signed_in_client, broker_api):
     response = signed_in_client.post(f"{API}/sessions/linux-host-02/alice/signout", json={})
     assert response.status_code == 400
     assert broker_api.posts == []
+
+
+def test_a_broadcast_is_validated_and_forwarded(signed_in_client, broker_api):
+    broker_api.post_replies["/sessions/broadcast"] = (200, {"TargetCount": 2, "Delivered": 3, "message": "Shown in 3 session(s)."})
+
+    response = post(signed_in_client, f"{API}/sessions/broadcast", {"message": " Restarting at 18:00 "})
+    assert response.status_code == 200 and response.get_json()["Delivered"] == 3
+    assert broker_api.posts[-1]["json"] == {"message": "Restarting at 18:00"}
+    assert broker_api.posts[-1]["timeout"] == 110
+
+    post(signed_in_client, f"{API}/sessions/broadcast", {"message": "Hi", "hostnames": ["linux-host-01"]})
+    assert broker_api.posts[-1]["json"] == {"message": "Hi", "hostnames": ["linux-host-01"]}
+
+
+@pytest.mark.parametrize("payload", [
+    {"message": ""},
+    {"message": "Hi", "hostnames": []},
+    {"message": "Hi", "hostnames": "linux-host-01"},
+    {"message": "Hi", "hostnames": ["bad host"]},
+])
+def test_a_bad_broadcast_never_reaches_the_broker(signed_in_client, broker_api, payload):
+    assert post(signed_in_client, f"{API}/sessions/broadcast", payload).status_code == 400
+    assert broker_api.posts == []

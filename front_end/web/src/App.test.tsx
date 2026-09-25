@@ -208,6 +208,9 @@ function stubFetch() {
     if (/^\/api\/ui\/sessions\/[^/]+\/[^/]+\/message$/.test(url)) {
       return jsonResponse({ Delivered: 1, Sessions: 1, message: 'Sent to alice on linux-host-02.' });
     }
+    if (url === '/api/ui/sessions/broadcast') {
+      return jsonResponse({ TargetCount: 2, Delivered: 2, Results: [{ Hostname: 'linux-host-02', Result: 'Delivered', Sessions: 1, Delivered: 1 }, { Hostname: 'linux-host-04', Result: 'Delivered', Sessions: 1, Delivered: 1 }], NotAttempted: [], UnknownHostnames: [], SkippedHostnames: [], message: 'Shown in 2 session(s) on 2 of 2 host(s).' });
+    }
     if (url.startsWith('/api/ui/sessions')) return jsonResponse(SESSIONS);
     if (/^\/api\/ui\/users\/[^/]+\/reset-profile/.test(url)) {
       return jsonResponse({ Username: 'alice', message: 'alice gets a fresh profile at their next sign-in.' });
@@ -633,6 +636,25 @@ describe('App', () => {
     renderApp('/sessions');
     await screen.findByRole('link', { name: 'alice' });
     expect(screen.queryByRole('button', { name: /Session actions for/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Message everyone' })).not.toBeInTheDocument();
+  });
+
+  it('messages everyone on the hosts in use', async () => {
+    renderApp('/sessions');
+    await userEvent.click(await screen.findByRole('button', { name: 'Message everyone' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/every session on the 3 hosts in use/)).toBeInTheDocument();
+    await userEvent.type(within(dialog).getByLabelText('Message'), 'Hosts restart at 18:00');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Send to all' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/sessions/broadcast',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ message: 'Hosts restart at 18:00' });
+    });
+    expect(await screen.findByText('Shown in 2 session(s) on 2 of 2 host(s).')).toBeInTheDocument();
   });
 
   it('resets a profile only after the administrator types the username', async () => {

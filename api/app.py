@@ -4333,6 +4333,148 @@ def message_session(hostname, username):
         return error_response("Unable to send the message.", 500)
 
 
+BROADCAST_DESKTOP_STATES = ('active', 'disconnected', 'unmanaged')
+
+
+def broadcast_targets(vms, sessions, requested):
+    """(hostnames to message, requested names that are not registered).
+
+    Without a list, every host someone is using: an assignment or a desktop its heartbeat
+    reports. With one, those hosts, whatever the broker knows about their sessions. Only
+    powered-on, reachable hosts are messaged either way.
+    """
+    reachable = {
+        str(vm.get('Hostname')).lower(): vm.get('Hostname')
+        for vm in vms
+        if vm.get('Hostname') and vm.get('PowerState') == 'On' and vm.get('NetworkStatus') == 'Reachable'
+    }
+    registered = {str(vm.get('Hostname')).lower() for vm in vms if vm.get('Hostname')}
+
+    if requested is not None:
+        wanted = {name.lower() for name in requested}
+        unknown = sorted(name for name in requested if name.lower() not in registered)
+        return sorted((reachable[name] for name in wanted if name in reachable), key=str.lower), unknown
+
+    in_use = {
+        str(session.get('Hostname')).lower()
+        for session in sessions
+        if session.get('HasAssignment') or session.get('State') in BROADCAST_DESKTOP_STATES
+    }
+    return sorted((reachable[name] for name in in_use if name in reachable), key=str.lower), []
+
+
+@app.route('/api/sessions/broadcast', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('session.broadcast', target_type='fleet')
+def broadcast_message():
+    """Show a message in every session, or in every session on the named hosts."""
+    try:
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+
+        message, problem = normalize_session_message(body.get('message'))
+        if problem:
+            return error_response(problem, 400)
+
+        requested = body.get('hostnames')
+        if requested is not None:
+            if (not isinstance(requested, list) or len(requested) > BROADCAST_MAX_HOSTNAMES
+                    or not all(isinstance(name, str) and HEARTBEAT_HOSTNAME_RE.match(name) for name in requested)):
+                return error_response(f"hostnames must be a list of at most {BROADCAST_MAX_HOSTNAMES} hostnames.", 400)
+            if not requested:
+                return error_response("Name at least one host, or leave hostnames out to message every session.", 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetVms")
+                vms = cursor.fetchall() or []
+        sessions = fetch_sessions() if requested is None else []
+
+        hostnames, unknown = broadcast_targets(vms, sessions, requested)
+        skipped = []
+        if requested is not None:
+            chosen = {name.lower() for name in hostnames}
+            missing = {name.lower() for name in unknown}
+            skipped = sorted({name for name in requested if name.lower() not in chosen and name.lower() not in missing}, key=str.lower)
+        deadline = time.monotonic() + BROADCAST_DEADLINE_SECONDS
+
+        def deliver(hostname):
+            if time.monotonic() >= deadline:
+                return hostname, None
+            try:
+                values, _ = run_session_control(
+                    hostname, ['message-all'], stdin_input=message, timeout=BROADCAST_HOST_TIMEOUT_SECONDS
+                )
+            except HostAgentOutdated:
+                return hostname, {'Result': 'AgentOutdated'}
+            except Exception:
+                logger.exception("Could not deliver the broadcast to %s.", hostname)
+                return hostname, {'Result': 'Failed'}
+
+            result = values.get('RESULT')
+            return hostname, {
+                'Result': {'delivered': 'Delivered', 'no-session': 'NoSession'}.get(result, 'Failed'),
+                'Sessions': coerce_optional_int(values.get('SESSIONS'), default=0, minimum=0),
+                'Delivered': coerce_optional_int(values.get('DELIVERED'), default=0, minimum=0),
+            }
+
+        outcomes = []
+        if hostnames:
+            with ThreadPoolExecutor(max_workers=min(BROADCAST_CONCURRENCY, len(hostnames))) as pool:
+                outcomes = list(pool.map(deliver, hostnames))
+
+        results = []
+        not_attempted = []
+        for hostname, outcome in outcomes:
+            if outcome is None:
+                not_attempted.append(hostname)
+                continue
+            results.append({'Hostname': hostname, 'Sessions': 0, 'Delivered': 0, **outcome})
+
+        delivered = sum(entry['Delivered'] for entry in results)
+        failed = [entry['Hostname'] for entry in results if entry['Result'] in ('Failed', 'AgentOutdated')]
+        g.audit_detail = {
+            'message': message[:SESSION_AUDIT_MESSAGE_CHARS],
+            'targetCount': len(hostnames),
+            'delivered': delivered,
+            'hostsFailed': len(failed),
+            'notAttempted': len(not_attempted),
+        }
+        if requested is not None and len(requested) <= 10:
+            g.audit_detail['hostnames'] = sorted(requested, key=str.lower)
+
+        if not hostnames:
+            summary = ("None of those hosts is powered on and reachable, so nothing was sent."
+                       if requested is not None else
+                       "No powered-on, reachable host has anyone on it, so nothing was sent.")
+        else:
+            summary = f"Shown in {delivered} session(s) on {len(hostnames) - len(failed) - len(not_attempted)} of {len(hostnames)} host(s)."
+            if failed:
+                summary += f" Not delivered to {', '.join(failed[:5])}{' and others' if len(failed) > 5 else ''}."
+            if not_attempted:
+                summary += f" {len(not_attempted)} host(s) were not reached before the time limit."
+            if skipped:
+                summary += f" Skipped {len(skipped)} host(s) that are off or unreachable."
+
+        return jsonify({
+            'TargetCount': len(hostnames),
+            'Delivered': delivered,
+            'Results': results,
+            'NotAttempted': not_attempted,
+            'UnknownHostnames': unknown,
+            'SkippedHostnames': skipped,
+            'message': summary,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while broadcasting a message.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to broadcast a message.")
+        return error_response("Unable to send the message.", 500)
+
+
 @app.route('/api/users/<username>/reset-profile', methods=['POST'])
 @token_required(ADMIN_ROLES)
 @audited('user.reset_profile_requested', target_type='user', target_param='username')

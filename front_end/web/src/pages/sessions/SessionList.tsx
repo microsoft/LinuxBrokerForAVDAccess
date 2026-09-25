@@ -3,16 +3,19 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { DataTable } from '../../components/data/DataTable';
 import type { Column } from '../../components/data/DataTable';
-import { SESSION_STATES, SessionStateBadge, sessionDetail } from '../../components/sessions/SessionState';
+import { hasDesktop, SESSION_STATES, SessionStateBadge, sessionDetail } from '../../components/sessions/SessionState';
 import { ActionMenu } from '../../components/ui/ActionMenu';
 import { Badge } from '../../components/ui/Badge';
+import { Button } from '../../components/ui/Button';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, Spinner } from '../../components/ui/Feedback';
 import { Switch } from '../../components/ui/Field';
 import { GlassCard } from '../../components/ui/GlassCard';
 import { Icon } from '../../components/Icon';
 import { useAutoRefresh } from '../../hooks/useAutoRefresh';
+import { useBroadcastDialog } from '../../hooks/useBroadcastDialog';
 import { useSessions, useUserSearch } from '../../hooks/useBroker';
 import { useSessionActions } from '../../hooks/useSessionActions';
+import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
 import { classNames, formatAge, valueOrDash } from '../../lib/format';
 import type { BrokerSession, SessionState } from '../../types/broker';
@@ -109,6 +112,8 @@ export function SessionList() {
   const autoRefresh = useAutoRefresh(30);
   const { data, isPending, isFetching, error, refetch } = useSessions(autoRefresh.intervalMs);
   const actions = useSessionActions();
+  const broadcast = useBroadcastDialog();
+  const can = useCan();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const requested = (searchParams.get('state') ?? 'all') as Filter;
@@ -131,6 +136,11 @@ export function SessionList() {
 
   const sessions = data?.Sessions ?? [];
   const shown = filter === 'all' ? sessions : sessions.filter((session) => session.State === filter);
+  const hostsInUse = new Set(
+    sessions
+      .filter((session) => session.PowerState === 'On' && (session.HasAssignment || hasDesktop(session)))
+      .map((session) => session.Hostname.toLowerCase()),
+  ).size;
 
   const columns: Array<Column<BrokerSession>> = [
     {
@@ -236,6 +246,22 @@ export function SessionList() {
               <Icon name="refresh" size={14} />
               Refresh
             </button>
+            {can.operate ? (
+              <Button
+                size="sm"
+                variant="primary"
+                icon="box-arrow-right"
+                disabled={!hostsInUse}
+                onClick={() =>
+                  broadcast.openBroadcast({
+                    title: 'Message everyone',
+                    recipients: `The message is shown in every session on the ${hostsInUse} ${hostsInUse === 1 ? 'host' : 'hosts'} in use.`,
+                  })
+                }
+              >
+                Message everyone
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -309,6 +335,7 @@ export function SessionList() {
       ) : null}
 
       {actions.dialog}
+      {broadcast.dialog}
     </>
   );
 }
