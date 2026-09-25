@@ -1,5 +1,5 @@
 param (
-    [Parameter(Mandatory = $false, HelpMessage = "Specify 'desktop' to use Remote Desktop, or provide the name of the application to run via xpra.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Only 'desktop' is supported, which opens a Remote Desktop session to a Linux host. Any other value opens the desktop too.")]
     [string]$Mode = "desktop"
 )
 
@@ -91,6 +91,13 @@ function Get-AccessToken {
     }
 }
 
+# Earlier releases kept every other value for starting a single application through xpra,
+# which was never implemented and has been removed. A RemoteApp that still passes one gets the
+# desktop rather than nothing.
+if ($Mode -ine "desktop") {
+    Write-Log "Mode '$Mode' is not supported, so the desktop is opened instead." "WARNING"
+}
+
 # Define the API's Application ID URI (use the updated valid URL)
 $apiAppIdUri = "api://your_linuxbroker_api_client_id"  # Replace with your API's actual Application ID URI
 
@@ -174,34 +181,23 @@ if ($hasExistingCheckedInVM -and $checkoutResponse.IPAddress) {
         Write-Log "Failed to update credentials in Credential Manager: $_" "ERROR"
     }
 
-    if ($Mode -ieq "desktop") {
-        Write-Log "Connecting to $hostname (IP: $ipAddress) using Remote Desktop Connection..." "INFO"
-        try {
-            # xrdp presents a self-signed certificate, so skip the server authentication warning for this user.
-            $rdpClientKey = "HKCU:\Software\Microsoft\Terminal Server Client"
-            if (-not (Test-Path $rdpClientKey)) {
-                New-Item -Path $rdpClientKey -Force | Out-Null
-            }
-            New-ItemProperty -Path $rdpClientKey -Name "AuthenticationLevelOverride" -PropertyType DWord -Value 0 -Force | Out-Null
-
-            # Launch mstsc with the hostname or IP address
-            Start-Process mstsc.exe -ArgumentList "/v:$ipAddress"
-
-            Write-Log "Successfully connected to $hostname (IP: $ipAddress) using Remote Desktop Connection." "INFO"
+    Write-Log "Connecting to $hostname (IP: $ipAddress) using Remote Desktop Connection..." "INFO"
+    try {
+        # xrdp presents a self-signed certificate, so skip the server authentication warning for this user.
+        $rdpClientKey = "HKCU:\Software\Microsoft\Terminal Server Client"
+        if (-not (Test-Path $rdpClientKey)) {
+            New-Item -Path $rdpClientKey -Force | Out-Null
         }
-        catch {
-            Write-Log "Failed to connect to $hostname (IP: $ipAddress) using Remote Desktop Connection: $_" "ERROR"
-            Show-UserMessage "Remote Desktop Connection could not be started for $hostname. Try again, or contact your administrator." "Error"
-        }
+        New-ItemProperty -Path $rdpClientKey -Name "AuthenticationLevelOverride" -PropertyType DWord -Value 0 -Force | Out-Null
+
+        # Launch mstsc with the hostname or IP address
+        Start-Process mstsc.exe -ArgumentList "/v:$ipAddress"
+
+        Write-Log "Successfully connected to $hostname (IP: $ipAddress) using Remote Desktop Connection." "INFO"
     }
-    else {
-        Write-Log "Running xpra command to launch application: $Mode" "INFO"
-        try {
-            # Add XPRA command
-        }
-        catch {
-            Write-Log "Failed to launch application '$Mode' using xpra: $_" "ERROR"
-        }
+    catch {
+        Write-Log "Failed to connect to $hostname (IP: $ipAddress) using Remote Desktop Connection: $_" "ERROR"
+        Show-UserMessage "Remote Desktop Connection could not be started for $hostname. Try again, or contact your administrator." "Error"
     }
 }
 else {

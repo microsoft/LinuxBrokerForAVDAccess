@@ -275,6 +275,95 @@ download_file() {
     return 1
 }
 
+# Earlier bootstraps installed xpra next to xrdp and opened TCP 443 for it, but the broker only
+# ever connects through xrdp. Every step is best effort, so a host where one fails still gets the
+# new agent. The repository definition goes first, because while xpra.org is unreachable it makes
+# every dnf or yum command on the host fail.
+remove_xpra() {
+    local repo_file='/etc/yum.repos.d/xpra.repo'
+    local unit packages rules output key
+    local remove_status=0
+
+    if [ -f "$repo_file" ]; then
+        if rm -f "$repo_file"; then
+            echo "Removed the xpra repository definition $repo_file."
+        else
+            echo "WARNING: Unable to remove $repo_file."
+        fi
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        for unit in xpra.socket xpra-encoder.socket xpra.service xpra-encoder.service; do
+            systemctl disable --now "$unit" >/dev/null 2>&1 || true
+            systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+        done
+    fi
+
+    packages=''
+    if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        packages=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null | grep -E '^(python[0-9]*-)?xpra(-|$)' | sort -u | paste -sd ' ' - || true)
+    elif command -v dpkg-query >/dev/null 2>&1; then
+        packages=$(dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' 2>/dev/null \
+            | awk 'substr($1, 2, 1) != "n" && $2 ~ /^(python3-)?xpra(-|$)/ { print $2 }' | sort -u | paste -sd ' ' - || true)
+    fi
+
+    if [ -n "$packages" ]; then
+        # Package names contain no spaces or glob characters, so the list is split unquoted.
+        # Only xpra's own packages are removed. The libraries they pulled in stay, because a
+        # user's own tools may rely on them without any installed package requiring them.
+        # Run Command returns only the end of the output, so the transaction log is kept back
+        # unless the removal fails.
+        # shellcheck disable=SC2086
+        if command -v dnf >/dev/null 2>&1; then
+            output=$(dnf remove -y --noautoremove $packages 2>&1) || remove_status=$?
+        elif command -v yum >/dev/null 2>&1; then
+            output=$(yum remove -y $packages 2>&1) || remove_status=$?
+        else
+            output=$(DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 purge -y $packages 2>&1) || remove_status=$?
+        fi
+        if [ "$remove_status" -eq 0 ]; then
+            echo "Removed the xpra packages: $packages."
+        else
+            echo "WARNING: Unable to remove the xpra packages ($packages); the package manager exited with $remove_status:"
+            printf '%s\n' "$output" | tail -n 5
+        fi
+    fi
+
+    # dnf imported xpra.org's signing key when it first installed xpra. Nothing needs it once the
+    # repository is gone, and leaving it would keep trusting any package xpra.org signs.
+    if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        for key in $(rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE} %{SUMMARY}\n' 2>/dev/null | awk '/xpra\.org/ { print $1 }' || true); do
+            if rpm -e "$key" >/dev/null 2>&1; then
+                echo "Removed the xpra.org package signing key $key."
+            else
+                echo "WARNING: Unable to remove the xpra.org package signing key $key."
+            fi
+        done
+    fi
+
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        if firewall-cmd --permanent --query-port=443/tcp >/dev/null 2>&1; then
+            if firewall-cmd --permanent --remove-port=443/tcp >/dev/null && firewall-cmd --reload >/dev/null; then
+                echo 'Closed TCP 443 in firewalld.'
+            else
+                echo 'WARNING: Unable to close TCP 443 in firewalld.'
+            fi
+        fi
+    elif command -v ufw >/dev/null 2>&1; then
+        rules=$(ufw show added 2>/dev/null || true)
+        if grep -qx 'ufw allow 443/tcp' <<< "$rules"; then
+            if ufw delete allow 443/tcp >/dev/null; then
+                echo 'Closed TCP 443 in ufw.'
+            else
+                echo 'WARNING: Unable to close TCP 443 in ufw.'
+            fi
+        fi
+    fi
+}
+
+# Called in an || list so that set -e cannot stop the migration partway through the cleanup.
+remove_xpra || echo 'WARNING: The xpra cleanup did not finish.'
+
 ensure_command curl curl
 ensure_command jq jq
 ensure_command dconf dconf || ensure_command dconf dconf-cli || echo 'dconf is unavailable; screen lock policy will be written but not compiled.'

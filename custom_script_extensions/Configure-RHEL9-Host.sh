@@ -21,8 +21,6 @@ LINUXBROKER_API_BASE_URL="${LINUXBROKER_API_BASE_URL%/}"
 # Variables
 
 epel_url="https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
-xpra_repo_path="/etc/yum.repos.d/xpra.repo"
-xpra_url="https://raw.githubusercontent.com/Xpra-org/xpra/master/packaging/repos/almalinux/xpra.repo"
 microsoft_packages_url="https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm"
 
 # Override for sovereign or air-gapped clouds where raw.githubusercontent.com is unreachable.
@@ -46,10 +44,9 @@ xrdp_startwm_script_url="$script_source_root/linux_host/xrdp-startwm.sh"
 xrdp_startwm_script="/usr/local/bin/xrdp-startwm.sh"
 
 arch=$( /bin/arch )
-remoteAccessTool="both"  # Options: "xrdp", "xpra", or "both"
 
 # Disable the screen saver and screen lock on this host. Enabled by default because a
-# locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which
+# locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which
 # strands the host's lease. Set LINUXBROKER_DISABLE_SCREEN_LOCK=false to keep the lock screen.
 disableScreenLock="${LINUXBROKER_DISABLE_SCREEN_LOCK:-true}"
 disableScreenLock=$(printf '%s' "$disableScreenLock" | tr '[:upper:]' '[:lower:]')
@@ -121,14 +118,6 @@ sudo dnf install -y "$epel_url"
 echo "Installing Microsoft repository..."
 sudo dnf install -y "$microsoft_packages_url"
 
-echo "Adding Xpra repository..."
-# curl ships with the base image, while wget is only installed in the next step. xpra is
-# optional, so a missing repository definition must not stop the host provisioning on xrdp.
-if ! sudo curl -fsSL -o "$xpra_repo_path" "$xpra_url"; then
-    sudo rm -f "$xpra_repo_path"
-    echo "WARNING: Unable to download the Xpra repository definition from $xpra_url."
-fi
-
 echo "Installing essential packages..."
 sudo dnf install -y wget util-linux azure-cli xorgxrdp nfs-utils curl jq dconf
 
@@ -159,34 +148,8 @@ case "$desktop" in
         ;;
 esac
 
-case "$remoteAccessTool" in
-    "xrdp"|"xpra"|"both")
-        ;;
-    *)
-        echo "Unsupported remote access tool: $remoteAccessTool"
-        exit 1
-        ;;
-esac
-
-if [[ "$remoteAccessTool" == "xrdp" || "$remoteAccessTool" == "both" ]]; then
-    echo "Installing xrdp..."
-    sudo dnf install -y xrdp
-fi
-
-# xpra comes from a third-party repository whose dependencies can drift from the RHEL minor
-# release. When both tools are requested, an xpra failure leaves the host serving xrdp only.
-if [[ "$remoteAccessTool" == "xpra" || "$remoteAccessTool" == "both" ]]; then
-    echo "Installing xpra..."
-    if ! sudo dnf install -y xpra; then
-        if [[ "$remoteAccessTool" == "both" ]]; then
-            echo "WARNING: xpra could not be installed. Continuing with xrdp only."
-            remoteAccessTool="xrdp"
-        else
-            echo "ERROR: xpra could not be installed."
-            exit 1
-        fi
-    fi
-fi
+echo "Installing xrdp..."
+sudo dnf install -y xrdp
 
 echo "Setting default target to graphical..."
 sudo systemctl set-default graphical.target
@@ -201,42 +164,17 @@ else
     sudo systemctl enable --now firewalld
 fi
 
-echo "Configuring firewall to allow $remoteAccessTool connections..."
+echo "Configuring firewall to allow SSH and xrdp connections..."
 sudo firewall-cmd --permanent --add-port=22/tcp  # Always allow SSH
+sudo firewall-cmd --permanent --add-port=3389/tcp
+sudo firewall-cmd --permanent --add-service=ms-wbt || echo "Service 'ms-wbt' may not be available. Skipping."
 
-if [[ "$remoteAccessTool" == "xrdp" || "$remoteAccessTool" == "both" ]]; then
-    sudo firewall-cmd --permanent --add-port=3389/tcp
-    sudo firewall-cmd --permanent --add-port=443/tcp
-    sudo firewall-cmd --permanent --add-service=ms-wbt || echo "Service 'ms-wbt' may not be available. Skipping."
-    if systemctl is-active --quiet xrdp; then
-        echo "xrdp service is already active."
-    else
-        echo "Starting and enabling xrdp service..."
-        sudo systemctl start xrdp
-        sudo systemctl enable xrdp --now
-    fi
-fi
-
-if [[ "$remoteAccessTool" == "xpra" || "$remoteAccessTool" == "both" ]]; then
-    sudo firewall-cmd --permanent --add-port=443/tcp
-    if systemctl is-active --quiet xpra; then
-        echo "xpra service is already active."
-    elif [[ "$remoteAccessTool" == "both" ]]; then
-        echo "Starting and enabling xpra service..."
-        sudo systemctl enable xpra --now || true
-        # systemctl returns as soon as the proxy process forks, so a proxy that exits during
-        # startup only shows up a few seconds later. Left alone, the failed unit marks the host
-        # degraded and xpra.socket keeps accepting connections for a proxy that cannot run.
-        sleep 15
-        if ! systemctl is-active --quiet xpra; then
-            echo "WARNING: The xpra service did not stay running. Disabling it. xrdp remains available."
-            sudo systemctl disable --now xpra.socket xpra.service || true
-            sudo systemctl reset-failed xpra.service || true
-        fi
-    else
-        echo "Starting and enabling xpra service..."
-        sudo systemctl enable xpra --now
-    fi
+if systemctl is-active --quiet xrdp; then
+    echo "xrdp service is already active."
+else
+    echo "Starting and enabling xrdp service..."
+    sudo systemctl start xrdp
+    sudo systemctl enable xrdp --now
 fi
 
 echo "Reloading firewall configurations..."

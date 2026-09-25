@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "7494438435876162804"
+      "templateHash": "3082428001236918502"
     }
   },
   "parameters": {
@@ -326,7 +326,7 @@
       "type": "bool",
       "defaultValue": true,
       "metadata": {
-        "description": "Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
+        "description": "Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
       }
     },
     "linuxHostDesktop": {
@@ -565,7 +565,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "1459326504640237068"
+              "templateHash": "10982394411437139989"
             }
           },
           "parameters": {
@@ -2869,7 +2869,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "8451551061526823506"
+                      "templateHash": "4319518226710739497"
                     }
                   },
                   "parameters": {
@@ -2943,7 +2943,7 @@
                       "type": "bool",
                       "defaultValue": true,
                       "metadata": {
-                        "description": "Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
+                        "description": "Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
                       }
                     },
                     "desktop": {

@@ -150,7 +150,7 @@ param linuxHostSshPublicKey string = ''
 @description('Linux host OS image SKU.')
 param linuxHostOsVersion string = '9-LVM'
 
-@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
+@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
 param linuxHostDisableScreenLock bool = true
 
 @allowed([

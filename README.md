@@ -4,7 +4,7 @@
 
 ## Purpose
 
-The **Linux Broker for AVD Access** is a solution designed to manage and broker user access to Linux hosts via Azure Virtual Desktop (AVD). It provides a scalable and efficient way to connect users to Linux virtual machines (VMs) using either Remote Desktop Protocol (RDP) for full desktop experiences or xpra (X Remote Application) for virtualized applications.
+The **Linux Broker for AVD Access** is a solution designed to manage and broker user access to Linux hosts via Azure Virtual Desktop (AVD). It provides a scalable and efficient way to connect users to full desktops on Linux virtual machines (VMs) over the Remote Desktop Protocol (RDP), which the hosts serve with xrdp.
 
 This solution leverages Azure services such as managed identities, security groups, Azure App Service, Azure Functions, and Azure SQL Database to provide secure and efficient brokering, session management, and scaling of Linux hosts.
 
@@ -15,7 +15,7 @@ The solution consists of the following components:
 
 - **Azure Virtual Desktop (AVD)**: Provides the interface for users to access Linux hosts. Users can connect via the AVD web client or any supported AVD client.
 
-- **Broker Agent (`Connect-LinuxBroker.ps1`)**: A PowerShell script running on each AVD host that acts as an agent to broker connections to Linux hosts. It connects to the Broker API using managed identity to check out a Linux VM and initiate the appropriate connection (RDP or xpra).
+- **Broker Agent (`Connect-LinuxBroker.ps1`)**: A PowerShell script running on each AVD host that acts as an agent to broker connections to Linux hosts. It connects to the Broker API using managed identity to check out a Linux VM and opens a Remote Desktop connection to it.
 
 - **Linux Hosts Cluster**: A set of Linux VMs that users connect to. Each Linux host has managed identity enabled and runs a Session Release Agent.
 
@@ -67,8 +67,8 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
    - The Broker Agent script (`Connect-LinuxBroker.ps1`) connects to the Broker API using the AVD host's managed identity.
    - It checks out an available Linux VM for the user.
    - The user's ID is added to the Linux host with a unique 25-character password.
-   - The user is added to appropriate user groups on the Linux host for RDP or xpra access.
-4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP or xpra and can work as needed.
+   - The user is added to appropriate user groups on the Linux host for RDP access.
+4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP and can work as needed.
 5. **Session Management**:
    - If the user disconnects or logs off, the Session Release Agent on the Linux host reconciles the XRDP/Xorg session state immediately when possible and otherwise on the next safety-net poll.
    - A reconnect timer is initiated, 20 minutes by default and configurable from the portal.
@@ -198,7 +198,7 @@ On RHEL, Xfce and MATE come from EPEL.
 
 These scripts:
 
-- **Install XRDP and xpra**: Set up XRDP for full desktop access (RDP) and xpra for application virtualization, enabling users to connect via AVD.
+- **Install xrdp**: Set up xrdp for full desktop access over RDP, enabling users to connect via AVD. The host firewall allows only SSH and RDP.
 - **Start the desktop**: xrdp starts every session through `xrdp-startwm.sh`, which runs the desktop the deployment chose.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the timer-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.

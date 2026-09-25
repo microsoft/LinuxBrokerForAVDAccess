@@ -241,7 +241,7 @@ If you prefer to be prompted locally, leave both values unset and run `azd up` f
 Linux hosts run GNOME unless `linuxHostDesktop` chooses Xfce or MATE. By default the bootstrap
 script disables the screen saver and screen lock on those hosts, whichever desktop they run.
 
-This is on by default because a locked GNOME greeter inside an xrdp or xpra session frequently
+This is on by default because a locked GNOME greeter inside an xrdp session frequently
 cannot be unlocked after a reconnect. When that happens the user cannot get back into the
 desktop, and the host stays leased until the lease is released manually. Xfce and MATE hosts get
 the same default, so the posture does not depend on the desktop a deployment chose.
@@ -595,6 +595,7 @@ This release changes which Linux distributions and desktops the deployment offer
   ```
 
 - **Hosts can run Xfce or MATE.** The new `linuxHostDesktop` parameter chooses the desktop: `gnome`, the default and the only desktop until now, `xfce` or `mate`. The bootstrap installs it, from EPEL on RHEL and from Ubuntu's own packages on Ubuntu, and records it in `/etc/linuxbroker/desktop.conf`. `xrdp-startwm.sh` starts the desktop named there, and the heartbeat reports it in **Fleet health**. The host settings apply to all three desktops; see [Linux Host Screen Lock](#linux-host-screen-lock) for how MATE and Xfce count the screen delays in minutes and when Xfce sessions pick up a change. With `gnome` the extension command is unchanged, so an environment that keeps the default sees no change to its hosts. Changing the value changes the extension command, so the next `azd provision` runs the bootstrap again on existing hosts. It adds the new desktop next to the old one, and the sessions that start afterwards use the new desktop. Drain the hosts first, because the bootstrap also updates every package and reinstalls the release agent, and on Ubuntu it restarts xrdp. To choose Xfce or MATE when you run a bootstrap script by hand, set `LINUXBROKER_DESKTOP=xfce` or `LINUXBROKER_DESKTOP=mate` in its environment.
+- **xpra is removed.** The broker only ever connected through xrdp, and `Connect-LinuxBroker.ps1` never started an xpra application, so the bootstrap no longer adds the xpra repository, installs xpra or opens TCP 443; the host firewall allows only SSH and RDP. The RHEL 8 bootstrap is now built from the RHEL 9 one, so it also stops at the first step that fails, as the RHEL 9 bootstrap does. The extension command is unchanged, so `azd provision` does not run the bootstrap again on existing hosts. Instead, [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) from this release removes xpra from them: it stops and disables the xpra services and sockets, deletes `/etc/yum.repos.d/xpra.repo` and the xpra.org signing key, removes xpra's own packages but not the libraries they brought in, and closes TCP 443 in firewalld or ufw. Each step is best effort and reported in the migration output, and a host where one fails is still migrated. If a host serves something else on TCP 443, open it again after the migration. `Connect-LinuxBroker.ps1` now opens the desktop whatever `-Mode` it is given, and logs a warning for any value other than `desktop`.
 
 ## Manual Steps After `azd up`
 
@@ -826,13 +827,9 @@ If the share is reachable but `df -h ~` inside a session shows the local disk, c
 
 Current hosts keep the home mounted while the host holds the user's lease, which lasts from checkout until the broker returns the host. At return, `manage-lease.sh` unmounts the home before the broker runs `userdel -r`, so only the empty local mount point is removed and the profile stays on the share. The API also refuses to run `userdel -r` while the home is still mounted, and logs `home directory is still mounted` instead. If a checkout fails after the host has written the lease, the API runs the same cleanup before it puts the host back in the pool.
 
-### `xpra.service` is disabled on a RHEL 9 host
-
-The system proxy service installed by the upstream xpra 6.5 packages exits during startup on RHEL 9. Its unit binds a QUIC socket, and the `aioquic` module it needs is not packaged for RHEL 9. Left enabled, the failed unit would mark the host as degraded, so the bootstrap disables `xpra.socket` and `xpra.service` and logs a warning. xrdp, which the **Linux Desktop** app uses, is not affected.
-
 ### A RHEL session is stuck on a lock screen that will not accept the password
 
-The GNOME lock screen inside an xrdp or xpra session often cannot be unlocked after a reconnect. Confirm the screen lock configuration actually applied on the host using the commands in [Linux Host Screen Lock](#linux-host-screen-lock). The most common cause is a missing `system-db:local` line in `/etc/dconf/profile/user`, which makes GNOME ignore the settings even though the files under `/etc/dconf/db/local.d/` are present.
+The GNOME lock screen inside an xrdp session often cannot be unlocked after a reconnect. Confirm the screen lock configuration actually applied on the host using the commands in [Linux Host Screen Lock](#linux-host-screen-lock). The most common cause is a missing `system-db:local` line in `/etc/dconf/profile/user`, which makes GNOME ignore the settings even though the files under `/etc/dconf/db/local.d/` are present.
 
 ### A session starts a different desktop than `linuxHostDesktop` names
 

@@ -33,7 +33,7 @@ param OSVersion string
 @description('Root URL the host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds.')
 param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
 
-@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
+@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
 param disableScreenLock bool = true
 
 @allowed([
