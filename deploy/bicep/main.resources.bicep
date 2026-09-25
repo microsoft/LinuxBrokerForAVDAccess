@@ -81,7 +81,6 @@ param linuxHostCount int = 0
 param linuxHostAuthType string = 'SSH'
 param linuxHostSshPublicKey string = ''
 @allowed([
-  '7-LVM'
   '8-LVM'
   '9-LVM'
   '24_04-lts'

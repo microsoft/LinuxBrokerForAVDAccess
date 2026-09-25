@@ -24,7 +24,6 @@ param adminPassword string
 param sshPublicKey string = ''
 
 @allowed([
-  '7-LVM'
   '8-LVM'
   '9-LVM'
   '24_04-lts'
@@ -62,20 +61,8 @@ var linuxConfiguration = authType == 'SSH'
     }
 
 // The VMs below use Trusted Launch, which requires Generation 2 images. The RHEL SKUs named
-// by OSVersion (7-LVM, 8-LVM, 9-LVM) are Generation 1, so each maps to its Gen2 equivalent.
+// by OSVersion (8-LVM, 9-LVM) are Generation 1, so each maps to its Gen2 equivalent.
 var imageConfigs = {
-  '7-LVM': {
-    image: {
-      publisher: 'RedHat'
-      offer: 'RHEL'
-      sku: '7lvm-gen2'
-      version: 'latest'
-    }
-    script: {
-      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL7-Host.sh'
-      cmd: '${bootstrapEnv} bash Configure-RHEL7-Host.sh ${bootstrapArgs}'
-    }
-  }
   '8-LVM': {
     image: {
       publisher: 'RedHat'

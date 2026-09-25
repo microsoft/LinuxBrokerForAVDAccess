@@ -185,7 +185,7 @@ The custom script extension for the AVD host:
 
 The custom script extensions support the following Linux distributions:
 
-- **Red Hat Enterprise Linux (RHEL) 7, 8, and 9**
+- **Red Hat Enterprise Linux (RHEL) 8 and 9**
 - **Ubuntu 24 Desktop**
 
 These scripts:

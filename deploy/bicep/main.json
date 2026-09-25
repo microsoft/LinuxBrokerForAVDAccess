@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "8661975720375439198"
+      "templateHash": "10979517374697372728"
     }
   },
   "parameters": {
@@ -314,7 +314,6 @@
       "type": "string",
       "defaultValue": "24_04-lts",
       "allowedValues": [
-        "7-LVM",
         "8-LVM",
         "9-LVM",
         "24_04-lts"
@@ -551,7 +550,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "1069093875186774374"
+              "templateHash": "11222893416813489555"
             }
           },
           "parameters": {
@@ -758,7 +757,6 @@
               "type": "string",
               "defaultValue": "24_04-lts",
               "allowedValues": [
-                "7-LVM",
                 "8-LVM",
                 "9-LVM",
                 "24_04-lts"
@@ -2841,7 +2839,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "15055457811505930858"
+                      "templateHash": "2955371549082891553"
                     }
                   },
                   "parameters": {
@@ -2899,7 +2897,6 @@
                     "OSVersion": {
                       "type": "string",
                       "allowedValues": [
-                        "7-LVM",
                         "8-LVM",
                         "9-LVM",
                         "24_04-lts"
@@ -2934,18 +2931,6 @@
                     "adminCredentials": "[if(equals(parameters('authType'), 'Password'), createObject('adminPassword', parameters('adminPassword')), createObject())]",
                     "linuxConfiguration": "[if(equals(parameters('authType'), 'SSH'), createObject('disablePasswordAuthentication', true(), 'ssh', createObject('publicKeys', createArray(createObject('path', format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername')), 'keyData', parameters('sshPublicKey'))))), createObject('disablePasswordAuthentication', false()))]",
                     "imageConfigs": {
-                      "7-LVM": {
-                        "image": {
-                          "publisher": "RedHat",
-                          "offer": "RHEL",
-                          "sku": "7lvm-gen2",
-                          "version": "latest"
-                        },
-                        "script": {
-                          "uri": "[format('{0}/custom_script_extensions/Configure-RHEL7-Host.sh', variables('normalizedScriptSourceRoot'))]",
-                          "cmd": "[format('{0} bash Configure-RHEL7-Host.sh {1}', variables('bootstrapEnv'), variables('bootstrapArgs'))]"
-                        }
-                      },
                       "8-LVM": {
                         "image": {
                           "publisher": "RedHat",

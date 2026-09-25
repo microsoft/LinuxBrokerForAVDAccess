@@ -100,7 +100,7 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `avdSessionHostCount`: number of AVD hosts to provision.
 - `linuxHostVmSize`: Linux host VM size.
 - `avdVmSize`: AVD host VM size.
-- `linuxHostOsVersion`: Linux image SKU. The RHEL options (`7-LVM`, `8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires.
+- `linuxHostOsVersion`: Linux image SKU. The RHEL options (`8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires.
 - `linuxHostDisableScreenLock`: `true` or `false`. Disables the GNOME screen saver and screen lock on RHEL hosts. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - `azureCloudName`: `AzurePublic`, `AzureUSGovernment`, or `AzureCustom`. See [Choosing The Target Azure Cloud](#choosing-the-target-azure-cloud).
 - `scriptSourceRoot`: root URL the Linux host and AVD host bootstrap scripts are downloaded from.
@@ -276,8 +276,8 @@ azd env set linuxHostDisableScreenLock false
 ```
 
 The bootstrap then seeds the profile with the lock screen left enabled. You can also set
-`LINUXBROKER_DISABLE_SCREEN_LOCK=false` in the environment if you run `Configure-RHEL7-Host.sh`,
-`Configure-RHEL8-Host.sh`, or `Configure-RHEL9-Host.sh` by hand.
+`LINUXBROKER_DISABLE_SCREEN_LOCK=false` in the environment if you run `Configure-RHEL8-Host.sh`
+or `Configure-RHEL9-Host.sh` by hand.
 
 Because the values are part of the host settings profile, this posture can also be changed after
 deployment from **Host Settings** in the portal, without redeploying anything.
@@ -553,6 +553,13 @@ This release completes the admin console: sessions and users, broadcast messages
 3. On **Sessions**, send a message to one test session, then run a restart-only maintenance run over one idle host and confirm it comes back in service. Try **Security updates** on a single host before a larger run.
 
 Every layer tolerates the others being one release behind during the rollout. The previous API build keeps working against the new database: the changed procedures only add result columns, and scaling's normal call is unchanged. A portal that meets an older API hides the dashboard's trends and Attention panel, pages the host list itself, points the Scaling section at the scaling rules, and shows the new pages' errors. A task that meets an older API logs a `404` from the maintenance timer and carries on.
+
+## Upgrading To Distribution And Desktop Support
+
+This release changes which Linux distributions and desktops the deployment offers (items 3.1–3.4, 3.6 and 3.7 of the [roadmap](../docs/ROADMAP.md)).
+
+- **RHEL 7 is no longer offered.** `7-LVM` is removed from `linuxHostOsVersion`, along with `Configure-RHEL7-Host.sh`; RHEL 7 left maintenance on June 30, 2024. An azd environment that still stores `linuxHostOsVersion=7-LVM` fails template validation at the next `azd provision`, even with `deployLinuxHosts=false`, so set it to a supported value first. A VM's image cannot be changed in place, so for existing RHEL 7 hosts either also set `deployLinuxHosts=false`, which leaves them as they are, or replace them: drain them, delete the VMs in Azure and their records in the portal, and run `azd provision`. Existing RHEL 7 hosts keep working with the broker, and `patch-host.sh` and the host migration still support them.
+
 ## Manual Steps After `azd up`
 
 ### Admin consent
