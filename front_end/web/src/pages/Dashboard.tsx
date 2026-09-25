@@ -1,5 +1,9 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
+import { AttentionPanel } from '../components/dashboard/AttentionPanel';
+import { CapacityCard } from '../components/dashboard/CapacityCard';
+import { CheckoutHealthCard } from '../components/dashboard/CheckoutHealthCard';
 import { ActionBadge } from '../components/ui/Badge';
 import { ButtonLink } from '../components/ui/Button';
 import {
@@ -15,11 +19,11 @@ import { Switch } from '../components/ui/Field';
 import { StatCard } from '../components/ui/StatCard';
 import { Icon } from '../components/Icon';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
-import { useDashboard } from '../hooks/useBroker';
+import { useAttention, useDashboard, useUtilization } from '../hooks/useBroker';
 import { useCan } from '../hooks/useSession';
 import { errorMessage } from '../lib/api';
 import { formatNumber, valueOrDash } from '../lib/format';
-import type { DashboardStats, FleetHealthSummary } from '../types/broker';
+import type { DashboardStats, FleetHealthSummary, UtilizationHours } from '../types/broker';
 
 const SEGMENTS = [
   { key: 'checked_out', label: 'Checked out', colour: 'var(--lb-accent-fg)' },
@@ -32,10 +36,20 @@ const SEGMENTS = [
 export function Dashboard() {
   const autoRefresh = useAutoRefresh(30);
   const { data, isPending, isFetching, error, refetch } = useDashboard(autoRefresh.intervalMs);
+  const [hours, setHours] = useState<UtilizationHours>(24);
+  const utilization = useUtilization(hours, autoRefresh.intervalMs);
+  const attention = useAttention(autoRefresh.intervalMs);
   const can = useCan();
 
   const stats = data?.stats ?? null;
   const unavailable = Boolean(data?.apiError) || (data !== undefined && stats === null);
+  const trends = utilization.data?.Available === false ? null : utilization;
+
+  function refreshAll() {
+    void refetch();
+    void attention.refetch();
+    void utilization.refetch();
+  }
 
   return (
     <>
@@ -54,11 +68,11 @@ export function Dashboard() {
               checked={autoRefresh.enabled}
               onChange={autoRefresh.setEnabled}
             />
-            {isFetching ? <Spinner label="" /> : null}
+            {isFetching || attention.isFetching ? <Spinner label="" /> : null}
             <button
               type="button"
               className="lb-btn border-[var(--lb-hairline)] bg-[var(--lb-glass-bg-strong)] px-2.5 py-1.5 text-xs"
-              onClick={() => void refetch()}
+              onClick={refreshAll}
             >
               <Icon name="refresh" size={14} />
               Refresh
@@ -85,6 +99,8 @@ export function Dashboard() {
         </Notice>
       ) : null}
 
+      <AttentionPanel data={attention.data} />
+
       {stats ? (
         <>
           <div className="mb-5 grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -107,7 +123,11 @@ export function Dashboard() {
             <StatCard
               label="Checked out"
               value={stats.checked_out}
-              hint={`${stats.utilization}% of the pool in use`}
+              hint={
+                stats.utilization_basis === 'serviceable'
+                  ? `${stats.utilization}% of the hosts that can take a user are in use`
+                  : `${stats.utilization}% of the pool in use`
+              }
               icon="person"
               tone="accent"
               to="/vms"
@@ -123,6 +143,20 @@ export function Dashboard() {
           </div>
 
           {data?.fleetHealth ? <FleetHealthStrip health={data.fleetHealth} /> : null}
+
+          {trends ? (
+            <div className="mb-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
+              <CapacityCard
+                className="xl:col-span-2"
+                hours={hours}
+                onHoursChange={setHours}
+                data={trends.data}
+                busy={trends.isFetching}
+                error={trends.error}
+              />
+              <CheckoutHealthCard stats={trends.data?.Checkouts} hours={trends.data?.Hours ?? hours} />
+            </div>
+          ) : null}
 
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <PoolComposition stats={stats} />
@@ -258,7 +292,15 @@ function PoolComposition({ stats }: { stats: DashboardStats }) {
                 value={`${stats.ready}`}
                 tone={stats.ready ? 'ok' : 'danger'}
               />
-              <Metric label="Utilization" value={`${stats.utilization}%`} />
+              <Metric
+                label="Utilization"
+                value={`${stats.utilization}%`}
+                suffix={
+                  stats.utilization_basis === 'serviceable' && stats.serviceable !== null && stats.serviceable !== undefined
+                    ? `${stats.in_use ?? 0} of ${stats.serviceable} in use`
+                    : undefined
+                }
+              />
             </dl>
           </>
         ) : (

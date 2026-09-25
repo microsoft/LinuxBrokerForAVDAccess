@@ -66,6 +66,8 @@ EXPECTED_ROLES = {
     "update_scaling_schedule": ADMIN,
     "delete_scaling_schedule": ADMIN,
     "preview_scaling": READ,
+    "get_utilization_metrics": READ,
+    "get_attention_items": READ,
 }
 
 EXPECTED_GROUPS = {

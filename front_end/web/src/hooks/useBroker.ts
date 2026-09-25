@@ -1,10 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { apiGet, apiPost } from '../lib/api';
 import { queryKeys } from '../lib/queryClient';
 import type {
   ActivityLogEntry,
   ApplySettingsResult,
+  AttentionItems,
   AuditEntry,
   BroadcastResult,
   BrokerUserDetails,
@@ -29,6 +30,8 @@ import type {
   SignOutResult,
   TimeZoneOption,
   UserSearchResult,
+  UtilizationHours,
+  UtilizationMetrics,
   Vm,
   VmAttributesInput,
   VmInput,
@@ -40,6 +43,28 @@ export function useDashboard(refreshMs: number | false) {
   return useQuery({
     queryKey: queryKeys.dashboard,
     queryFn: ({ signal }) => apiGet<Dashboard>('/dashboard', signal),
+    refetchInterval: refreshMs,
+  });
+}
+
+/**
+ * Capacity over the last day or week. The series only moves when the scaler runs, so it
+ * refreshes at most every two minutes; switching windows keeps the previous chart until the
+ * new one arrives.
+ */
+export function useUtilization(hours: UtilizationHours, refreshMs: number | false) {
+  return useQuery({
+    queryKey: queryKeys.utilization(hours),
+    queryFn: ({ signal }) => apiGet<UtilizationMetrics>(`/metrics/utilization?hours=${hours}`, signal),
+    refetchInterval: refreshMs === false ? false : Math.max(refreshMs, 120_000),
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useAttention(refreshMs: number | false) {
+  return useQuery({
+    queryKey: queryKeys.attention,
+    queryFn: ({ signal }) => apiGet<AttentionItems>('/metrics/attention', signal),
     refetchInterval: refreshMs,
   });
 }
@@ -74,8 +99,8 @@ export function useVmHistory(search: string) {
 /**
  * Invalidate everything derived from the VM list.
  *
- * Any VM mutation can change the dashboard counters, the host settings drift table and
- * fleet health as well as the list itself, so they are refreshed together.
+ * Any VM mutation can change the dashboard counters, the host settings drift table, fleet
+ * health and what needs attention as well as the list itself, so they are refreshed together.
  */
 function useVmInvalidation() {
   const queryClient = useQueryClient();
@@ -86,6 +111,7 @@ function useVmInvalidation() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.hostSettings });
     void queryClient.invalidateQueries({ queryKey: queryKeys.fleetHealth });
     void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.attention });
   };
 }
 

@@ -179,6 +179,22 @@ AUDIT_PURGE_MAX_BATCHES = 500
 AUDIT_PURGE_TIME_BUDGET_SECONDS = 90
 
 # ===============================
+# Dashboard trends
+#
+# Every checkout is recorded with its outcome and duration, and every host start with how
+# long it took to become reachable. The daily audit purge removes both after this many days;
+# dbo.PurgeCheckoutEvents clamps to the same range.
+CHECKOUT_EVENT_RETENTION_DAYS = env_int('CHECKOUT_EVENT_RETENTION_DAYS', 90, minimum=7, maximum=3650)
+# GET /api/metrics/utilization windows, in hours, and the bucket each is drawn with.
+UTILIZATION_WINDOWS = {24: 15, 168: 60}
+# The Attention panel flags a powered-on host unreachable this long, a cleanup pending this
+# long, a checkout with no session this long, and counts denied checkouts over this window.
+ATTENTION_UNREACHABLE_MINUTES = 10
+ATTENTION_CLEANUP_MINUTES = 15
+ATTENTION_NOT_CONNECTED_MINUTES = 30
+ATTENTION_DENIED_MINUTES = 60
+
+# ===============================
 # Linux host agent
 #
 # The version every script in linux_host/ declares as LINUXBROKER_AGENT_VERSION. Bump it

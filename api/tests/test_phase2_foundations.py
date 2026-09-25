@@ -251,7 +251,9 @@ def test_the_purge_works_off_a_backlog_and_audits_itself(client, fake_db, audit_
 
     body = client.post("/api/audit/purge", json={}).get_json()
 
-    assert body == {"Deleted": 2012, "RetentionDays": app_module.AUDIT_RETENTION_DAYS, "MoreRemaining": False}
+    assert {key: body[key] for key in ("Deleted", "RetentionDays", "MoreRemaining")} == {
+        "Deleted": 2012, "RetentionDays": app_module.AUDIT_RETENTION_DAYS, "MoreRemaining": False,
+    }
     calls = [call for call in fake_db.calls if call["proc"] == "PurgeAuditLog"]
     assert [call["params"] for call in calls] == [(app_module.AUDIT_RETENTION_DAYS, 2000)] * 2
     assert "@MaxBatches = 1" in calls[0]["sql"]

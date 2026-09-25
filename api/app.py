@@ -243,6 +243,7 @@ def reset_caches():
         _graph_token_state.update({'token': None, 'expires_at': 0.0})
     with _ssh_key_lock:
         _ssh_key_state.update({'path': None, 'fetched_at': 0.0})
+    _checkout_event_state['missing_logged'] = False
     cache.clear()
 
 def is_duplicate_key_error(error) -> bool:
@@ -1683,6 +1684,11 @@ def get_vm_summary():
         fields = ('TotalVMs', 'Available', 'CheckedOut', 'Maintenance', 'Released',
                   'PoweredOn', 'PoweredOff', 'Unreachable', 'Ready', 'CleanupPending', 'Draining')
         normalized = {field: int(summary.get(field) or 0) for field in fields}
+        # The scaler's counts, only from a database that has them (123), so the portal can
+        # tell them from a real zero and fall back to its older utilization figure.
+        for field in ('Serviceable', 'InUse'):
+            if field in summary:
+                normalized[field] = int(summary.get(field) or 0)
 
         return jsonify(normalized), 200
 
@@ -1693,10 +1699,51 @@ def get_vm_summary():
         logger.exception("Failed to build the VM summary.")
         return error_response("Unable to retrieve the virtual machine summary.", 500)
 
+CHECKOUT_OUTCOMES = ('Assigned', 'Reused', 'NoneAvailable', 'ProvisionFailed', 'Error')
+_checkout_event_state = {'missing_logged': False}
+
+
+def record_checkout_event(event, started):
+    """Record one checkout's outcome and duration for the dashboard's demand and latency figures.
+
+    Never raises: a checkout must not fail because its statistics could not be written. A
+    database without dbo.RecordCheckoutEvent, while the API is upgraded ahead of SQL, is
+    logged once per process rather than on every checkout.
+    """
+    duration_ms = max(0, int((time.monotonic() - started) * 1000))
+    try:
+        with db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "EXEC RecordCheckoutEvent @Username = %s, @AvdHost = %s, @Outcome = %s, @DurationMs = %s, @Hostname = %s",
+                    (event.get('username'), event.get('avdhost'), event['outcome'], duration_ms, event.get('hostname'))
+                )
+                cursor.fetchone()
+            conn.commit()
+    except Exception as e:
+        if not is_missing_procedure_error(e):
+            logger.warning("Could not record the checkout event (%s).", event.get('outcome'), exc_info=True)
+        elif not _checkout_event_state['missing_logged']:
+            _checkout_event_state['missing_logged'] = True
+            logger.warning("RecordCheckoutEvent is not deployed yet; checkouts are not counted until the SQL upgrade.")
+
+
 @app.route('/api/vms/checkout', methods=['POST'])
 @token_required([ROLE_AVD_HOST, ROLE_ADMIN], required_group_ids=[AVD_HOST_GROUP_ID])
 @audited('vm.checkout', target_type='vm')
 def checkout_vm():
+    # Every checkout that passes validation is counted with its outcome, including the ones
+    # that find no host: that is the demand the pool did not meet.
+    started = time.monotonic()
+    event = {}
+    try:
+        return _checkout_vm(event)
+    finally:
+        if event.get('outcome') in CHECKOUT_OUTCOMES:
+            record_checkout_event(event, started)
+
+
+def _checkout_vm(event):
     try:
         req_body = request.get_json(silent=True) or {}
 
@@ -1710,6 +1757,7 @@ def checkout_vm():
         if not username:
             return error_response("The username contains no characters a Linux account can use.", 400)
 
+        event.update(username=username, avdhost=avdhost, outcome='Error')
         g.audit_detail = {'username': username, 'avdhost': avdhost}
         user_password = generate_secure_password()
 
@@ -1724,6 +1772,7 @@ def checkout_vm():
             return error_response("Unable to check out a virtual machine.", 500)
 
         if not rows or 'Message' in rows[0]:
+            event['outcome'] = 'NoneAvailable'
             return error_response("No available VM found. Please try again.", 409)
 
         checked_out_vm = rows[0]
@@ -1731,6 +1780,7 @@ def checkout_vm():
         vm_hostname = checked_out_vm.get('Hostname')
         lease_id = normalize_lease_id(checked_out_vm.get('LeaseId'))
         g.audit_target_id = vm_hostname
+        event['hostname'] = vm_hostname
 
         if not vm_hostname or not lease_id:
             return error_response("No hostname or LeaseId found for the checked-out VM.", 500)
@@ -1753,8 +1803,10 @@ def checkout_vm():
                     returned.get('ReturnedLeaseId') or lease_id,
                     timeout=30
                 )
+            event['outcome'] = 'ProvisionFailed'
             return error_response(f"Failed to create or update user '{username}' on VM '{vm_hostname}'.", 500)
 
+        event['outcome'] = 'Reused' if checked_out_vm.get('CheckoutType') == 'Reused' else 'Assigned'
         response_data = {
             "VMID": vmid,
             "Hostname": vm_hostname,
@@ -1766,6 +1818,8 @@ def checkout_vm():
         return jsonify(serialize_for_json(response_data)), 200
 
     except DatabaseUnavailable as e:
+        # Recording the event would wait for the same unreachable database.
+        event.clear()
         logger.error("Database connection failed while checking out a VM.")
         return database_unavailable_response(e)
 
@@ -4390,6 +4444,233 @@ def get_host_health():
         return error_response("Unable to retrieve fleet health.", 500)
 
 # ===============================
+# Dashboard metrics APIs
+#
+# Capacity over time, and what needs an operator now. The utilization series and checkout
+# statistics come from the scaling runs, checkout events and host-start events; the attention
+# items from the broker's current state and the host agents' heartbeats.
+
+ATTENTION_SEVERITY = {
+    'no-ready-hosts': 'critical',
+    'denied-checkouts': 'critical',
+    'unreachable': 'warning',
+    'cleanup-stuck': 'warning',
+    'never-connected': 'warning',
+}
+HEALTH_FLAG_SEVERITY = {
+    'no-heartbeat': 'warning',
+    'stale': 'warning',
+    'xrdp-down': 'warning',
+    'nfs-unreachable': 'warning',
+    'low-disk': 'warning',
+    'agent-outdated': 'info',
+    'settings-drift': 'info',
+}
+ATTENTION_SEVERITY_ORDER = ('critical', 'warning', 'info')
+ATTENTION_MAX_HOSTNAMES = 10
+CHECKOUT_STAT_COUNTS = (
+    'Total', 'Assigned', 'Reused', 'NoneAvailable', 'ProvisionFailed', 'Errors', 'DeniedLastHour', 'HostStarts',
+)
+
+
+def _optional_float(value):
+    return float(value) if value is not None else None
+
+
+def _optional_int(value):
+    return int(value) if value is not None else None
+
+
+def _utc_text(value):
+    return value.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def utilization_window(hours, now=None):
+    """(start, end, bucket minutes) in naive UTC: `hours` of whole buckets ending with the one
+    that holds now, so every refresh draws the same bucket boundaries."""
+    bucket = UTILIZATION_WINDOWS[hours]
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
+    current = now - timedelta(minutes=(now.hour * 60 + now.minute) % bucket)
+    end = current + timedelta(minutes=bucket)
+    return end - timedelta(hours=hours), end, bucket
+
+
+def utilization_point(row):
+    return {
+        'BucketStartUtc': row.get('BucketStartUtc'),
+        'Runs': int(row.get('Runs') or 0),
+        'PoweredOn': _optional_float(row.get('PoweredOn')),
+        'InUse': _optional_float(row.get('InUse')),
+        'Serviceable': _optional_float(row.get('Serviceable')),
+        'PeakInUse': _optional_int(row.get('PeakInUse')),
+        'MinVMs': _optional_int(row.get('MinVMs')),
+        'MaxVMs': _optional_int(row.get('MaxVMs')),
+        'Checkouts': int(row.get('Checkouts') or 0),
+        'Denied': int(row.get('Denied') or 0),
+        'Failed': int(row.get('Failed') or 0),
+    }
+
+
+def checkout_stats(row):
+    stats = {field: int(row.get(field) or 0) for field in CHECKOUT_STAT_COUNTS}
+    stats.update({
+        'P50Ms': _optional_int(row.get('P50Ms')),
+        'P95Ms': _optional_int(row.get('P95Ms')),
+        'StartP50Seconds': _optional_int(row.get('StartP50Seconds')),
+        'StartP95Seconds': _optional_int(row.get('StartP95Seconds')),
+        'LastDeniedUtc': row.get('LastDeniedUtc'),
+        'DeniedPercent': round(stats['NoneAvailable'] * 100.0 / stats['Total'], 1) if stats['Total'] else None,
+    })
+    return stats
+
+
+@app.route('/api/metrics/utilization', methods=['GET'])
+@token_required(READ_ROLES)
+def get_utilization_metrics():
+    """Capacity and checkout health over the last day (?hours=24) or week (?hours=168).
+
+    Series has one point per bucket, empty ones included, so a chart can show gaps. A database
+    without the checkout events (115-123) answers 404, as an API without this route does.
+    """
+    try:
+        hours = int((request.args.get('hours') or '24').strip())
+    except ValueError:
+        hours = None
+    if hours not in UTILIZATION_WINDOWS:
+        return error_response(f"hours must be one of: {', '.join(str(h) for h in UTILIZATION_WINDOWS)}.", 400)
+
+    start, end, bucket = utilization_window(hours)
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC GetUtilizationSeries @FromUtc = %s, @ToUtc = %s, @BucketMinutes = %s",
+                    (start, end, bucket)
+                )
+                series = cursor.fetchall() or []
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetCheckoutStats @FromUtc = %s, @ToUtc = %s", (start, end))
+                stats = cursor.fetchone() or {}
+
+        return jsonify({
+            'Hours': hours,
+            'BucketMinutes': bucket,
+            'FromUtc': _utc_text(start),
+            'ToUtc': _utc_text(end),
+            'Series': [utilization_point(row) for row in series],
+            'Checkouts': checkout_stats(stats),
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading utilization metrics.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            logger.warning("GetUtilizationSeries is not deployed yet; capacity trends are unavailable.")
+            return error_response("Capacity trends are not available until the database is upgraded.", 404)
+        logger.exception("Failed to read utilization metrics.")
+        return error_response("Unable to retrieve utilization metrics.", 500)
+
+
+def attention_item(row):
+    kind = row.get('Kind')
+    age = row.get('AgeSeconds')
+    return {
+        'Kind': kind,
+        'Severity': ATTENTION_SEVERITY.get(kind, 'warning'),
+        'VMID': row.get('VMID'),
+        'Hostname': row.get('Hostname'),
+        'Username': row.get('Username'),
+        'AgeSeconds': max(0, age) if isinstance(age, int) else None,
+        'Count': row.get('ItemCount'),
+    }
+
+
+def health_attention_items(hosts, already_listed=()):
+    """One item per health flag, with the hosts that have it.
+
+    Only reachable, powered-on hosts count: a host that is starting has not sent a heartbeat
+    yet, and one the probe cannot reach is already listed as unreachable.
+    """
+    listed = set(already_listed)
+    by_flag = {}
+    for host in hosts:
+        if host.get('Status') == 'off' or host.get('NetworkStatus') != 'Reachable' or host.get('Hostname') in listed:
+            continue
+        for flag in host.get('Flags') or []:
+            by_flag.setdefault(flag, []).append(host.get('Hostname'))
+
+    items = []
+    for flag in HEALTH_FLAGS:
+        hostnames = sorted(name for name in by_flag.get(flag, []) if name)
+        if hostnames:
+            items.append({
+                'Kind': 'health',
+                'Flag': flag,
+                'Severity': HEALTH_FLAG_SEVERITY.get(flag, 'warning'),
+                'Count': len(hostnames),
+                'Hostnames': hostnames[:ATTENTION_MAX_HOSTNAMES],
+            })
+    return items
+
+
+@app.route('/api/metrics/attention', methods=['GET'])
+@token_required(READ_ROLES)
+def get_attention_items():
+    """What needs an operator now, most severe first: no host ready, denied checkouts, hosts
+    unreachable, cleanups stuck, checkouts with no session, and host agent health flags.
+
+    Incomplete is true while the database does not have GetAttentionItems yet; the host health
+    items are still returned.
+    """
+    try:
+        items = []
+        incomplete = False
+        try:
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute(
+                        "EXEC GetAttentionItems @UnreachableMinutes = %s, @CleanupMinutes = %s, "
+                        "@NotConnectedMinutes = %s, @DeniedMinutes = %s",
+                        (ATTENTION_UNREACHABLE_MINUTES, ATTENTION_CLEANUP_MINUTES,
+                         ATTENTION_NOT_CONNECTED_MINUTES, ATTENTION_DENIED_MINUTES)
+                    )
+                    items.extend(attention_item(row) for row in cursor.fetchall() or [])
+        except DatabaseUnavailable:
+            raise
+        except Exception as e:
+            if not is_missing_procedure_error(e):
+                raise
+            logger.warning("GetAttentionItems is not deployed yet; listing host health only.")
+            incomplete = True
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetHostHealth @Hostname = %s", (None,))
+                health_rows = cursor.fetchall() or []
+
+        unreachable = [item['Hostname'] for item in items if item['Kind'] == 'unreachable']
+        items.extend(health_attention_items(
+            [host_health(row, EXPECTED_HOST_AGENT_VERSION) for row in health_rows], unreachable
+        ))
+        # Stable, so each severity keeps the procedure's order: the longest-standing first.
+        items.sort(key=lambda item: ATTENTION_SEVERITY_ORDER.index(item['Severity']))
+
+        summary = {'Total': len(items)}
+        summary.update({severity.capitalize(): sum(1 for item in items if item['Severity'] == severity)
+                        for severity in ATTENTION_SEVERITY_ORDER})
+        return jsonify(serialize_for_json({'Items': items, 'Summary': summary, 'Incomplete': incomplete})), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading attention items.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read attention items.")
+        return error_response("Unable to retrieve attention items.", 500)
+
+# ===============================
 # Sessions and Users APIs
 #
 # Where each user is and why they cannot connect: the broker's assignments joined with the
@@ -5274,10 +5555,45 @@ def get_audit_log():
         return error_response("Unable to retrieve the audit log.", 500)
 
 
+def purge_checkout_events(deadline):
+    """Remove checkout and host-start events older than CHECKOUT_EVENT_RETENTION_DAYS.
+
+    Runs after the audit purge, inside the same time budget, but always gets one batch so a
+    long audit backlog cannot starve it. Never raises: the dashboard's history must not fail
+    the audit purge. Returns what it removed, or None when the database has no events yet.
+    """
+    result = {'CheckoutEventsDeleted': 0, 'HostStartEventsDeleted': 0, 'MoreRemaining': True}
+    batches = 0
+    try:
+        with db_connection() as conn:
+            while result['MoreRemaining'] and batches < AUDIT_PURGE_MAX_BATCHES and (batches == 0 or time.monotonic() < deadline):
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute(
+                        "EXEC PurgeCheckoutEvents @RetentionDays = %s, @BatchSize = %s",
+                        (CHECKOUT_EVENT_RETENTION_DAYS, AUDIT_PURGE_BATCH_SIZE)
+                    )
+                    row = cursor.fetchone() or {}
+                conn.commit()
+
+                result['CheckoutEventsDeleted'] += int(row.get('CheckoutEventsDeleted') or 0)
+                result['HostStartEventsDeleted'] += int(row.get('HostStartEventsDeleted') or 0)
+                result['MoreRemaining'] = bool(row.get('MoreRemaining'))
+                batches += 1
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            logger.warning("PurgeCheckoutEvents is not deployed yet; there are no checkout events to purge.")
+            return None
+        logger.warning("Could not purge checkout events.", exc_info=True)
+        result['Failed'] = True
+    return result
+
+
 @app.route('/api/audit/purge', methods=['POST'])
 @token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
 def purge_audit_log():
-    """Remove audit entries older than AUDIT_RETENTION_DAYS. The scheduled task runs it daily.
+    """Remove audit entries older than AUDIT_RETENTION_DAYS, then checkout and host-start
+    events older than CHECKOUT_EVENT_RETENTION_DAYS. The scheduled task runs it daily, so an
+    older task build purges the events too.
 
     Not decorated with @audited: the purge is recorded below with what it removed, whoever
     called it.
@@ -5314,17 +5630,31 @@ def purge_audit_log():
                 })
             raise
 
-        audit('audit.purge', 'audit', None, AUDIT_SUCCESS, {
+        events = purge_checkout_events(deadline)
+        detail = {
             'deleted': deleted,
             'retentionDays': AUDIT_RETENTION_DAYS,
             'moreRemaining': more_remaining,
-        })
+        }
+        if events is not None:
+            detail.update({
+                'checkoutEventsDeleted': events['CheckoutEventsDeleted'],
+                'hostStartEventsDeleted': events['HostStartEventsDeleted'],
+                'eventRetentionDays': CHECKOUT_EVENT_RETENTION_DAYS,
+                'eventsMoreRemaining': events['MoreRemaining'],
+            })
+            if events.get('Failed'):
+                detail['eventsFailed'] = True
+        audit('audit.purge', 'audit', None, AUDIT_SUCCESS, detail)
 
-        return jsonify({
+        body = {
             'Deleted': deleted,
             'RetentionDays': AUDIT_RETENTION_DAYS,
             'MoreRemaining': more_remaining,
-        }), 200
+        }
+        if events is not None:
+            body['CheckoutEvents'] = dict(events, RetentionDays=CHECKOUT_EVENT_RETENTION_DAYS)
+        return jsonify(body), 200
 
     except DatabaseUnavailable as e:
         logger.error("Database connection failed while purging the audit log.")

@@ -416,7 +416,13 @@ export interface DashboardStats {
   /** Absent from BFF builds that predate drain. */
   draining?: number;
   attention: number;
+  /** In use out of serviceable when `utilization_basis` is 'serviceable'. */
   utilization: number;
+  /** The scaler's counts. Null or absent from a broker API that predates them. */
+  serviceable?: number | null;
+  in_use?: number | null;
+  /** 'serviceable' is the scaler's figure; 'total' the older checked-out share of every host. */
+  utilization_basis?: 'serviceable' | 'total';
   pct: PoolComposition;
 }
 
@@ -426,6 +432,82 @@ export interface Dashboard {
   /** Null when the broker API predates host heartbeats or could not report them. */
   fleetHealth?: (FleetHealthSummary & { ExpectedAgentVersion?: string | null }) | null;
   apiError: boolean;
+}
+
+/** One bucket of the capacity chart. Averages over the scaling runs in it; null with none. */
+export interface UtilizationPoint {
+  BucketStartUtc: string;
+  Runs: number;
+  PoweredOn: number | null;
+  InUse: number | null;
+  Serviceable: number | null;
+  PeakInUse: number | null;
+  MinVMs: number | null;
+  MaxVMs: number | null;
+  Checkouts: number;
+  Denied: number;
+  Failed: number;
+}
+
+export interface CheckoutStats {
+  Total: number;
+  Assigned: number;
+  Reused: number;
+  NoneAvailable: number;
+  ProvisionFailed: number;
+  Errors: number;
+  P50Ms: number | null;
+  P95Ms: number | null;
+  DeniedLastHour: number;
+  DeniedPercent: number | null;
+  LastDeniedUtc: string | null;
+  HostStarts: number;
+  StartP50Seconds: number | null;
+  StartP95Seconds: number | null;
+}
+
+export type UtilizationHours = 24 | 168;
+
+/** Available is false while the broker or its database predates the trends. */
+export interface UtilizationMetrics {
+  Available: boolean;
+  Hours: UtilizationHours;
+  BucketMinutes?: number;
+  FromUtc?: string;
+  ToUtc?: string;
+  Series?: UtilizationPoint[];
+  Checkouts?: CheckoutStats;
+}
+
+export type AttentionSeverity = 'critical' | 'warning' | 'info';
+
+export type AttentionKind =
+  | 'no-ready-hosts'
+  | 'denied-checkouts'
+  | 'unreachable'
+  | 'cleanup-stuck'
+  | 'never-connected'
+  | 'health';
+
+export interface AttentionItem {
+  Kind: AttentionKind;
+  Severity: AttentionSeverity;
+  VMID?: number | null;
+  Hostname?: string | null;
+  Username?: string | null;
+  AgeSeconds?: number | null;
+  Count?: number | null;
+  /** For a health item: the flag, and the first hosts that have it. */
+  Flag?: HealthFlag;
+  Hostnames?: string[];
+}
+
+export interface AttentionItems {
+  Available: boolean;
+  Items: AttentionItem[];
+  Summary: { Total: number; Critical?: number; Warning?: number; Info?: number };
+  /** True while the database cannot report the broker's own conditions yet. */
+  Incomplete: boolean;
 }
 
 export interface Paged<T> {

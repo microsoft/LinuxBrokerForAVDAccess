@@ -7,7 +7,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App } from './App';
 import { ToastProvider } from './components/ui/Toast';
 import { setCsrfToken } from './lib/api';
-import type { SessionInfo } from './types/broker';
+import type { DashboardStats, SessionInfo } from './types/broker';
 
 /*
  * Integration cover for the whole client: session bootstrap, the app shell, the
@@ -203,6 +203,49 @@ function freshUserDetails() {
   };
 }
 
+function utilizationFixture(hours: 24 | 168) {
+  const bucket = hours === 24 ? 15 : 60;
+  const count = (hours * 60) / bucket;
+  const end = Date.UTC(2026, 6, 13, 12, 0, 0);
+  const Series = Array.from({ length: count }, (_, index) => {
+    const idle = index < 4;
+    return {
+      BucketStartUtc: new Date(end - (count - index) * bucket * 60_000).toISOString().replace('.000Z', 'Z'),
+      Runs: idle ? 0 : 3,
+      PoweredOn: idle ? null : 4,
+      InUse: idle ? null : 2 + (index % 2),
+      Serviceable: idle ? null : 4,
+      PeakInUse: idle ? null : 3,
+      MinVMs: idle ? null : 2,
+      MaxVMs: idle ? null : 6,
+      Checkouts: index % 10 === 0 ? 2 : 0,
+      Denied: index === 50 ? 2 : 0,
+      Failed: 0,
+    };
+  });
+  return {
+    Available: true, Hours: hours, BucketMinutes: bucket, Series,
+    Checkouts: {
+      Total: 40, Assigned: 22, Reused: 16, NoneAvailable: 2, ProvisionFailed: 0, Errors: 0, P50Ms: 2100, P95Ms: 8400,
+      DeniedLastHour: 0, DeniedPercent: 5, LastDeniedUtc: '2026-07-13T09:30:00Z', HostStarts: 3, StartP50Seconds: 95,
+      StartP95Seconds: 180,
+    },
+  };
+}
+
+const NO_TRENDS = { Available: false, Hours: 24 };
+const NOTHING_NEEDS_ATTENTION = { Available: true, Items: [], Summary: { Total: 0 }, Incomplete: false };
+const ATTENTION = {
+  Available: true,
+  Incomplete: false,
+  Summary: { Total: 3, Critical: 1, Warning: 2, Info: 0 },
+  Items: [
+    { Kind: 'no-ready-hosts', Severity: 'critical' },
+    { Kind: 'unreachable', Severity: 'warning', VMID: 2, Hostname: 'linux-host-02', AgeSeconds: 1500, Count: null },
+    { Kind: 'health', Severity: 'warning', Flag: 'xrdp-down', Count: 1, Hostnames: ['linux-host-01'] },
+  ],
+};
+
 function jsonResponse(body: unknown, status = 200) {
   return {
     ok: status < 400,
@@ -212,7 +255,9 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 let session: typeof SESSION = SESSION;
-let dashboard: typeof DASHBOARD & { fleetHealth?: unknown } = DASHBOARD;
+let dashboard: Omit<typeof DASHBOARD, 'stats'> & { stats: DashboardStats; fleetHealth?: unknown } = DASHBOARD;
+let trends: 'off' | 'on' = 'off';
+let attention: unknown = NOTHING_NEEDS_ATTENTION;
 const requests: string[] = [];
 
 function stubFetch() {
@@ -223,6 +268,10 @@ function stubFetch() {
 
     if (url === '/api/ui/session' || url.startsWith('/api/ui/session?')) return jsonResponse(session);
     if (url.startsWith('/api/ui/dashboard')) return jsonResponse(dashboard);
+    if (url.startsWith('/api/ui/metrics/utilization')) {
+      return jsonResponse(trends === 'off' ? NO_TRENDS : utilizationFixture(url.includes('hours=168') ? 168 : 24));
+    }
+    if (url.startsWith('/api/ui/metrics/attention')) return jsonResponse(attention);
     if (url.startsWith('/api/ui/vms/history')) return jsonResponse(EMPTY_PAGE);
     const action = /^\/api\/ui\/vms\/(\d+)\/(start|stop|restart|drain|undrain)$/.exec(url);
     if (action) return jsonResponse({ VMID: Number(action[1]), Hostname: 'linux-host-02', message: `${action[2]} requested.` });
@@ -289,6 +338,8 @@ function renderApp(route: string) {
 beforeEach(() => {
   session = SESSION;
   dashboard = DASHBOARD;
+  trends = 'off';
+  attention = NOTHING_NEEDS_ATTENTION;
   userDetails = freshUserDetails();
   scalingPolicy = SCALING_POLICY;
   requests.length = 0;
@@ -574,6 +625,60 @@ describe('App', () => {
 
     expect(await screen.findByText('1 of 2 powered-on hosts reporting')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '1 no heartbeat' })).toHaveAttribute('href', '/vms/health?show=no-heartbeat');
+  });
+
+  it('charts capacity and checkout health over a day or a week', async () => {
+    trends = 'on';
+    renderApp('/');
+
+    const chart = await screen.findByRole('img', { name: /^Capacity over the last 24 hours\./ });
+    expect(chart).toHaveAccessibleName(
+      'Capacity over the last 24 hours. At most 3 hosts were in use at once. About 4 hosts could take a user. The scaling maximum was 6. 2 checkouts found no host.',
+    );
+    const health = screen.getByRole('heading', { name: 'Checkout health' }).closest('.lb-glass') as HTMLElement;
+    expect(within(health).getByText('2.1 s')).toBeInTheDocument();
+    expect(within(health).getByText(/^5% of checkouts · last /)).toBeInTheDocument();
+    expect(within(health).getByText('Median of 3 starts · 95% within 3 min')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: '7 days' }));
+    expect(await screen.findByRole('img', { name: /^Capacity over the last 7 days\./ })).toBeInTheDocument();
+    expect(requests).toContain('/api/ui/metrics/utilization?hours=168');
+    expect(screen.getByRole('button', { name: '7 days' })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(screen.getByRole('button', { name: 'View as table' }));
+    const table = screen.getByRole('table', { name: 'Capacity over the last 7 days, by 60-minute interval' });
+    expect(within(table).getAllByRole('row')).toHaveLength(169);
+  });
+
+  it('puts what needs attention first on the dashboard', async () => {
+    attention = ATTENTION;
+    renderApp('/');
+
+    const panel = await screen.findByRole('region', { name: 'Needs attention now' });
+    expect(within(panel).getByText(/No host can take a new user/)).toBeInTheDocument();
+    expect(within(panel).getByRole('link', { name: 'Open host' })).toHaveAttribute('href', '/vms/2');
+    expect(within(panel).getByRole('link', { name: 'Fleet health' })).toHaveAttribute('href', '/vms/health?show=xrdp-down');
+  });
+
+  it('leaves the trends out when the broker predates them', async () => {
+    attention = { Available: false, Items: [], Summary: { Total: 0 }, Incomplete: true };
+    renderApp('/');
+
+    await screen.findByText('33% of the pool in use');
+    await waitFor(() => expect(requests).toContain('/api/ui/metrics/utilization?hours=24'));
+    expect(screen.queryByRole('heading', { name: 'Capacity' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Needs attention now' })).not.toBeInTheDocument();
+  });
+
+  it('reports utilization as the scaler sees it when the broker counts serviceable hosts', async () => {
+    dashboard = {
+      ...DASHBOARD,
+      stats: { ...DASHBOARD.stats, utilization: 75, utilization_basis: 'serviceable', serviceable: 4, in_use: 3 },
+    };
+    renderApp('/');
+
+    expect(await screen.findByText('75% of the hosts that can take a user are in use')).toBeInTheDocument();
+    expect(screen.getByText('3 of 4 in use')).toBeInTheDocument();
   });
 
   it('filters fleet health by flag', async () => {

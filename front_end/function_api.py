@@ -160,10 +160,26 @@ def fetch_history_page(path, filters, page, per_page):
 VM_STATUSES = ("Available", "CheckedOut", "Maintenance", "Released")
 
 
+def utilization_percent(total, checked_out, serviceable=None, in_use=None):
+    """(percent, basis) for the dashboard.
+
+    The scaler's figure, hosts in use out of the hosts that can take a user, when the broker
+    reports both; otherwise the older checked-out share of every host, from an API that
+    predates the scaler's counts.
+    """
+    if serviceable is not None and in_use is not None:
+        if serviceable <= 0:
+            return (100 if in_use > 0 else 0), "serviceable"
+        return min(100, round((in_use / serviceable) * 100)), "serviceable"
+    return (round((checked_out / total) * 100) if total else 0), "total"
+
+
 def _build_stats(total, available, checked_out, maintenance, released,
-                 unreachable, powered_on, ready, cleanup_pending=0, draining=0):
+                 unreachable, powered_on, ready, cleanup_pending=0, draining=0,
+                 serviceable=None, in_use=None):
     """Shape the dashboard counters from raw counts."""
     other = max(0, total - available - checked_out - maintenance - released)
+    utilization, basis = utilization_percent(total, checked_out, serviceable, in_use)
 
     return {
         "total": total,
@@ -179,7 +195,10 @@ def _build_stats(total, available, checked_out, maintenance, released,
         "cleanup_pending": cleanup_pending,
         "draining": draining,
         "attention": maintenance + unreachable + cleanup_pending,
-        "utilization": round((checked_out / total) * 100) if total else 0,
+        "serviceable": serviceable,
+        "in_use": in_use,
+        "utilization": utilization,
+        "utilization_basis": basis,
         "pct": {
             key: (round((value / total) * 100, 2) if total else 0)
             for key, value in (
@@ -203,6 +222,9 @@ def summary_from_api(payload):
         except (TypeError, ValueError):
             return 0
 
+    def optional(key):
+        return count(key) if key in payload else None
+
     return _build_stats(
         total=count("TotalVMs"),
         available=count("Available"),
@@ -214,6 +236,8 @@ def summary_from_api(payload):
         ready=count("Ready"),
         cleanup_pending=count("CleanupPending"),
         draining=count("Draining"),
+        serviceable=optional("Serviceable"),
+        in_use=optional("InUse"),
     )
 
 

@@ -21,6 +21,7 @@ from route_scaling_management import register_route_scaling_management
 from route_host_settings import register_route_host_settings
 from route_audit import register_route_audit
 from route_sessions import register_route_sessions
+from route_metrics import register_route_metrics
 
 # ===============================
 # Flask App
@@ -305,6 +306,11 @@ register_route_audit(app)
 # Sessions and users
 
 register_route_sessions(app)
+
+# ===============================
+# Dashboard metrics
+
+register_route_metrics(app)
 
 # ===============================
 # Main

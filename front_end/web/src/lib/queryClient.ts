@@ -49,4 +49,7 @@ export const queryKeys = {
   scalingPolicy: ['scaling', 'policy'] as const,
   scalingPreview: ['scaling', 'preview'] as const,
   timeZones: ['scaling', 'timezones'] as const,
+  metrics: ['metrics'] as const,
+  utilization: (hours: number) => ['metrics', 'utilization', hours] as const,
+  attention: ['metrics', 'attention'] as const,
 };
