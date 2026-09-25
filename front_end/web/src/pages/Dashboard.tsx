@@ -78,11 +78,6 @@ export function Dashboard() {
               <Icon name="refresh" size={14} />
               Refresh
             </button>
-            {can.admin ? (
-              <ButtonLink to="/vms/checkout" variant="primary" size="sm" icon="person">
-                Checkout VM
-              </ButtonLink>
-            ) : null}
           </>
         }
       />
@@ -167,11 +162,11 @@ export function Dashboard() {
           <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
             <QuickLinks
               icon="server"
-              title="VM management"
-              description="View, add, update and release the Linux hosts in the pool."
+              title="Hosts"
+              description="Find, drain, patch and release the Linux hosts in the pool."
               links={[
-                { to: '/vms', label: 'All VMs', primary: true },
-                ...(can.admin ? [{ to: '/vms/add', label: 'Add VM' }] : []),
+                { to: '/vms', label: 'All hosts', primary: true },
+                ...(can.admin ? [{ to: '/vms/import', label: 'Import from Azure' }] : []),
                 { to: '/vms/maintenance', label: 'Maintenance' },
                 { to: '/vms/history', label: 'History' },
               ]}

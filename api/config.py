@@ -255,3 +255,17 @@ MAINTENANCE_MAX_HOSTS = 500
 MAINTENANCE_RUN_LIST_LIMIT = 20
 # Patching needs patch-host.sh, which host agent 1.1.0 ships. Restart-only runs work with 1.0.0.
 PATCH_MIN_AGENT_VERSION = '1.1.0'
+
+# ===============================
+# Host list and import
+#
+# The portal pages the host list on the server. Importing lists the VMs in VM_RESOURCE_GROUP
+# tagged broker-role=linux-host that are not registered yet; each must resolve as
+# <hostname>.<DOMAIN_NAME>, the name every SSH call uses, before it can be imported.
+VM_LIST_STATUSES = ('all', 'ready', 'in-use', 'released', 'maintenance', 'draining', 'unreachable', 'off', 'cleanup')
+VM_LIST_SORTS = ('hostname', 'status', 'power', 'network', 'user', 'ip', 'os', 'agent', 'heartbeat', 'sessions', 'vmid', 'updated')
+IMPORT_TAG_NAME = 'broker-role'
+IMPORT_TAG_VALUE = 'linux-host'
+IMPORT_DNS_DEADLINE_SECONDS = 10
+IMPORT_DNS_CONCURRENCY = 16
+IMPORT_MAX_HOSTS = 100

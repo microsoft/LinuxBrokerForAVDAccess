@@ -75,6 +75,8 @@ EXPECTED_ROLES = {
     "resume_maintenance_run": ADMIN,
     "cancel_maintenance_run": ADMIN,
     "advance_maintenance": {"ScheduledTask", "FullAccess"},
+    "get_import_candidates": ADMIN,
+    "import_vms": ADMIN,
 }
 
 EXPECTED_GROUPS = {

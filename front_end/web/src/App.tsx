@@ -14,6 +14,7 @@ import { Profile } from './pages/Profile';
 import { SignIn } from './pages/SignIn';
 import { AddVm } from './pages/vm/AddVm';
 import { CheckoutVm } from './pages/vm/CheckoutVm';
+import { ImportHosts } from './pages/vm/ImportHosts';
 import { FleetHealth } from './pages/vm/FleetHealth';
 import { UpdateVmAttributes } from './pages/vm/UpdateVmAttributes';
 import { VmDetails } from './pages/vm/VmDetails';
@@ -76,6 +77,7 @@ function AuthenticatedRoutes() {
       <Route path="/vms" element={<VmList />} />
       <Route path="/vms/add" element={<RequireAdmin><AddVm /></RequireAdmin>} />
       <Route path="/vms/checkout" element={<RequireAdmin><CheckoutVm /></RequireAdmin>} />
+      <Route path="/vms/import" element={<RequireAdmin><ImportHosts /></RequireAdmin>} />
       <Route path="/vms/history" element={<VmHistory />} />
       <Route path="/vms/health" element={<FleetHealth />} />
       <Route path="/vms/maintenance" element={<MaintenanceRuns />} />

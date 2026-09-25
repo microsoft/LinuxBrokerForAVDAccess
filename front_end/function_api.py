@@ -305,3 +305,96 @@ def summarize_vms(vms):
         cleanup_pending=cleanup_pending,
         draining=draining,
     )
+
+# The host list's filters and sort keys, as the broker's GET /api/vms accepts them.
+VM_PAGE_STATUSES = ("all", "ready", "in-use", "released", "maintenance", "draining", "unreachable", "off", "cleanup")
+VM_PAGE_SORTS = ("hostname", "status", "power", "network", "user", "ip", "os", "agent", "heartbeat", "sessions", "vmid", "updated")
+VM_PAGE_FIELDS = ("page", "per_page", "q", "status", "sort", "dir")
+
+
+def vm_page_params(args):
+    """The host list page the portal asked for, validated, or None for the bare list."""
+    if not any(args.get(name) is not None for name in VM_PAGE_FIELDS):
+        return None
+    page, per_page = pagination_from_args(args, default_per_page=50)
+    status = (args.get("status") or "all").strip().lower()
+    sort = (args.get("sort") or "hostname").strip().lower()
+    direction = (args.get("dir") or "asc").strip().lower()
+    params = {
+        "page": page,
+        "per_page": per_page,
+        "status": status if status in VM_PAGE_STATUSES else "all",
+        "sort": sort if sort in VM_PAGE_SORTS else "hostname",
+        "dir": direction if direction in ("asc", "desc") else "asc",
+    }
+    query = (args.get("q") or "").strip()[:128]
+    if query:
+        params["q"] = query
+    return params
+
+
+def _vm_is_ready(vm):
+    return (vm.get("VmStatus") == "Available" and vm.get("PowerState") == "On" and vm.get("NetworkStatus") == "Reachable"
+            and not vm.get("CleanupPending") and not vm.get("DrainRequested") and not vm.get("Username")
+            and not vm.get("LeaseId"))
+
+
+VM_STATUS_TESTS = {
+    "all": lambda vm: True,
+    "ready": _vm_is_ready,
+    "in-use": lambda vm: vm.get("VmStatus") == "CheckedOut",
+    "released": lambda vm: vm.get("VmStatus") == "Released",
+    "maintenance": lambda vm: vm.get("VmStatus") == "Maintenance",
+    "draining": lambda vm: bool(vm.get("DrainRequested")),
+    "unreachable": lambda vm: vm.get("PowerState") == "On" and vm.get("NetworkStatus") == "Unreachable",
+    "off": lambda vm: vm.get("PowerState") == "Off",
+    "cleanup": lambda vm: bool(vm.get("CleanupPending")),
+}
+
+# What a bare list from an older API can sort by; the rest fall back to hostname.
+LOCAL_SORT_FIELDS = {
+    "hostname": "Hostname", "status": "VmStatus", "power": "PowerState", "network": "NetworkStatus",
+    "user": "Username", "ip": "IPAddress", "vmid": "VMID", "updated": "LastUpdateDate",
+}
+
+
+def page_vms_locally(vms, params):
+    """Page a bare VM list the way the broker pages it, for an API that predates paging."""
+    vms = [vm for vm in (vms or []) if isinstance(vm, dict)]
+    query = (params.get("q") or "").lower()
+    if query:
+        vms = [
+            vm for vm in vms
+            if any(query in str(vm.get(field) or "").lower() for field in ("Hostname", "IPAddress", "Username", "VmStatus"))
+        ]
+
+    counts = {status: sum(1 for vm in vms if test(vm)) for status, test in VM_STATUS_TESTS.items()}
+    matching = [vm for vm in vms if VM_STATUS_TESTS[params["status"]](vm)]
+
+    field = LOCAL_SORT_FIELDS.get(params["sort"], "Hostname")
+    numeric = field == "VMID"
+    matching.sort(key=lambda vm: str(vm.get("Hostname") or "").lower())
+    matching.sort(
+        key=lambda vm: (vm.get(field) is None, vm.get(field) if numeric else str(vm.get(field) or "").lower()),
+        reverse=params["dir"] == "desc",
+    )
+
+    page, per_page = params["page"], params["per_page"]
+    total = len(matching)
+    start = (page - 1) * per_page
+    items = [dict(vm, Ready=_vm_is_ready(vm)) for vm in matching[start:start + per_page]]
+    for item in items:
+        item.pop("LeaseId", None)
+    return {
+        "items": items,
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "total_pages": (total + per_page - 1) // per_page if per_page else 0,
+        "counts": counts,
+        "q": params.get("q"),
+        "status": params["status"],
+        "sort": params["sort"] if params["sort"] in LOCAL_SORT_FIELDS else "hostname",
+        "dir": params["dir"],
+        "legacy": True,
+    }

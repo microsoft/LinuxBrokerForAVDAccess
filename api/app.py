@@ -12,8 +12,10 @@ import threading
 import logging
 import re
 import shlex
+import socket
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from datetime import datetime, timedelta, timezone
 
 from azure.monitor.opentelemetry import configure_azure_monitor
@@ -1649,7 +1651,16 @@ def get_me():
 @app.route('/api/vms', methods=['GET'])
 @token_required(READ_ROLES + [ROLE_SCHEDULED_TASK])
 def get_all_vms():
+    """Every registered host, as a bare list; or one page of them.
+
+    Paging is opt-in, as for the history endpoints: with page, per_page, q, status, sort or
+    dir the answer is one page with its total and the status counts, filtered and sorted in
+    SQL. Without, it stays the bare list the scheduled task and older portals read.
+    """
     try:
+        if any(request.args.get(name) is not None for name in ('page', 'per_page', 'q', 'status', 'sort', 'dir')):
+            return get_vms_page()
+
         with db_connection() as conn:
             with conn.cursor(as_dict=True) as cursor:
                 cursor.execute("EXEC GetVms")
@@ -1663,6 +1674,259 @@ def get_all_vms():
     except Exception:
         logger.exception("Failed to list VMs.")
         return error_response("Unable to retrieve virtual machines.", 500)
+
+
+VM_STATUS_COUNT_KEYS = {
+    'all': 'All', 'ready': 'Ready', 'in-use': 'InUse', 'released': 'Released', 'maintenance': 'Maintenance',
+    'draining': 'Draining', 'unreachable': 'Unreachable', 'off': 'Off', 'cleanup': 'Cleanup',
+}
+
+
+def vm_list_item(row):
+    """One host of the paged list, with what the heartbeat says about its user's session."""
+    item = {key: value for key, value in row.items() if key not in ('TotalCount', 'SessionsJson', 'ReconcileIntervalSeconds')}
+    age = row.get('HeartbeatAgeSeconds')
+    fresh = age is not None and age <= heartbeat_stale_after(row.get('ReconcileIntervalSeconds'))
+    session = None
+    if fresh and row.get('Username'):
+        states = {
+            str(entry.get('username')).lower(): entry.get('state')
+            for entry in (_json_column(row.get('SessionsJson'), list) or [])
+            if isinstance(entry, dict) and entry.get('username')
+        }
+        session = states.get(str(row.get('Username')).lower()) or 'none'
+    current = row.get('CurrentSettingsVersion')
+    applied = row.get('SettingsVersion')
+    item.update({
+        'Ready': bool(row.get('Ready')),
+        'CleanupPending': bool(row.get('CleanupPending')),
+        'DrainRequested': bool(row.get('DrainRequested')),
+        'HeartbeatFresh': fresh,
+        'SessionState': session,
+        'SettingsCurrent': None if not current else bool(applied is not None and applied >= current),
+        'AgentOutdated': None if age is None else agent_is_outdated(row.get('AgentVersion'), None, EXPECTED_HOST_AGENT_VERSION),
+    })
+    return serialize_for_json(item)
+
+
+def get_vms_page():
+    page = coerce_optional_int(request.args.get('page'), default=1, minimum=1)
+    per_page = coerce_optional_int(request.args.get('per_page'), default=DEFAULT_PAGE_SIZE, minimum=1, maximum=MAX_PAGE_SIZE)
+    search = (request.args.get('q') or '').strip()[:128] or None
+    status = (request.args.get('status') or 'all').strip().lower()
+    sort = (request.args.get('sort') or 'hostname').strip().lower()
+    direction = (request.args.get('dir') or 'asc').strip().lower()
+    if status not in VM_LIST_STATUSES:
+        return error_response(f"status must be one of: {', '.join(VM_LIST_STATUSES)}.", 400)
+    if sort not in VM_LIST_SORTS:
+        return error_response(f"sort must be one of: {', '.join(VM_LIST_SORTS)}.", 400)
+    if direction not in ('asc', 'desc'):
+        return error_response("dir must be asc or desc.", 400)
+
+    offset = (page - 1) * per_page
+    statement = ("EXEC GetVmsPaged @Search = %s, @Status = %s, @Sort = %s, @Descending = %s, "
+                 "@Offset = %s, @PageSize = %s")
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute(statement, (search, status, sort, direction == 'desc', offset, per_page))
+            rows = cursor.fetchall() or []
+            # As in run_history_query: an out-of-range page must still report the total.
+            if not rows and offset > 0:
+                cursor.execute(statement, (search, status, sort, direction == 'desc', 0, 1))
+                probe = cursor.fetchall() or []
+                total = int(probe[0].get('TotalCount') or 0) if probe else 0
+            else:
+                total = int(rows[0].get('TotalCount') or 0) if rows else 0
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetVmStatusCounts @Search = %s", (search,))
+            counts_row = cursor.fetchone() or {}
+
+    return jsonify({
+        'items': [vm_list_item(row) for row in rows],
+        'page': page,
+        'per_page': per_page,
+        'total': total,
+        'total_pages': (total + per_page - 1) // per_page if per_page else 0,
+        'counts': {key: int(counts_row.get(column) or 0) for key, column in VM_STATUS_COUNT_KEYS.items()},
+        'q': search,
+        'status': status,
+        'sort': sort,
+        'dir': direction,
+    }), 200
+
+
+def list_tagged_linux_hosts(compute_client):
+    """The VM names in VM_RESOURCE_GROUP tagged broker-role=linux-host. Tag keys ignore case."""
+    names = []
+    for vm in compute_client.virtual_machines.list(VM_RESOURCE_GROUP):
+        tags = {str(key).lower(): str(value).lower() for key, value in (getattr(vm, 'tags', None) or {}).items()}
+        name = getattr(vm, 'name', None)
+        if name and tags.get(IMPORT_TAG_NAME) == IMPORT_TAG_VALUE:
+            names.append(name)
+    return sorted(names, key=str.lower)
+
+
+def host_fqdn(hostname):
+    return f"{hostname}.{DOMAIN_NAME}" if DOMAIN_NAME else hostname
+
+
+def resolve_host_address(hostname):
+    """The IPv4 address <hostname>.<DOMAIN_NAME> resolves to, or None."""
+    try:
+        infos = socket.getaddrinfo(host_fqdn(hostname), None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    return infos[0][4][0] if infos else None
+
+
+def resolve_host_addresses(hostnames):
+    """Resolve many hosts in parallel, within IMPORT_DNS_DEADLINE_SECONDS. Unfinished ones are None."""
+    if not hostnames:
+        return {}
+    pool = ThreadPoolExecutor(max_workers=min(IMPORT_DNS_CONCURRENCY, len(hostnames)))
+    futures = {pool.submit(resolve_host_address, name): name for name in hostnames}
+    done, _ = wait_futures(futures, timeout=IMPORT_DNS_DEADLINE_SECONDS)
+    pool.shutdown(wait=False, cancel_futures=True)
+    return {name: (future.result() if future in done else None) for future, name in futures.items()}
+
+
+def unresolved_problem(hostname):
+    if not DOMAIN_NAME:
+        return "DOMAIN_NAME is not set, so the broker cannot tell which name to reach the host by."
+    return (f"{host_fqdn(hostname)} does not resolve. Add it to the DNS zone the broker uses "
+            "(the private zone linked to its network), then refresh.")
+
+
+def import_context():
+    """(compute client, tagged names by lower-case name, registered lower-case names)."""
+    compute_client = get_compute_client()
+    tagged = {name.lower(): name for name in list_tagged_linux_hosts(compute_client)}
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetVms")
+            registered = {str(vm.get('Hostname') or '').lower() for vm in cursor.fetchall() or []}
+    return compute_client, tagged, registered
+
+
+@app.route('/api/vms/import/candidates', methods=['GET'])
+@token_required(ADMIN_ROLES)
+def get_import_candidates():
+    """Linux host VMs in Azure the broker does not know yet, and whether each can be imported."""
+    try:
+        if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
+            return error_response("Configure VM_SUBSCRIPTION_ID and VM_RESOURCE_GROUP to import hosts from Azure.", 409)
+
+        compute_client, tagged, registered = import_context()
+        names = [name for key, name in sorted(tagged.items()) if key not in registered]
+        states, _ = read_azure_power_states(compute_client, names) if names else ([], 0)
+        power = {entry['hostname']: entry['powerState'] for entry in states}
+        addresses = resolve_host_addresses(names)
+
+        candidates = []
+        for name in names:
+            address = addresses.get(name)
+            candidates.append({
+                'Hostname': name,
+                'Fqdn': host_fqdn(name),
+                'IPAddress': address,
+                'PowerState': power.get(name),
+                'Importable': bool(address),
+                'Problem': None if address else unresolved_problem(name),
+            })
+
+        return jsonify({
+            'Candidates': candidates,
+            'TaggedCount': len(tagged),
+            'RegisteredCount': len(tagged) - len(names),
+            'Tag': f"{IMPORT_TAG_NAME}={IMPORT_TAG_VALUE}",
+            'ResourceGroup': VM_RESOURCE_GROUP,
+            'DomainName': DOMAIN_NAME,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while listing hosts to import.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to list hosts to import from Azure.")
+        return error_response("Unable to list the Linux hosts in Azure.", 502)
+
+
+IMPORT_MESSAGES = {
+    'Imported': "Imported. It is offered to users once the probe reaches it.",
+    'Exists': "Already registered.",
+    'NotTagged': "Not a VM tagged broker-role=linux-host in the resource group.",
+    'Unresolved': "Does not resolve in DNS, so it was not imported.",
+}
+
+
+@app.route('/api/vms/import', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('vm.import', target_type='fleet')
+def import_vms():
+    """Register tagged Linux host VMs by name. Each is checked against Azure and DNS again."""
+    try:
+        body = request.get_json(silent=True)
+        hostnames = body.get('hostnames') if isinstance(body, dict) else None
+        if (not isinstance(hostnames, list) or not hostnames or len(hostnames) > IMPORT_MAX_HOSTS
+                or not all(isinstance(name, str) and HEARTBEAT_HOSTNAME_RE.match(name) for name in hostnames)):
+            return error_response(f"hostnames must be a list of 1 to {IMPORT_MAX_HOSTS} hostnames.", 400)
+        if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
+            return error_response("Configure VM_SUBSCRIPTION_ID and VM_RESOURCE_GROUP to import hosts from Azure.", 409)
+
+        compute_client, tagged, registered = import_context()
+        requested = list(dict.fromkeys(name.lower() for name in hostnames))
+        results = {}
+        eligible = []
+        for key in requested:
+            if key not in tagged:
+                results[key] = {'Hostname': key, 'Result': 'NotTagged'}
+            elif key in registered:
+                results[key] = {'Hostname': tagged[key], 'Result': 'Exists'}
+            else:
+                eligible.append(tagged[key])
+
+        addresses = resolve_host_addresses(eligible)
+        states, _ = read_azure_power_states(compute_client, eligible) if eligible else ([], 0)
+        power = {entry['hostname']: entry['powerState'] for entry in states}
+
+        for name in eligible:
+            address = addresses.get(name)
+            if not address:
+                results[name.lower()] = {'Hostname': name, 'Result': 'Unresolved', 'Problem': unresolved_problem(name)}
+                continue
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute(
+                        "EXEC ImportLinuxHostVm @Hostname = %s, @IPAddress = %s, @PowerState = %s",
+                        (name, address, power.get(name) or 'Off')
+                    )
+                    row = cursor.fetchone() or {}
+                conn.commit()
+            results[name.lower()] = {
+                'Hostname': name, 'Result': row.get('Result') or 'Exists', 'VMID': row.get('VMID'),
+                'IPAddress': address, 'PowerState': power.get(name) or 'Off',
+            }
+
+        ordered = [dict(results[key], message=IMPORT_MESSAGES.get(results[key]['Result'], '')) for key in requested]
+        imported = [entry['Hostname'] for entry in ordered if entry['Result'] == 'Imported']
+        g.audit_detail = {'requested': len(requested), 'imported': imported,
+                          'refused': [entry['Hostname'] for entry in ordered if entry['Result'] != 'Imported']}
+
+        return jsonify({
+            'Results': ordered,
+            'Imported': len(imported),
+            'message': (f"Imported {len(imported)} of {len(requested)} host{'s' if len(requested) != 1 else ''}. "
+                        "Each is offered to users once the reachability probe reaches it."),
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while importing hosts.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to import hosts from Azure.")
+        return error_response("Unable to import the hosts.", 500)
 
 @app.route('/api/vms/summary', methods=['GET'])
 @token_required(READ_ROLES + [ROLE_SCHEDULED_TASK])

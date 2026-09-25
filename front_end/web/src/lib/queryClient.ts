@@ -31,6 +31,8 @@ export const queryKeys = {
   session: ['session'] as const,
   dashboard: ['dashboard'] as const,
   vms: ['vms'] as const,
+  vmPage: (search: string) => ['vms', 'page', search] as const,
+  importCandidates: ['vms', 'import'] as const,
   vm: (vmid: number | string) => ['vms', String(vmid)] as const,
   vmHistory: (search: string) => ['vms', 'history', search] as const,
   rules: ['scaling', 'rules'] as const,

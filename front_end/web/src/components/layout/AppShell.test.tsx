@@ -73,6 +73,7 @@ describe('AppShell', () => {
     ['/vms/health', 'Hosts pages', 'Fleet health'],
     ['/vms/maintenance/new', 'Hosts pages', 'Maintenance'],
     ['/vms/history', 'Hosts pages', 'History'],
+    ['/vms/import', 'Hosts pages', 'Import'],
     ['/scaling', 'Scaling pages', 'Policy'],
     ['/scaling/schedules/4', 'Scaling pages', 'Policy'],
     ['/scaling/rules/2', 'Scaling pages', 'Policy'],

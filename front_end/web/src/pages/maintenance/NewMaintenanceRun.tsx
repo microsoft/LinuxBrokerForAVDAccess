@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 
 import { Breadcrumbs } from '../../components/layout/Breadcrumbs';
 import { PATCH_MODES } from '../../components/maintenance/MaintenanceStatus';
@@ -96,8 +96,12 @@ export function NewMaintenanceRun() {
   const preview = useScalingPreview();
   const create = useCreateMaintenanceRun();
 
+  const [searchParams] = useSearchParams();
   const [form, setForm] = useState<FormState>(INITIAL);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // The host list's "Start maintenance" arrives with its selection as ?hosts=a,b.
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set((searchParams.get('hosts') ?? '').split(',').map((name) => name.trim()).filter(Boolean)),
+  );
   const [filter, setFilter] = useState<HostFilter>('all');
   const [search, setSearch] = useState('');
   const [percent, setPercent] = useState('25');

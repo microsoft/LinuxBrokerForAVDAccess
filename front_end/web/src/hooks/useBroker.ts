@@ -15,6 +15,8 @@ import type {
   HostSettings,
   HostSettingsPage,
   HostSettingsVersion,
+  ImportCandidates,
+  ImportResult,
   MaintenanceRunChange,
   MaintenanceRunDetails,
   MaintenanceRunInput,
@@ -39,6 +41,7 @@ import type {
   Vm,
   VmAttributesInput,
   VmInput,
+  VmPage,
 } from '../types/broker';
 
 /* -------------------------------------------------------------- dashboard */
@@ -75,10 +78,33 @@ export function useAttention(refreshMs: number | false) {
 
 /* -------------------------------------------------------------------- VMs */
 
-export function useVms() {
+/** One page of the host list, filtered and sorted on the server. */
+export function useVmPage(search: string, refreshMs: number | false = false) {
   return useQuery({
-    queryKey: queryKeys.vms,
-    queryFn: ({ signal }) => apiGet<Vm[]>('/vms', signal),
+    queryKey: queryKeys.vmPage(search),
+    queryFn: ({ signal }) => apiGet<VmPage>(`/vms${search}`, signal),
+    placeholderData: keepPreviousData,
+    refetchInterval: refreshMs,
+  });
+}
+
+export function useImportCandidates() {
+  return useQuery({
+    queryKey: queryKeys.importCandidates,
+    queryFn: ({ signal }) => apiGet<ImportCandidates>('/vms/import/candidates', signal),
+    staleTime: 0,
+  });
+}
+
+export function useImportVms() {
+  const queryClient = useQueryClient();
+  const invalidateVms = useVmInvalidation();
+  return useMutation({
+    mutationFn: (hostnames: string[]) => apiPost<ImportResult>('/vms/import', { hostnames }),
+    onSuccess: () => {
+      invalidateVms();
+      void queryClient.invalidateQueries({ queryKey: queryKeys.importCandidates });
+    },
   });
 }
 
@@ -106,7 +132,7 @@ export function useVmHistory(search: string) {
  * Any VM mutation can change the dashboard counters, the host settings drift table, fleet
  * health and what needs attention as well as the list itself, so they are refreshed together.
  */
-function useVmInvalidation() {
+export function useVmInvalidation() {
   const queryClient = useQueryClient();
 
   return () => {

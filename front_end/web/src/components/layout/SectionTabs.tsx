@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 
+import { useCan } from '../../hooks/useSession';
 import { classNames } from '../../lib/format';
 
 interface Tab {
@@ -7,6 +8,8 @@ interface Tab {
   label: string;
   /** Whether the tab owns the path; by default the path is the tab's or below it. */
   owns?: (pathname: string) => boolean;
+  /** Shown only to administrators. */
+  admin?: boolean;
 }
 
 interface Section {
@@ -27,6 +30,7 @@ export const SECTIONS: Section[] = [
       { to: '/vms/health', label: 'Fleet health' },
       { to: '/vms/maintenance', label: 'Maintenance' },
       { to: '/vms/history', label: 'History' },
+      { to: '/vms/import', label: 'Import', admin: true },
     ],
   },
   {
@@ -54,6 +58,7 @@ export function sectionFor(pathname: string) {
 
 /** Tabs for the pages of the current section, so each is one click away. */
 export function SectionTabs({ pathname }: { pathname: string }) {
+  const can = useCan();
   const section = sectionFor(pathname);
   if (!section) {
     return null;
@@ -62,7 +67,7 @@ export function SectionTabs({ pathname }: { pathname: string }) {
   return (
     <nav aria-label={`${section.name} pages`} className="mb-5 overflow-x-auto border-b border-[var(--lb-hairline)]">
       <ul className="m-0 flex list-none gap-1 p-0">
-        {section.tabs.map((tab) => {
+        {section.tabs.filter((tab) => !tab.admin || can.admin).map((tab) => {
           const active = owns(tab, pathname);
           return (
             <li key={tab.to}>

@@ -62,6 +62,96 @@ export interface Vm {
   DrainRequestedDate?: string | null;
 }
 
+export type VmListStatus =
+  | 'all'
+  | 'ready'
+  | 'in-use'
+  | 'released'
+  | 'maintenance'
+  | 'draining'
+  | 'unreachable'
+  | 'off'
+  | 'cleanup';
+
+export type VmListSort =
+  | 'hostname'
+  | 'status'
+  | 'power'
+  | 'network'
+  | 'user'
+  | 'ip'
+  | 'os'
+  | 'agent'
+  | 'heartbeat'
+  | 'sessions'
+  | 'vmid'
+  | 'updated';
+
+/** One host of the paged list: the VM row with its latest heartbeat. */
+export interface VmListItem extends Vm {
+  Ready: boolean;
+  OsName?: string | null;
+  OsVersion?: string | null;
+  AgentVersion?: string | null;
+  XrdpActive?: boolean | null;
+  SessionCount?: number | null;
+  LastHeartbeatUtc?: string | null;
+  HeartbeatAgeSeconds?: number | null;
+  HeartbeatFresh?: boolean;
+  /** The assigned user's session as the current heartbeat reports it; null when unknown. */
+  SessionState?: 'active' | 'disconnected' | 'unknown' | 'none' | null;
+  SettingsCurrent?: boolean | null;
+  AgentOutdated?: boolean | null;
+  CurrentSettingsVersion?: number | null;
+}
+
+export interface VmPage {
+  items: VmListItem[];
+  page: number;
+  per_page: number;
+  total: number;
+  total_pages: number;
+  counts: Record<VmListStatus, number>;
+  q: string | null;
+  status: VmListStatus;
+  sort: VmListSort;
+  dir: 'asc' | 'desc';
+  /** Paged by the portal because the broker API predates server-side paging. */
+  legacy?: boolean;
+}
+
+export interface ImportCandidate {
+  Hostname: string;
+  Fqdn: string;
+  IPAddress: string | null;
+  PowerState: 'On' | 'Off' | null;
+  Importable: boolean;
+  Problem: string | null;
+}
+
+export interface ImportCandidates {
+  Candidates: ImportCandidate[];
+  TaggedCount: number;
+  RegisteredCount: number;
+  Tag: string;
+  ResourceGroup: string | null;
+  DomainName: string | null;
+}
+
+export interface ImportResult {
+  Results: Array<{
+    Hostname: string;
+    Result: 'Imported' | 'Exists' | 'NotTagged' | 'Unresolved';
+    VMID?: number | null;
+    IPAddress?: string | null;
+    PowerState?: string | null;
+    Problem?: string | null;
+    message: string;
+  }>;
+  Imported: number;
+  message: string;
+}
+
 /** What a start, stop or restart request returned. The Azure operation runs on. */
 export interface PowerActionResult {
   VMID: number;
