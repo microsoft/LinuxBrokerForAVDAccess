@@ -6,6 +6,7 @@ afterEach(() => {
   cleanup();
   window.localStorage.clear();
   document.documentElement.removeAttribute('data-theme');
+  document.documentElement.removeAttribute('data-density');
   vi.restoreAllMocks();
 });
 

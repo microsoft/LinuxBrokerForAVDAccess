@@ -17,6 +17,7 @@ import {
 import { GlassCard } from '../components/ui/GlassCard';
 import { Switch } from '../components/ui/Field';
 import { StatCard } from '../components/ui/StatCard';
+import { RelativeTime } from '../components/ui/RelativeTime';
 import { Icon } from '../components/Icon';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import { useAttention, useDashboard, useUtilization } from '../hooks/useBroker';
@@ -381,7 +382,7 @@ function RecentActivity({
               {entries.map((entry) => (
                 <tr key={entry.ActivityID}>
                   <td className="font-mono text-xs whitespace-nowrap">
-                    {valueOrDash(entry.CheckTimestamp)}
+                    <RelativeTime value={entry.CheckTimestamp} />
                   </td>
                   <td>
                     <ActionBadge value={entry.ActionTaken} />

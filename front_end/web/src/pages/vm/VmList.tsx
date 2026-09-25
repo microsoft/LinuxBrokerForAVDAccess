@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 
 import { DataTable } from '../../components/data/DataTable';
 import type { Column } from '../../components/data/DataTable';
+import { LifecycleExplainer } from '../../components/hosts/LifecycleExplainer';
 import { ActionMenu } from '../../components/ui/ActionMenu';
 import { Badge, NetworkBadge, PowerBadge, VmStatusBadge } from '../../components/ui/Badge';
 import { Button, ButtonLink } from '../../components/ui/Button';
@@ -112,13 +113,7 @@ export function VmList() {
   }
 
   const columns: Array<Column<Vm>> = [
-    {
-      key: 'vmid',
-      header: 'VMID',
-      sort: 'number',
-      value: (vm) => vm.VMID,
-      render: (vm) => <span className="font-mono text-xs">{vm.VMID}</span>,
-    },
+
     {
       key: 'hostname',
       header: 'Hostname',
@@ -176,6 +171,13 @@ export function VmList() {
       sort: 'text',
       value: (vm) => vm.Username,
       render: (vm) => valueOrDash(vm.Username),
+    },    {
+      key: 'vmid',
+      header: 'VMID',
+      sort: 'number',
+      value: (vm) => vm.VMID,
+      className: 'font-mono text-xs text-muted',
+      render: (vm) => vm.VMID,
     },
     {
       key: 'actions',
@@ -244,7 +246,7 @@ export function VmList() {
   return (
     <>
       <PageHeader
-        title="Virtual machines"
+        title="Hosts"
         subtitle="Linux hosts registered with the broker."
         icon="server"
         actions={
@@ -305,10 +307,12 @@ export function VmList() {
           rowKey={(vm) => vm.VMID}
           searchable
           searchPlaceholder="Search hostname, IP, status or user…"
-          noun="VMs"
-          caption="Virtual machines registered with the broker"
+          noun="hosts"
+          caption="Hosts registered with the broker"
         />
       ) : null}
+
+      <LifecycleExplainer className="mt-4" />
 
       {dialog}
       {hostActions.dialog}

@@ -198,7 +198,7 @@ export function NewMaintenanceRun() {
 
   return (
     <>
-      <Breadcrumbs items={[{ label: 'VM management', to: '/vms' }, { label: 'Maintenance', to: '/vms/maintenance' }, { label: 'New run' }]} />
+      <Breadcrumbs items={[{ label: 'Hosts', to: '/vms' }, { label: 'Maintenance', to: '/vms/maintenance' }, { label: 'New run' }]} />
       <PageHeader
         title="New maintenance run"
         subtitle="Choose the hosts and how to treat their users. Nothing happens until the next scheduled advance."
@@ -223,6 +223,7 @@ export function NewMaintenanceRun() {
               <div className="flex flex-wrap items-end gap-2">
                 <TextField
                   label="Find a host"
+                  type="search"
                   fieldClassName="min-w-[14rem] flex-1"
                   value={search}
                   placeholder="Hostname"

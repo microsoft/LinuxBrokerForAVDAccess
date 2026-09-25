@@ -13,23 +13,6 @@ export function isBlank(value: unknown): boolean {
   return value === null || value === undefined || String(value).trim() === '';
 }
 
-/*
- * Broker timestamps arrive as 'YYYY-MM-DD HH:MM:SS' in the database's own time
- * zone, with no offset. They are shown as sent rather than parsed into a Date,
- * because guessing a zone would silently shift every timestamp in the portal.
- */
-export function formatTimestamp(value: string | null | undefined): string {
-  return valueOrDash(value);
-}
-
-/** Sort key for a timestamp cell. Unparseable values sort last. */
-export function timestampSortValue(value: string | null | undefined): number {
-  if (isBlank(value)) {
-    return Number.NEGATIVE_INFINITY;
-  }
-  const parsed = Date.parse(String(value).replace(' ', 'T'));
-  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
-}
 
 export function formatNumber(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) {

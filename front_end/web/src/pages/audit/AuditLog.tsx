@@ -9,9 +9,9 @@ import { Button, ButtonAnchor } from '../../components/ui/Button';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, Spinner } from '../../components/ui/Feedback';
 import { SelectField, TextField } from '../../components/ui/Field';
 import { GlassCard } from '../../components/ui/GlassCard';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useAuditLog } from '../../hooks/useBroker';
 import { errorMessage, queryString } from '../../lib/api';
-import { formatUtc } from '../../lib/format';
 import type { AuditEntry, AuditFilterValues } from '../../types/broker';
 
 const FILTER_KEYS: Array<keyof AuditFilterValues> = ['from', 'to', 'actor', 'action', 'target', 'outcome'];
@@ -102,7 +102,7 @@ const COLUMNS: Array<Column<AuditEntry>> = [
     key: 'when',
     header: 'When (UTC)',
     className: 'font-mono text-xs whitespace-nowrap',
-    render: (entry) => formatUtc(entry.OccurredAtUtc).replace(' UTC', ''),
+    render: (entry) => <RelativeTime value={entry.OccurredAtUtc} showAbsolute />,
   },
   {
     key: 'actor',

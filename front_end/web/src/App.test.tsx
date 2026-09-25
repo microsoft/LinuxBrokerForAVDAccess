@@ -469,7 +469,7 @@ describe('App', () => {
     expect(
       await screen.findByRole('heading', { name: 'Linux Broker Management Portal', level: 1 }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'Virtual machines' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Hosts' })).not.toBeInTheDocument();
   });
 
   it('reports a backend it cannot reach, and can retry', async () => {
@@ -492,7 +492,7 @@ describe('App', () => {
   it.each([
     ['/', 'Pool overview'],
     ['/profile', 'Profile'],
-    ['/vms', 'Virtual machines'],
+    ['/vms', 'Hosts'],
     ['/vms/add', 'Add virtual machine'],
     ['/vms/checkout', 'Checkout a virtual machine'],
     ['/vms/history', 'Virtual machine history'],
@@ -510,12 +510,57 @@ describe('App', () => {
     ['/scaling', 'Scaling policy'],
     ['/scaling/schedules/new', 'Add a scaling window'],
     ['/scaling/schedules/1', 'Edit Business hours'],
+    ['/vms/maintenance', 'Rolling maintenance'],
+    ['/vms/maintenance/7', 'October patching (run 7)'],
   ])('mounts %s', async (route, heading) => {
     renderApp(route);
     expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
   });
 
 
+
+  it('shows the pages of the current section as tabs', async () => {
+    renderApp('/vms/maintenance/7');
+    const tabs = await screen.findByRole('navigation', { name: 'Hosts pages' });
+    expect(within(tabs).getByRole('link', { name: 'Maintenance' })).toHaveAttribute('aria-current', 'page');
+    expect(within(tabs).getByRole('link', { name: 'All hosts' })).not.toHaveAttribute('aria-current');
+    expect(screen.getByRole('link', { name: 'Hosts' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('moves between sections and searches from the keyboard', async () => {
+    renderApp('/vms');
+    await screen.findByRole('heading', { name: 'Hosts', level: 1 });
+
+    await userEvent.keyboard('/');
+    expect(screen.getByRole('searchbox')).toHaveFocus();
+    await userEvent.keyboard('g');
+    expect(screen.getByRole('searchbox')).toHaveValue('g');
+
+    (document.activeElement as HTMLElement).blur();
+    await userEvent.keyboard('gs');
+    expect(await screen.findByRole('heading', { name: 'Sessions', level: 1 })).toBeInTheDocument();
+
+    await userEvent.keyboard('?');
+    const help = screen.getByRole('dialog', { name: 'Keyboard shortcuts' });
+    expect(within(help).getByText('Go to Maintenance')).toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('lets shortcuts and compact tables be turned off and on in the profile', async () => {
+    renderApp('/profile');
+    const shortcuts = await screen.findByRole('switch', { name: /Keyboard shortcuts/ });
+    expect(shortcuts).toBeChecked();
+    await userEvent.click(shortcuts);
+    expect(window.localStorage.getItem('lb-shortcuts')).toBe('off');
+
+    await userEvent.keyboard('?');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('switch', { name: /Compact tables/ }));
+    expect(document.documentElement).toHaveAttribute('data-density', 'compact');
+    expect(window.localStorage.getItem('lb-density')).toBe('compact');
+  });
 
   it('shows no-access page for authenticated users without read permission', async () => {
     session = { ...SESSION, roles: [], permissions: { read: false, operate: false, admin: false } };
@@ -545,7 +590,7 @@ describe('App', () => {
   it('gates VM actions for reader and operator roles', async () => {
     session = { ...SESSION, roles: ['Reader'], permissions: { read: true, operate: false, admin: false } };
     const { unmount } = renderApp('/vms');
-    await screen.findByRole('heading', { name: 'Virtual machines' });
+    await screen.findByRole('heading', { name: 'Hosts' });
     expect(screen.queryByRole('button', { name: 'Release linux-host-02' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Delete linux-host-01' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Add VM' })).not.toBeInTheDocument();

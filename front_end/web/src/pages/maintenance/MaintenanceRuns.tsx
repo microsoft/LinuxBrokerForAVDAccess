@@ -10,11 +10,12 @@ import {
 import { ButtonLink } from '../../components/ui/Button';
 import { EmptyState, ErrorPanel, LoadingPanel, Notice, PageHeader } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useMaintenanceRuns } from '../../hooks/useBroker';
 import { useMaintenanceActions } from '../../hooks/useMaintenanceActions';
 import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
-import { formatAge, formatUtc, valueOrDash } from '../../lib/format';
+import { formatAge, valueOrDash } from '../../lib/format';
 import type { MaintenanceRun } from '../../types/broker';
 
 /** The scheduled task advances a run every minute; much longer means it is not running. */
@@ -56,7 +57,7 @@ function ActiveRun({ run, actions }: { run: MaintenanceRun; actions: React.React
             <RunStatusBadge status={run.Status} />
           </h2>
           <p className="mt-1 mb-0 text-sm text-muted">
-            {PATCH_MODES[run.PatchMode].label} · {run.BatchSize} at a time · started {formatUtc(run.CreatedAtUtc)}
+            {PATCH_MODES[run.PatchMode].label} · {run.BatchSize} at a time · started <RelativeTime value={run.CreatedAtUtc} />
             {run.CreatedBy ? ` by ${run.CreatedBy}` : ''}
           </p>
         </div>
@@ -116,10 +117,10 @@ function RunTable({ runs }: { runs: MaintenanceRun[] }) {
                   {run.Counts.Failed}
                 </td>
                 <td className="text-xs whitespace-nowrap">
-                  {formatUtc(run.CreatedAtUtc)}
+                  <RelativeTime value={run.CreatedAtUtc} />
                   <span className="block text-muted">{valueOrDash(run.CreatedBy)}</span>
                 </td>
-                <td className="text-xs whitespace-nowrap">{formatUtc(run.EndedAtUtc)}</td>
+                <td className="text-xs whitespace-nowrap"><RelativeTime value={run.EndedAtUtc} /></td>
               </tr>
             ))}
           </tbody>
@@ -137,7 +138,7 @@ export function MaintenanceRuns() {
 
   return (
     <>
-      <Breadcrumbs items={[{ label: 'VM management', to: '/vms' }, { label: 'Maintenance' }]} />
+      <Breadcrumbs items={[{ label: 'Hosts', to: '/vms' }, { label: 'Maintenance' }]} />
       <PageHeader
         title="Rolling maintenance"
         subtitle="Patch or restart hosts a batch at a time, keeping enough hosts ready for users."

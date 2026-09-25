@@ -227,7 +227,7 @@ export function FleetHealth() {
 
   return (
     <>
-      <Breadcrumbs items={[{ label: 'Virtual machines', to: '/vms' }, { label: 'Fleet health' }]} />
+      <Breadcrumbs items={[{ label: 'Hosts', to: '/vms' }, { label: 'Fleet health' }]} />
 
       <PageHeader
         title="Fleet health"

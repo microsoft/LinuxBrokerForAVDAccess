@@ -14,7 +14,7 @@
     -->
     <link rel="icon" href="/favicon.ico" sizes="any" />
 
-    <!-- Applied before first paint so the theme does not flash on load. -->
+    <!-- Applied before first paint so the theme and row density do not flash on load. -->
     <script>
       (function () {
         try {
@@ -22,6 +22,9 @@
           var theme =
             stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
           document.documentElement.setAttribute('data-theme', theme);
+          if (localStorage.getItem('lb-density') === 'compact') {
+            document.documentElement.setAttribute('data-density', 'compact');
+          }
         } catch (e) {
           /* storage unavailable */
         }

@@ -1,13 +1,21 @@
 import type { ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 
+import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useSession } from '../../hooks/useSession';
+import { usePreferences } from '../../lib/preferences';
 import { Notice } from '../ui/Feedback';
 import { NavBar } from './NavBar';
+import { SectionTabs } from './SectionTabs';
+import { ShortcutHelp } from './ShortcutHelp';
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   const session = useSession();
+  const preferences = usePreferences();
+  const signedIn = session.authenticated && session.permissions.read;
+  const shortcuts = useKeyboardShortcuts(signedIn && preferences.shortcuts);
+
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -32,6 +40,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               Access is currently granted by the legacy scope setting. Assign Linux Broker API roles and turn off ALLOW_LEGACY_SCOPE_ACCESS.
             </Notice>
           ) : null}
+          {signedIn ? <SectionTabs pathname={pathname} /> : null}
           {children}
         </div>
       </main>
@@ -39,9 +48,18 @@ export function AppShell({ children }: { children: ReactNode }) {
       <footer className="mt-auto border-t border-[var(--lb-hairline)] py-4">
         <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-2 px-4 text-xs text-muted">
           <span>Linux Broker Management Portal</span>
-          <span>v{session.version}</span>
+          <span className="flex items-center gap-3">
+            {signedIn && preferences.shortcuts ? (
+              <button type="button" className="text-xs text-muted underline-offset-2 hover:underline" onClick={shortcuts.openHelp}>
+                Keyboard shortcuts <kbd className="font-mono">?</kbd>
+              </button>
+            ) : null}
+            <span>v{session.version}</span>
+          </span>
         </div>
       </footer>
+
+      <ShortcutHelp open={shortcuts.helpOpen} onClose={shortcuts.closeHelp} />
     </div>
   );
 }

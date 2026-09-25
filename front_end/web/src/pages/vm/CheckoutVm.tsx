@@ -49,7 +49,7 @@ export function CheckoutVm() {
 
   return (
     <>
-      <Breadcrumbs items={[{ label: 'Virtual machines', to: '/vms' }, { label: 'Checkout' }]} />
+      <Breadcrumbs items={[{ label: 'Hosts', to: '/vms' }, { label: 'Checkout' }]} />
 
       <PageHeader
         title="Checkout a virtual machine"

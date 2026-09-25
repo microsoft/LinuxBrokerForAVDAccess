@@ -7,13 +7,14 @@ import { AuditOutcomeBadge, Badge } from '../../components/ui/Badge';
 import { Button, ButtonLink } from '../../components/ui/Button';
 import { EmptyState, ErrorPanel, LoadingPanel, Notice, PageHeader } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useToast } from '../../components/ui/Toast';
 import { useProfileReset, useUserDetails } from '../../hooks/useBroker';
 import { useConfirm } from '../../hooks/useConfirm';
 import { useSessionActions } from '../../hooks/useSessionActions';
 import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
-import { formatDuration, formatUtc, valueOrDash } from '../../lib/format';
+import { formatDuration, valueOrDash } from '../../lib/format';
 import type { BrokerUserDetails } from '../../types/broker';
 
 function CardTitle({ children }: { children: React.ReactNode }) {
@@ -161,7 +162,7 @@ export function UserDetails() {
         <Notice tone="warning" className="mb-4">
           <strong>Profile reset pending.</strong>{' '}
           {pending.RequestedBy ? `${pending.RequestedBy} asked` : 'An administrator asked'} for a fresh profile on{' '}
-          {formatUtc(pending.RequestedAtUtc)}. It is applied the next time {name} signs in to a new host; the current
+          <RelativeTime value={pending.RequestedAtUtc} />. It is applied the next time {name} signs in to a new host; the current
           profile is kept, renamed.
         </Notice>
       ) : null}
@@ -196,9 +197,9 @@ export function UserDetails() {
                         </Link>
                         {entry.IsCurrent ? <span className="ml-2 text-xs text-muted">now</span> : null}
                       </td>
-                      <td className="font-mono text-xs whitespace-nowrap">{formatUtc(entry.FirstSeenUtc).replace(' UTC', '')}</td>
+                      <td className="text-xs whitespace-nowrap"><RelativeTime value={entry.FirstSeenUtc} showAbsolute /></td>
                       <td className="font-mono text-xs whitespace-nowrap">
-                        {entry.IsCurrent ? 'Now' : formatUtc(entry.LastSeenUtc).replace(' UTC', '')}
+                        {entry.IsCurrent ? 'Now' : <RelativeTime value={entry.LastSeenUtc} showAbsolute />}
                       </td>
                       <td className="text-right tabular-nums">{entry.Assignments}</td>
                     </tr>
@@ -233,7 +234,7 @@ export function UserDetails() {
               <tbody>
                 {user.RecentActivity.map((entry) => (
                   <tr key={entry.AuditId}>
-                    <td className="font-mono text-xs whitespace-nowrap">{formatUtc(entry.OccurredAtUtc).replace(' UTC', '')}</td>
+                    <td className="text-xs whitespace-nowrap"><RelativeTime value={entry.OccurredAtUtc} showAbsolute /></td>
                     <td className="font-mono text-xs whitespace-nowrap">{entry.Action}</td>
                     <td className="text-xs">{valueOrDash(entry.ActorName ?? entry.ActorOid)}</td>
                     <td>

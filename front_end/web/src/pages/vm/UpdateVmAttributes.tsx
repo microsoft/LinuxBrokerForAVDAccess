@@ -80,7 +80,7 @@ export function UpdateVmAttributes() {
     <>
       <Breadcrumbs
         items={[
-          { label: 'Virtual machines', to: '/vms' },
+          { label: 'Hosts', to: '/vms' },
           { label: vm.Hostname, to: `/vms/${vm.VMID}` },
           { label: 'Update' },
         ]}

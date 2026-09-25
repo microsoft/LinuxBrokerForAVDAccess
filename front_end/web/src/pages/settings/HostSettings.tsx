@@ -14,11 +14,12 @@ import {
   Spinner,
 } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useToast } from '../../components/ui/Toast';
 import { useApplyHostSettings, useHostSettings, useHostSettingsHistory, useSaveHostSettings } from '../../hooks/useBroker';
 import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
-import { formatUtc, valueOrDash } from '../../lib/format';
+import { valueOrDash } from '../../lib/format';
 import { settingsHistoryChanges } from '../../lib/settingsDiff';
 import type { HostSettings, Vm } from '../../types/broker';
 
@@ -357,7 +358,7 @@ function SettingsHistory() {
                   <span className="text-xs text-muted">
                     {version.UpdatedBy ? `Saved by ${version.UpdatedBy}` : 'Saved before changes were attributed'}
                     {' \u00b7 '}
-                    <span className="font-mono">{formatUtc(version.ValidFromUtc)}</span>
+                    <RelativeTime value={version.ValidFromUtc} showAbsolute />
                   </span>
                 </div>
 

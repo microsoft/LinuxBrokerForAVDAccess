@@ -13,6 +13,7 @@ import { Badge, EmptyValue } from '../../components/ui/Badge';
 import { ButtonLink } from '../../components/ui/Button';
 import { ErrorPanel, LoadingPanel, Notice, PageHeader, Spinner } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useMaintenanceRun } from '../../hooks/useBroker';
 import { useMaintenanceActions } from '../../hooks/useMaintenanceActions';
 import { useCan } from '../../hooks/useSession';
@@ -127,7 +128,7 @@ function HostTable({ run, hosts }: { run: MaintenanceRun; hosts: MaintenanceHost
                   <AgentCell host={host} patching={patching} />
                 </td>
                 <td className="text-right text-xs whitespace-nowrap tabular-nums">
-                  {host.CompletedAtUtc ? formatUtc(host.CompletedAtUtc) : formatDuration(host.StepAgeSeconds)}
+                  {host.CompletedAtUtc ? <RelativeTime value={host.CompletedAtUtc} /> : formatDuration(host.StepAgeSeconds)}
                 </td>
               </tr>
             ))}
@@ -169,7 +170,7 @@ export function MaintenanceRunDetails() {
   return (
     <>
       <Breadcrumbs
-        items={[{ label: 'VM management', to: '/vms' }, { label: 'Maintenance', to: '/vms/maintenance' }, { label: `Run ${run.RunID}` }]}
+        items={[{ label: 'Hosts', to: '/vms' }, { label: 'Maintenance', to: '/vms/maintenance' }, { label: `Run ${run.RunID}` }]}
       />
       <PageHeader
         title={runTitle(run)}
@@ -203,7 +204,7 @@ export function MaintenanceRunDetails() {
           <MaintenanceProgress counts={run.Counts} />
           <div className="mt-4">
             {run.EndedAtUtc ? (
-              <p className="m-0 text-xs text-muted">Ended {formatUtc(run.EndedAtUtc)}.</p>
+              <p className="m-0 text-xs text-muted">Ended <RelativeTime value={run.EndedAtUtc} />.</p>
             ) : (
               <RunReadiness run={run} />
             )}
