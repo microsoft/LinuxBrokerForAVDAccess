@@ -79,7 +79,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 
 What an administrator can do depends on their role (see [RBAC Permissions](#rbac-permissions)).
 
-1. **Access Service Management Portal**: Admins log into the front-end portal.
+1. **Access Service Management Portal**: Admins log into the front-end portal (see [Service Management Portal](#service-management-portal)).
 2. **Manage hosts**:
    - **Find hosts**: The host list pages, searches, filters by status (ready, in use, released, maintenance, draining, unreachable, off, cleanup pending) and sorts on the server, with optional columns for OS, agent, settings, last heartbeat and sessions.
    - **Act on many hosts at once**: Select hosts to drain, return to service, start, stop, apply settings, send a message, start maintenance or delete them. Hosts an action does not apply to are skipped and named, and each host's outcome is reported.
@@ -112,6 +112,26 @@ What an administrator can do depends on their role (see [RBAC Permissions](#rbac
    - **Audit log**: See who did what: every portal action, every denied attempt, and the changes the broker makes on its own, with CSV export.
    - **View Scaling Activity Logs**: Monitor scaling activities and history, including why each run did or did not act.
    - **View VM History**: Track the usage and status changes of VMs.
+
+## Service Management Portal
+
+These screenshots come from a live deployment with two RHEL 9 Linux hosts, one of them in use.
+
+**Pool overview.** Capacity and checkout health over the last day or week, what needs an operator now, fleet health, and the latest scaling runs.
+
+![Pool overview: host counts, fleet health, capacity and checkout health charts, pool composition and recent scaling activity](images/portal-overview.png)
+
+**Hosts.** Every Linux host with its status, power, network, current user and last heartbeat. The list is filtered, searched and sorted on the server, and hosts can be selected for bulk actions or imported from Azure.
+
+![Hosts: status filters with counts, and the host table with a row menu of actions](images/portal-hosts.png)
+
+**Sessions.** Who is on which host and why someone cannot connect, with a search for any user the broker has provisioned, and sign-out and messages for each session.
+
+![Sessions: find a user, session state filters, and the sessions table](images/portal-sessions.png)
+
+**Scaling policy.** What is in force now, what the next scaling run would do and why, the week's schedule windows, and the default rule.
+
+![Scaling policy: the phase in force, the next scaling run, the weekly timeline and the default rule](images/portal-scaling.png)
 
 ## RBAC Permissions
 
