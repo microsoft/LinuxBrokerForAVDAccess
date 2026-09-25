@@ -102,8 +102,8 @@ export function ActivityLog() {
         subtitle="Every evaluation the scaling task has performed."
         icon="activity"
         actions={
-          <ButtonLink to="/scaling/rules" size="sm" icon="chevron-left">
-            Back to rules
+          <ButtonLink to="/scaling" size="sm" icon="chevron-left">
+            Back to the policy
           </ButtonLink>
         }
       />

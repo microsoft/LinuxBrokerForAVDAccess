@@ -103,8 +103,8 @@ export function RuleHistory() {
         subtitle="Point-in-time record of every scaling rule change."
         icon="clock"
         actions={
-          <ButtonLink to="/scaling/rules" size="sm" icon="chevron-left">
-            Back to rules
+          <ButtonLink to="/scaling" size="sm" icon="chevron-left">
+            Back to the policy
           </ButtonLink>
         }
       />

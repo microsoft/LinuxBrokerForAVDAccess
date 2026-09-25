@@ -20,7 +20,7 @@ export function CreateRule() {
     try {
       await createRule.mutateAsync(form);
       showToast('Scaling rule created successfully.', 'success');
-      navigate('/scaling/rules');
+      navigate('/scaling');
     } catch (cause) {
       showToast(errorMessage(cause, 'Unable to create scaling rule.'), 'danger');
     }
@@ -47,8 +47,8 @@ export function CreateRule() {
         subtitle="Define when Linux Broker should power VMs on or off."
         icon="plus"
         actions={
-          <ButtonLink to="/scaling/rules" size="sm" icon="chevron-left">
-            Back to rules
+          <ButtonLink to="/scaling" size="sm" icon="chevron-left">
+            Back to the policy
           </ButtonLink>
         }
       />
@@ -59,7 +59,7 @@ export function CreateRule() {
         onSubmit={submit}
         submitLabel="Create rule"
         busy={createRule.isPending}
-        cancelTo="/scaling/rules"
+        cancelTo="/scaling"
       />
       {dialog}
     </>

@@ -68,6 +68,64 @@ export interface RuleFormProps {
   cancelTo: string;
 }
 
+type RuleValues = Omit<ScalingRuleInput, 'stopmode'> & { stopmode: ScalingRuleInput['stopmode'] | '' };
+
+export interface RuleFieldsProps<T extends RuleValues> {
+  value: T;
+  onChange: (value: T) => void;
+  /** Offer "the default rule's" as the stop mode, for a schedule window. */
+  inheritStopMode?: boolean;
+}
+
+/** The scaling values and stop mode, shared by the default rule and schedule windows. */
+export function RuleFields<T extends RuleValues>({ value, onChange, inheritStopMode = false }: RuleFieldsProps<T>) {
+  return (
+    <>
+      <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
+        {FIELDS.map((field) => (
+          <TextField
+            key={field.key}
+            label={field.label}
+            help={field.help}
+            type="number"
+            min={field.key === 'minvms' ? 1 : 0}
+            max={field.max}
+            step={field.step}
+            required
+            value={value[field.key]}
+            onChange={(event) => onChange({ ...value, [field.key]: event.target.value })}
+          />
+        ))}
+
+        <SelectField
+          label="When scaling down"
+          help="Choose what the scaler asks Azure to do with idle hosts."
+          options={[
+            ...(inheritStopMode ? [{ value: '', label: 'Same as the default rule' }] : []),
+            { value: 'PowerOff', label: 'Power off' },
+            { value: 'Deallocate', label: 'Deallocate' },
+          ]}
+          value={value.stopmode}
+          onChange={(event) => onChange({ ...value, stopmode: event.target.value as T['stopmode'] })}
+        />
+      </div>
+
+      {value.stopmode === 'Deallocate' ? (
+        <Notice tone="warning" className="mt-5">
+          Deallocate stops compute billing, but disks and IPs can still bill. Starts take longer,
+          capacity-constrained regions or sizes can fail with AllocationFailed and retry later,
+          and the temporary resource disk is wiped. Private IP addresses and host names are kept.
+        </Notice>
+      ) : value.stopmode === 'PowerOff' ? (
+        <Notice tone="info" className="mt-5">
+          Powered-off VMs keep their compute allocation and continue to be billed for compute;
+          they start quickly.
+        </Notice>
+      ) : null}
+    </>
+  );
+}
+
 /** Shared by rule creation and rule update, which take identical inputs. */
 export function RuleForm({
   value,
@@ -86,48 +144,7 @@ export function RuleForm({
           onSubmit();
         }}
       >
-        <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-          {FIELDS.map((field) => (
-            <TextField
-              key={field.key}
-              label={field.label}
-              help={field.help}
-              type="number"
-              min={field.key === 'minvms' ? 1 : 0}
-              max={field.max}
-              step={field.step}
-              required
-              value={value[field.key]}
-              onChange={(event) => onChange({ ...value, [field.key]: event.target.value })}
-            />
-          ))}
-
-          <SelectField
-            label="When scaling down"
-            help="Choose what the scaler asks Azure to do with idle hosts."
-            options={[
-              { value: 'PowerOff', label: 'Power off' },
-              { value: 'Deallocate', label: 'Deallocate' },
-            ]}
-            value={value.stopmode}
-            onChange={(event) =>
-              onChange({ ...value, stopmode: event.target.value as ScalingRuleInput['stopmode'] })
-            }
-          />
-        </div>
-
-        {value.stopmode === 'Deallocate' ? (
-          <Notice tone="warning" className="mt-5">
-            Deallocate stops compute billing, but disks and IPs can still bill. Starts take longer,
-            capacity-constrained regions or sizes can fail with AllocationFailed and retry later,
-            and the temporary resource disk is wiped. Private IP addresses and host names are kept.
-          </Notice>
-        ) : (
-          <Notice tone="info" className="mt-5">
-            Powered-off VMs keep their compute allocation and continue to be billed for compute;
-            they start quickly.
-          </Notice>
-        )}
+        <RuleFields value={value} onChange={onChange} />
 
         <div className="mt-6 flex flex-wrap gap-2">
           <Button type="submit" variant="primary" icon="check-circle" disabled={busy}>

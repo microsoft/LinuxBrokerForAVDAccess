@@ -1171,7 +1171,9 @@ AUDIT_DENIED = 'denied'
 AUDIT_OUTCOMES = (AUDIT_SUCCESS, AUDIT_FAILURE, AUDIT_DENIED)
 
 # POST routes that only read. They carry no audit action and their denials are not audited.
-READ_ONLY_POST_ENDPOINTS = frozenset({'get_vm_history', 'get_scaling_activity_log', 'get_scaling_rules_history'})
+READ_ONLY_POST_ENDPOINTS = frozenset({
+    'get_vm_history', 'get_scaling_activity_log', 'get_scaling_rules_history', 'preview_scaling',
+})
 
 _MIRID_RESOURCE_NAME_RE = re.compile(r'/providers/[^/]+/[^/]+/(?P<name>[^/]+)/?$', re.IGNORECASE)
 _MIRID_VM_NAME_RE = re.compile(r'/providers/Microsoft\.Compute/virtualMachines/(?P<name>[^/]+)/?$', re.IGNORECASE)
@@ -3157,6 +3159,544 @@ def get_scaling_rules_history():
         paged_proc='GetVmScalingRulesHistoryPaged',
         label='scaling rules history',
     )
+
+# ===============================
+# Scaling Policy APIs
+#
+# Schedule windows override the default rule at set times of the week, read in the policy's
+# time zone. SQL decides which window applies (fnActiveScalingPhase) and rejects overlapping
+# windows under a lock; the checks here mirror it, so an administrator gets a message that
+# names the clash. The preview is a dry run of the real scaling decision.
+
+SCHEDULE_DAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
+SCHEDULE_DAY_NAMES = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+SCHEDULE_TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
+SCHEDULE_NAME_MAX = 64
+WEEK_MINUTES = 7 * 1440
+TIME_ZONE_CACHE_SECONDS = 3600
+
+
+def schedule_days_mask(value):
+    """Day codes ('mon'...'sun') or a bit mask (1 = Monday ... 64 = Sunday) as a bit mask."""
+    if isinstance(value, bool):
+        raise RuleValidationError("days must list the days the window applies on.")
+    if isinstance(value, int):
+        if 1 <= value <= 127:
+            return value
+        raise RuleValidationError("Choose at least one day.")
+    if not isinstance(value, list) or not value:
+        raise RuleValidationError("Choose at least one day.")
+    mask = 0
+    for day in value:
+        code = str(day).strip().lower()[:3]
+        if code not in SCHEDULE_DAYS:
+            raise RuleValidationError("days must be day names such as mon, tue or sun.")
+        mask |= 1 << SCHEDULE_DAYS.index(code)
+    return mask
+
+
+def schedule_day_codes(mask):
+    return [day for index, day in enumerate(SCHEDULE_DAYS) if int(mask or 0) & (1 << index)]
+
+
+def schedule_minutes(value, field):
+    text = str(value or '').strip()
+    match = SCHEDULE_TIME_RE.match(text)
+    if not match:
+        raise RuleValidationError(f"{field} must be a time as HH:MM, from 00:00 to 23:59.")
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def schedule_week_intervals(mask, start_minute, end_minute):
+    """The same intervals as dbo.fnScheduleWeekIntervals, in minutes of the week from Monday."""
+    intervals = []
+    for index in range(7):
+        if not int(mask) & (1 << index):
+            continue
+        start = index * 1440 + start_minute
+        end = index * 1440 + end_minute + (1440 if end_minute <= start_minute else 0)
+        intervals.append((start, min(end, WEEK_MINUTES)))
+        if end > WEEK_MINUTES:
+            intervals.append((0, end - WEEK_MINUTES))
+    return intervals
+
+
+def schedules_overlap(first, second):
+    return any(a_start < b_end and b_start < a_end for a_start, a_end in first for b_start, b_end in second)
+
+
+def _minutes_text(minutes):
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def parse_schedule(body):
+    """A complete schedule window from a request body. Raises RuleValidationError."""
+    name = body.get('name')
+    if not isinstance(name, str) or not name.strip():
+        raise RuleValidationError("name is required.")
+    name = ''.join(character for character in name if character.isprintable()).strip()
+    if len(name) > SCHEDULE_NAME_MAX:
+        raise RuleValidationError(f"name must be at most {SCHEDULE_NAME_MAX} characters.")
+
+    mask = schedule_days_mask(body.get('days'))
+    start = schedule_minutes(body.get('start'), 'start')
+    end = schedule_minutes(body.get('end'), 'end')
+    if start == end:
+        raise RuleValidationError("start and end must differ. To cover a whole day, end at 00:00 and start later, or use two windows.")
+
+    enabled = body.get('enabled', True)
+    if not isinstance(enabled, bool):
+        raise RuleValidationError("enabled must be true or false.")
+
+    if any(_is_blank(body.get(field)) for field in SCALING_RULE_FIELDS):
+        raise RuleValidationError(
+            "Please provide all required fields: 'minvms', 'maxvms', 'scaleupratio', "
+            "'scaleupincrement', 'scaledownratio', 'scaledownincrement'."
+        )
+    rule = parse_rule_fields(body)
+    validate_rule(rule)
+
+    return {
+        'name': name,
+        'mask': mask,
+        'start': start,
+        'end': end,
+        'enabled': enabled,
+        'rule': rule,
+        'stopmode': parse_stop_mode(body.get('stopmode')),
+    }
+
+
+def schedule_item(row):
+    start = schedule_minutes(row.get('StartTime'), 'start')
+    end = schedule_minutes(row.get('EndTime'), 'end')
+    return serialize_for_json({
+        'ScheduleID': row.get('ScheduleID'),
+        'Name': row.get('Name'),
+        'Enabled': bool(row.get('Enabled')),
+        'Days': schedule_day_codes(row.get('DaysOfWeek')),
+        'DaysOfWeek': row.get('DaysOfWeek'),
+        'StartTime': row.get('StartTime'),
+        'EndTime': row.get('EndTime'),
+        'CrossesMidnight': end <= start,
+        'MinVMs': row.get('MinVMs'),
+        'MaxVMs': row.get('MaxVMs'),
+        'ScaleUpRatio': float(row['ScaleUpRatio']) if row.get('ScaleUpRatio') is not None else None,
+        'ScaleUpIncrement': row.get('ScaleUpIncrement'),
+        'ScaleDownRatio': float(row['ScaleDownRatio']) if row.get('ScaleDownRatio') is not None else None,
+        'ScaleDownIncrement': row.get('ScaleDownIncrement'),
+        'StopMode': row.get('StopMode'),
+        'UpdatedBy': row.get('UpdatedBy'),
+        'UpdatedAtUtc': row.get('UpdatedAtUtc'),
+    })
+
+
+def schedule_intervals_of(item):
+    return schedule_week_intervals(
+        item['DaysOfWeek'], schedule_minutes(item['StartTime'], 'start'), schedule_minutes(item['EndTime'], 'end')
+    )
+
+
+def describe_window(item):
+    days = ', '.join(day.capitalize() for day in item['Days'])
+    return f"{days} {item['StartTime']}\u2013{item['EndTime']}"
+
+
+def next_phase_change(schedules, local_time):
+    """When the phase in force next changes, from the enabled windows and the local time.
+
+    Returns None without any enabled window, because the default rule then always applies.
+    """
+    enabled = [(item, schedule_intervals_of(item)) for item in schedules if item['Enabled']]
+    if not enabled or not local_time:
+        return None
+    try:
+        local = datetime.strptime(str(local_time)[:16], '%Y-%m-%dT%H:%M')
+    except ValueError:
+        return None
+
+    now = local.weekday() * 1440 + local.hour * 60 + local.minute
+    boundaries = {edge for _, intervals in enabled for interval in intervals for edge in interval}
+    deltas = sorted({(edge - now) % WEEK_MINUTES for edge in boundaries} - {0})
+    if not deltas:
+        return None
+
+    for delta in deltas:
+        minute = (now + delta) % WEEK_MINUTES
+        after = next((item for item, intervals in enabled if any(start <= minute < end for start, end in intervals)), None)
+        before = next((item for item, intervals in enabled
+                       if any(start <= (minute - 1) % WEEK_MINUTES < end for start, end in intervals)), None)
+        # A boundary where one window ends and another starts at the same minute changes the phase too.
+        if (after or {}).get('ScheduleID') == (before or {}).get('ScheduleID'):
+            continue
+        return {
+            'InMinutes': delta,
+            'AtLocal': f"{SCHEDULE_DAY_NAMES[minute // 1440]} {_minutes_text(minute % 1440)}",
+            'PhaseName': after['Name'] if after else 'Default rule',
+            'ScheduleID': after['ScheduleID'] if after else None,
+        }
+    return None
+
+
+def fetch_schedules():
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetScalingSchedules")
+            rows = cursor.fetchall() or []
+    return [schedule_item(row) for row in rows]
+
+
+def _phase_from_policy(row):
+    if not row or not row.get('ActiveSource'):
+        return None
+    return serialize_for_json({
+        'Source': row.get('ActiveSource'),
+        'ScheduleID': row.get('ActiveScheduleID'),
+        'Name': row.get('ActivePhaseName'),
+        'MinVMs': row.get('ActiveMinVMs'),
+        'MaxVMs': row.get('ActiveMaxVMs'),
+        'ScaleUpRatio': float(row['ActiveScaleUpRatio']) if row.get('ActiveScaleUpRatio') is not None else None,
+        'ScaleUpIncrement': row.get('ActiveScaleUpIncrement'),
+        'ScaleDownRatio': float(row['ActiveScaleDownRatio']) if row.get('ActiveScaleDownRatio') is not None else None,
+        'ScaleDownIncrement': row.get('ActiveScaleDownIncrement'),
+        'StopMode': row.get('ActiveStopMode'),
+    })
+
+
+@app.route('/api/scaling/policy', methods=['GET'])
+@token_required(READ_ROLES)
+def get_scaling_policy():
+    """The time zone, the default rule, every schedule window, and what applies now and next."""
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetScalingPolicy")
+                policy = cursor.fetchone() or {}
+                cursor.execute("EXEC GetScalingRules")
+                rules = cursor.fetchall() or []
+                cursor.execute("EXEC GetScalingActivityLog @StartDate = NULL, @EndDate = NULL, @Limit = 1")
+                last_run = cursor.fetchone()
+
+        schedules = fetch_schedules()
+        default_rule = next((rule for rule in rules if rule.get('IsActive')), rules[0] if rules else None)
+
+        return jsonify(serialize_for_json({
+            'TimeZone': policy.get('TimeZone') or 'UTC',
+            'UpdatedBy': policy.get('UpdatedBy'),
+            'UpdatedAtUtc': policy.get('UpdatedAtUtc'),
+            'NowUtc': policy.get('NowUtc'),
+            'LocalTime': policy.get('LocalTime'),
+            'ActivePhase': _phase_from_policy(policy),
+            'DefaultRule': default_rule,
+            'Schedules': schedules,
+            'NextChange': next_phase_change(schedules, policy.get('LocalTime')),
+            'LastRun': last_run,
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading the scaling policy.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read the scaling policy.")
+        return error_response("Unable to retrieve the scaling policy.", 500)
+
+
+@app.route('/api/scaling/timezones', methods=['GET'])
+@token_required(READ_ROLES)
+def get_time_zones():
+    """The zones the policy can use. They change only with SQL Server updates, so they are cached."""
+    try:
+        zones = cache.get('scaling-time-zones')
+        if zones is None:
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute("EXEC GetTimeZones")
+                    zones = serialize_for_json(cursor.fetchall() or [])
+            cache.set('scaling-time-zones', zones, timeout=TIME_ZONE_CACHE_SECONDS)
+        return jsonify(zones), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while listing time zones.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to list time zones.")
+        return error_response("Unable to list time zones.", 500)
+
+
+@app.route('/api/scaling/policy/update', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('scaling.policy_update', target_type='scaling')
+def update_scaling_policy():
+    """Set the time zone every schedule window is read in."""
+    try:
+        g.audit_target_id = 'Policy'
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+        zone = body.get('timezone')
+        if not isinstance(zone, str) or not zone.strip() or len(zone) > 64:
+            return error_response("Provide the timezone as a name from /api/scaling/timezones.", 400)
+
+        _, updated_by, _ = audit_actor()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC SetScalingPolicyTimeZone @TimeZone = %s, @UpdatedBy = %s", (zone.strip(), updated_by))
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        result = row.get('Result')
+        if result == 'InvalidTimeZone':
+            return error_response(f"'{zone.strip()}' is not a time zone SQL Server knows. Choose one from the list.", 400)
+
+        g.audit_detail = {'from': row.get('PreviousTimeZone'), 'to': row.get('TimeZone'), 'result': result}
+        return jsonify({'TimeZone': row.get('TimeZone'), 'Result': result,
+                        'message': f"Schedules are now read in {row.get('TimeZone')}." if result == 'Updated'
+                        else f"Schedules were already read in {row.get('TimeZone')}."}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while updating the scaling policy.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to update the scaling policy.")
+        return error_response("Unable to update the scaling policy.", 500)
+
+
+def save_scaling_schedule(schedule_id):
+    try:
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+        try:
+            schedule = parse_schedule(body)
+        except RuleValidationError as e:
+            return error_response(e.client_message, 400)
+
+        existing = fetch_schedules()
+        previous = next((item for item in existing if item['ScheduleID'] == schedule_id), None)
+        if schedule_id is not None and previous is None:
+            return error_response(f"Scaling schedule {schedule_id} was not found.", 404)
+
+        start_text = _minutes_text(schedule['start'])
+        end_text = _minutes_text(schedule['end'])
+        if schedule['enabled']:
+            proposed = schedule_week_intervals(schedule['mask'], schedule['start'], schedule['end'])
+            for other in existing:
+                if other['ScheduleID'] != schedule_id and other['Enabled'] and schedules_overlap(proposed, schedule_intervals_of(other)):
+                    return error_response(
+                        f"This window overlaps '{other['Name']}' ({describe_window(other)}). "
+                        "Change the days or times, or disable one of them.", 409
+                    )
+
+        _, updated_by, _ = audit_actor()
+        rule = schedule['rule']
+        values = {
+            'name': schedule['name'], 'days': schedule_day_codes(schedule['mask']), 'start': start_text,
+            'end': end_text, 'enabled': schedule['enabled'], 'stopmode': schedule['stopmode'], **rule,
+        }
+        if previous is None:
+            g.audit_detail = {'schedule': values}
+        else:
+            before = {
+                'name': previous['Name'], 'days': previous['Days'], 'start': previous['StartTime'], 'end': previous['EndTime'],
+                'enabled': previous['Enabled'], 'stopmode': previous['StopMode'], **_rule_from_row(previous),
+            }
+            g.audit_detail = {'changes': {
+                field: {'from': before.get(field), 'to': value} for field, value in values.items() if before.get(field) != value
+            }}
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    """
+                    EXEC SaveScalingSchedule @ScheduleID = %s, @Name = %s, @Enabled = %s, @DaysOfWeek = %s,
+                        @StartTime = %s, @EndTime = %s, @MinVMs = %s, @MaxVMs = %s, @ScaleUpRatio = %s,
+                        @ScaleUpIncrement = %s, @ScaleDownRatio = %s, @ScaleDownIncrement = %s, @StopMode = %s,
+                        @UpdatedBy = %s
+                    """,
+                    (schedule_id, schedule['name'], schedule['enabled'], schedule['mask'], start_text, end_text,
+                     rule['minvms'], rule['maxvms'], rule['scaleupratio'], rule['scaleupincrement'],
+                     rule['scaledownratio'], rule['scaledownincrement'], schedule['stopmode'], updated_by),
+                )
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        result = row.get('Result')
+        if result == 'Invalid':
+            return error_response(str(row.get('Message') or 'The schedule is not valid.'), 400)
+        if result == 'NotFound':
+            return error_response(f"Scaling schedule {schedule_id} was not found.", 404)
+        if result == 'Overlap':
+            return error_response(f"This window overlaps '{row.get('OverlapsName')}'. Refresh and try again.", 409)
+        if result == 'Busy':
+            return error_response("Scaling schedules are busy. Please try again.", 503)
+        if result not in ('Created', 'Updated'):
+            logger.error("SaveScalingSchedule returned %s.", result)
+            return error_response("Unable to save the scaling schedule.", 500)
+
+        g.audit_target_id = row.get('ScheduleID')
+        return jsonify({
+            'ScheduleID': row.get('ScheduleID'),
+            'Result': result,
+            'message': f"Saved '{schedule['name']}'. It applies from the next scaling run.",
+        }), 201 if result == 'Created' else 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while saving a scaling schedule.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to save a scaling schedule.")
+        return error_response("Unable to save the scaling schedule.", 500)
+
+
+@app.route('/api/scaling/schedules/create', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('scaling.schedule_create', target_type='schedule')
+def create_scaling_schedule():
+    return save_scaling_schedule(None)
+
+
+@app.route('/api/scaling/schedules/<int:scheduleid>/update', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('scaling.schedule_update', target_type='schedule', target_param='scheduleid')
+def update_scaling_schedule(scheduleid):
+    return save_scaling_schedule(scheduleid)
+
+
+@app.route('/api/scaling/schedules/<int:scheduleid>/delete', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('scaling.schedule_delete', target_type='schedule', target_param='scheduleid')
+def delete_scaling_schedule(scheduleid):
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC DeleteScalingSchedule @ScheduleID = %s", (scheduleid,))
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        if row.get('Result') != 'Deleted':
+            return error_response(f"Scaling schedule {scheduleid} was not found.", 404)
+
+        g.audit_detail = {'name': row.get('Name')}
+        return jsonify({'ScheduleID': scheduleid, 'message': f"Deleted '{row.get('Name')}'."}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while deleting scaling schedule %s.", scheduleid)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to delete scaling schedule %s.", scheduleid)
+        return error_response("Unable to delete the scaling schedule.", 500)
+
+
+def preview_summary(row, candidates):
+    action = row.get('Action')
+    count = len(candidates)
+    hosts = f" ({', '.join(candidates[:5])}{', …' if count > 5 else ''})" if candidates else ''
+    if action == 'PowerOn':
+        return f"Start {count} host{'s' if count != 1 else ''}{hosts}."
+    if action == 'PowerOff':
+        verb = 'Deallocate' if row.get('StopMode') == 'Deallocate' else 'Stop'
+        return f"{verb} {count} host{'s' if count != 1 else ''}{hosts}."
+    return "No change."
+
+
+@app.route('/api/scaling/preview', methods=['GET', 'POST'])
+@token_required(READ_ROLES)
+def preview_scaling():
+    """What the next scaling run would do, and why: a dry run of the real decision.
+
+    ?at= (or "at" in a POST body) resolves the phase at another UTC time. A POST can also try
+    proposed rule values ("rule"), such as a schedule window being edited, before saving them.
+    Nothing is changed either way.
+    """
+    try:
+        body = request.get_json(silent=True) if request.method == 'POST' else None
+        body = body if isinstance(body, dict) else {}
+
+        try:
+            at = parse_audit_time(body.get('at') if request.method == 'POST' else request.args.get('at'), 'at')
+        except AuditFilterError as e:
+            return error_response(e.client_message, 400)
+
+        override = None
+        proposed = body.get('rule')
+        if proposed is not None:
+            if not isinstance(proposed, dict):
+                return error_response("rule must be an object with the scaling values.", 400)
+            try:
+                if any(_is_blank(proposed.get(field)) for field in SCALING_RULE_FIELDS):
+                    raise RuleValidationError(
+                        "Please provide all required fields: 'minvms', 'maxvms', 'scaleupratio', "
+                        "'scaleupincrement', 'scaledownratio', 'scaledownincrement'."
+                    )
+                values = parse_rule_fields(proposed)
+                validate_rule(values)
+                stop_mode = parse_stop_mode(proposed.get('stopmode'))
+            except RuleValidationError as e:
+                return error_response(e.client_message, 400)
+            name = proposed.get('name')
+            override = json.dumps({
+                'MinVMs': values['minvms'], 'MaxVMs': values['maxvms'],
+                'ScaleUpRatio': values['scaleupratio'], 'ScaleUpIncrement': values['scaleupincrement'],
+                'ScaleDownRatio': values['scaledownratio'], 'ScaleDownIncrement': values['scaledownincrement'],
+                'StopMode': stop_mode,
+                'PhaseName': str(name).strip()[:SCHEDULE_NAME_MAX] if isinstance(name, str) and name.strip() else 'Proposed values',
+            })
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC TriggerScalingLogic @DryRun = 1, @AtUtc = %s, @OverrideJson = %s",
+                    (at, override)
+                )
+                row = cursor.fetchone() or {}
+
+        candidates = [
+            entry.get('Hostname') for entry in (_json_column(row.get('CandidatesJson'), list) or [])
+            if isinstance(entry, dict) and entry.get('Hostname')
+        ]
+        utilization = row.get('Utilization')
+        return jsonify(serialize_for_json({
+            'Action': row.get('Action') or 'None',
+            'Summary': preview_summary(row, candidates),
+            'Reason': row.get('Reason'),
+            'RequestCount': row.get('RequestCount'),
+            'Candidates': candidates,
+            'Phase': {
+                'Source': row.get('PhaseSource'),
+                'ScheduleID': row.get('ScheduleID'),
+                'Name': row.get('PhaseName'),
+                'MinVMs': row.get('MinVMs'),
+                'MaxVMs': row.get('MaxVMs'),
+                'ScaleUpRatio': float(row['ScaleUpRatio']) if row.get('ScaleUpRatio') is not None else None,
+                'ScaleUpIncrement': row.get('ScaleUpIncrement'),
+                'ScaleDownRatio': float(row['ScaleDownRatio']) if row.get('ScaleDownRatio') is not None else None,
+                'ScaleDownIncrement': row.get('ScaleDownIncrement'),
+                'StopMode': row.get('StopMode'),
+            },
+            'Counts': {
+                'PoweredOn': row.get('PoweredOn'),
+                'Serviceable': row.get('Serviceable'),
+                'InUse': row.get('InUse'),
+                'Draining': row.get('Draining'),
+                'Utilization': float(utilization) if utilization is not None else None,
+            },
+            'TimeZone': row.get('TimeZone'),
+            'LocalTime': row.get('LocalTime'),
+            'AtUtc': row.get('AtUtc'),
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while previewing scaling.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if 'too many arguments' in str(e).lower():
+            return error_response("The preview needs the updated database scripts. Apply sql_queries and try again.", 409)
+        logger.exception("Failed to preview scaling.")
+        return error_response("Unable to preview scaling.", 500)
 
 # ===============================
 # Linux Host Settings APIs

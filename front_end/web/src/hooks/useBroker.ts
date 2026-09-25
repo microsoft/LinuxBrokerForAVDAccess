@@ -20,10 +20,14 @@ import type {
   PowerSyncResult,
   ProfileResetResult,
   SaveSettingsResult,
+  ScalingPolicy,
+  ScalingPreview,
   ScalingRule,
   ScalingRuleInput,
+  ScheduleInput,
   SessionsPage,
   SignOutResult,
+  TimeZoneOption,
   UserSearchResult,
   Vm,
   VmAttributesInput,
@@ -366,7 +370,76 @@ function useRuleInvalidation() {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.rules });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.scalingPolicy });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.scalingPreview });
   };
+}
+
+/* --------------------------------------------------------- scaling policy */
+
+export function useScalingPolicy() {
+  return useQuery({
+    queryKey: queryKeys.scalingPolicy,
+    queryFn: ({ signal }) => apiGet<ScalingPolicy>('/scaling/policy', signal),
+  });
+}
+
+/** What the next scaling run would do now. Refreshed every minute while shown. */
+export function useScalingPreview() {
+  return useQuery({
+    queryKey: queryKeys.scalingPreview,
+    queryFn: ({ signal }) => apiGet<ScalingPreview>('/scaling/preview', signal),
+    refetchInterval: 60_000,
+  });
+}
+
+/** A dry run with proposed values, for the schedule editor. Changes nothing. */
+export function usePreviewProposed() {
+  return useMutation({
+    mutationFn: (input: { rule: Record<string, string>; at?: string }) =>
+      apiPost<ScalingPreview>('/scaling/preview', input),
+  });
+}
+
+export function useTimeZones() {
+  return useQuery({
+    queryKey: queryKeys.timeZones,
+    queryFn: ({ signal }) => apiGet<TimeZoneOption[]>('/scaling/timezones', signal),
+    staleTime: 60 * 60_000,
+  });
+}
+
+export function useSetPolicyTimeZone() {
+  const invalidate = useRuleInvalidation();
+  return useMutation({
+    mutationFn: (timezone: string) => apiPost<{ message: string; TimeZone: string }>('/scaling/policy', { timezone }),
+    onSuccess: invalidate,
+  });
+}
+
+function schedulePayload(input: ScheduleInput) {
+  const { stopmode, ...rest } = input;
+  return stopmode ? { ...rest, stopmode } : rest;
+}
+
+export function useSaveSchedule(scheduleId?: number | string) {
+  const invalidate = useRuleInvalidation();
+  return useMutation({
+    mutationFn: (input: ScheduleInput) =>
+      apiPost<{ ScheduleID: number; message: string }>(
+        scheduleId ? `/scaling/schedules/${scheduleId}/update` : '/scaling/schedules',
+        schedulePayload(input),
+      ),
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteSchedule() {
+  const invalidate = useRuleInvalidation();
+  return useMutation({
+    mutationFn: (scheduleId: number) => apiPost<{ message: string }>(`/scaling/schedules/${scheduleId}/delete`),
+    onSuccess: invalidate,
+  });
 }
 
 export function useCreateScalingRule() {

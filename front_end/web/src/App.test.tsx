@@ -159,6 +159,38 @@ const SESSIONS = {
 
 let userDetails: Record<string, unknown> = {};
 
+const SCHEDULE_BASE = {
+  Enabled: true, DaysOfWeek: 31, Days: ['mon', 'tue', 'wed', 'thu', 'fri'], CrossesMidnight: false, MinVMs: 4, MaxVMs: 20,
+  ScaleUpRatio: 70, ScaleUpIncrement: 2, ScaleDownRatio: 30, ScaleDownIncrement: 1, StopMode: null,
+  UpdatedBy: 'op@contoso.com', UpdatedAtUtc: '2026-09-20T10:00:00Z',
+};
+
+const SCALING_POLICY = {
+  TimeZone: 'UTC', UpdatedBy: null, UpdatedAtUtc: '2026-09-01T10:00:00Z', NowUtc: '2026-09-24T10:15:00Z',
+  LocalTime: '2026-09-24T10:15:00',
+  ActivePhase: { Source: 'Schedule', ScheduleID: 1, Name: 'Business hours', MinVMs: 4, MaxVMs: 20, ScaleUpRatio: 70, ScaleUpIncrement: 2, ScaleDownRatio: 30, ScaleDownIncrement: 1, StopMode: 'PowerOff' },
+  DefaultRule: RULES[0],
+  Schedules: [{ ...SCHEDULE_BASE, ScheduleID: 1, Name: 'Business hours', StartTime: '08:00', EndTime: '18:00' }],
+  NextChange: { InMinutes: 465, AtLocal: 'Thursday 18:00', PhaseName: 'Default rule', ScheduleID: null },
+  LastRun: null,
+};
+
+let scalingPolicy: typeof SCALING_POLICY = SCALING_POLICY;
+
+const PREVIEW = {
+  Action: 'PowerOn', Summary: 'Start 2 hosts (linux-host-05, linux-host-06).', Reason: 'Serviceable hosts are below the minimum.',
+  RequestCount: 2, Candidates: ['linux-host-05', 'linux-host-06'],
+  Phase: SCALING_POLICY.ActivePhase, Counts: { PoweredOn: 7, Serviceable: 2, InUse: 1, Draining: 0, Utilization: 50 },
+  TimeZone: 'UTC', LocalTime: '2026-09-24T10:15:00', AtUtc: '2026-09-24T10:15:00Z',
+};
+
+const PROPOSED_PREVIEW = { ...PREVIEW, Action: 'None', Summary: 'No change.', Reason: 'No scaling threshold was crossed.', Candidates: [] };
+
+const TIME_ZONES = [
+  { Name: 'UTC', CurrentUtcOffset: '+00:00', IsCurrentlyDst: false },
+  { Name: 'Eastern Standard Time', CurrentUtcOffset: '-04:00', IsCurrentlyDst: true },
+];
+
 function freshUserDetails() {
   return {
     Username: 'alice', Uid: 2001, FirstProvisionedDate: null, ProfileReset: null,
@@ -184,8 +216,9 @@ let dashboard: typeof DASHBOARD & { fleetHealth?: unknown } = DASHBOARD;
 const requests: string[] = [];
 
 function stubFetch() {
-  return vi.fn(async (input: RequestInfo | URL) => {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const method = init?.method ?? 'GET';
     requests.push(url);
 
     if (url === '/api/ui/session' || url.startsWith('/api/ui/session?')) return jsonResponse(session);
@@ -198,6 +231,16 @@ function stubFetch() {
     if (url.startsWith('/api/ui/scaling/rules/history')) return jsonResponse(EMPTY_PAGE);
     if (url.startsWith('/api/ui/scaling/log')) return jsonResponse(EMPTY_PAGE);
     if (url.startsWith('/api/ui/scaling/rules')) return jsonResponse(RULES);
+    if (url.startsWith('/api/ui/scaling/policy')) {
+      return method === 'POST'
+        ? jsonResponse({ TimeZone: 'Eastern Standard Time', message: 'Schedules are now read in Eastern Standard Time.' })
+        : jsonResponse(scalingPolicy);
+    }
+    if (url.startsWith('/api/ui/scaling/preview')) return jsonResponse(method === 'POST' ? PROPOSED_PREVIEW : PREVIEW);
+    if (url.startsWith('/api/ui/scaling/timezones')) return jsonResponse(TIME_ZONES);
+    if (url.startsWith('/api/ui/scaling/schedules')) {
+      return jsonResponse({ ScheduleID: 5, message: "Saved 'Evening'. It applies from the next scaling run." });
+    }
     if (url.startsWith('/api/ui/hosts/health')) return jsonResponse(FLEET_HEALTH);
     if (url.startsWith('/api/ui/hosts/settings/history')) return jsonResponse(SETTINGS_HISTORY);
     if (url.startsWith('/api/ui/hosts/settings')) return jsonResponse(HOST_SETTINGS);
@@ -247,6 +290,7 @@ beforeEach(() => {
   session = SESSION;
   dashboard = DASHBOARD;
   userDetails = freshUserDetails();
+  scalingPolicy = SCALING_POLICY;
   requests.length = 0;
   setCsrfToken(null);
   vi.stubGlobal('fetch', stubFetch());
@@ -352,6 +396,9 @@ describe('App', () => {
     ['/audit', 'Audit log'],
     ['/sessions', 'Sessions'],
     ['/users/alice', 'alice'],
+    ['/scaling', 'Scaling policy'],
+    ['/scaling/schedules/new', 'Add a scaling window'],
+    ['/scaling/schedules/1', 'Edit Business hours'],
   ])('mounts %s', async (route, heading) => {
     renderApp(route);
     expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
@@ -694,5 +741,83 @@ describe('App', () => {
     renderApp('/users/alice');
     await screen.findByRole('heading', { name: 'alice', level: 1 });
     expect(screen.queryByRole('button', { name: 'Reset profile' })).not.toBeInTheDocument();
+  });
+
+  it('shows what is in force, what happens next and the week', async () => {
+    renderApp('/scaling');
+
+    expect(await screen.findByText('Start 2 hosts (linux-host-05, linux-host-06).')).toBeInTheDocument();
+    expect(screen.getAllByText('Business hours').length).toBeGreaterThan(0);
+    expect(screen.getByText(/takes over on Thursday 18:00, in 7 h 45 min/)).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: /Business hours: Mon\u2013Fri 08:00 to 18:00\. The default rule applies at all other times/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit Business hours' })).toBeInTheDocument();
+  });
+
+  it('keeps the scaling policy read-only for operators', async () => {
+    session = { ...SESSION, roles: ['Operator'], permissions: { read: true, operate: true, admin: false } };
+    renderApp('/scaling');
+    await screen.findByText('Start 2 hosts (linux-host-05, linux-host-06).');
+    expect(screen.queryByRole('link', { name: 'Add a window' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit Business hours' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Time zone')).not.toBeInTheDocument();
+  });
+
+  it('changes the policy time zone', async () => {
+    renderApp('/scaling');
+    const zone = await screen.findByLabelText('Time zone');
+    await waitFor(() => expect(within(zone).getAllByRole('option')).toHaveLength(2));
+    await userEvent.selectOptions(zone, 'Eastern Standard Time');
+    await userEvent.click(screen.getByRole('button', { name: 'Use this time zone' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url, init]) => String(url) === '/api/ui/scaling/policy' && init?.method === 'POST',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ timezone: 'Eastern Standard Time' });
+    });
+  });
+
+  it('refuses a window that overlaps another before saving', async () => {
+    renderApp('/scaling/schedules/new');
+    const name = await screen.findByLabelText('Name');
+    await userEvent.type(name, 'Lunch peak');
+    const starts = screen.getByLabelText('Starts');
+    const ends = screen.getByLabelText('Ends');
+    await userEvent.clear(starts);
+    await userEvent.type(starts, '11:00');
+    await userEvent.clear(ends);
+    await userEvent.type(ends, '14:00');
+
+    expect(await screen.findByText(/This window overlaps Business hours \(Mon\u2013Fri 08:00\u201318:00\)/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add window' })).toBeDisabled();
+
+    // Moving it into the evening clears the clash, and it saves with the default rule's values.
+    await userEvent.clear(starts);
+    await userEvent.type(starts, '18:00');
+    await userEvent.clear(ends);
+    await userEvent.type(ends, '22:00');
+    await userEvent.click(screen.getByRole('button', { name: 'Add window' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/scaling/schedules',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+        name: 'Lunch peak', days: ['mon', 'tue', 'wed', 'thu', 'fri'], start: '18:00', end: '22:00', enabled: true,
+        minvms: '2', maxvms: '20', scaleupratio: '80', scaleupincrement: '2', scaledownratio: '30', scaledownincrement: '1',
+      });
+    });
+  });
+
+  it('previews proposed window values without saving them', async () => {
+    renderApp('/scaling/schedules/1');
+    await userEvent.click(await screen.findByRole('button', { name: 'Preview with these values' }));
+
+    expect(await screen.findByText('No scaling threshold was crossed.')).toBeInTheDocument();
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([url, init]) => String(url) === '/api/ui/scaling/preview' && init?.method === 'POST',
+    );
+    expect(JSON.parse(String(call?.[1]?.body)).rule).toMatchObject({ minvms: '4', name: 'Business hours' });
+    expect(requests.some((url) => url.startsWith('/api/ui/scaling/schedules'))).toBe(false);
   });
 });

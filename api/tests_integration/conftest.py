@@ -142,6 +142,8 @@ def db(sql):
         "DELETE FROM dbo.VirtualMachines",
         "DELETE FROM dbo.VmScalingActivityLog",
         "DELETE FROM dbo.VmScalingRules",
+        "DELETE FROM dbo.ScalingSchedules",
+        "UPDATE dbo.ScalingPolicy SET TimeZone=N'UTC', UpdatedBy=NULL",
         "UPDATE dbo.LinuxHostSettings SET GracePeriodSeconds=1200, ReconcileIntervalSeconds=60, "
         "IdleTimeoutSeconds=0, IdleWarningSeconds=120, ScreenLockEnabled=0, DisableLockScreen=1, "
         "PreserveSessionsOnDisconnect=0 WHERE SettingsScope='Global'",

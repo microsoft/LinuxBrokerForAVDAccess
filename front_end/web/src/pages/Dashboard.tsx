@@ -145,7 +145,7 @@ export function Dashboard() {
               title="Scaling management"
               description="Tune the thresholds that grow and shrink the pool automatically."
               links={[
-                { to: '/scaling/rules', label: 'Scaling rules', primary: true },
+                { to: '/scaling', label: 'Scaling policy', primary: true },
                 { to: '/scaling/log', label: 'Activity log' },
                 { to: '/scaling/rules/history', label: 'Rule history' },
               ]}

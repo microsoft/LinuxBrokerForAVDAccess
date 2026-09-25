@@ -24,6 +24,8 @@ import { CreateRule } from './pages/scaling/CreateRule';
 import { RuleDetails } from './pages/scaling/RuleDetails';
 import { RuleHistory } from './pages/scaling/RuleHistory';
 import { RuleList } from './pages/scaling/RuleList';
+import { ScalingPolicy } from './pages/scaling/ScalingPolicy';
+import { ScheduleForm } from './pages/scaling/ScheduleForm';
 import { UpdateRule } from './pages/scaling/UpdateRule';
 import { HostSettingsPage } from './pages/settings/HostSettings';
 import { AuditLog } from './pages/audit/AuditLog';
@@ -76,6 +78,9 @@ function AuthenticatedRoutes() {
       <Route path="/vms/:vmid" element={<VmDetails />} />
       <Route path="/vms/:vmid/update" element={<RequireAdmin><UpdateVmAttributes /></RequireAdmin>} />
 
+      <Route path="/scaling" element={<ScalingPolicy />} />
+      <Route path="/scaling/schedules/new" element={<RequireAdmin><ScheduleForm /></RequireAdmin>} />
+      <Route path="/scaling/schedules/:scheduleid" element={<RequireAdmin><ScheduleForm /></RequireAdmin>} />
       <Route path="/scaling/rules" element={<RuleList />} />
       <Route path="/scaling/rules/create" element={<RequireAdmin><CreateRule /></RequireAdmin>} />
       <Route path="/scaling/rules/history" element={<RuleHistory />} />

@@ -59,6 +59,13 @@ EXPECTED_ROLES = {
     "request_profile_reset": ADMIN,
     "cancel_profile_reset": ADMIN,
     "broadcast_message": OPERATE,
+    "get_scaling_policy": READ,
+    "get_time_zones": READ,
+    "update_scaling_policy": ADMIN,
+    "create_scaling_schedule": ADMIN,
+    "update_scaling_schedule": ADMIN,
+    "delete_scaling_schedule": ADMIN,
+    "preview_scaling": READ,
 }
 
 EXPECTED_GROUPS = {

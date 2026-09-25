@@ -147,6 +147,8 @@ class FakeBrokerApi:
         self.raise_post_paths = set()
         # Status and body to answer a POST whose path ends with the key, instead of the default.
         self.post_replies = {}
+        # The same for a GET.
+        self.get_replies = {}
 
         # Mirrors GetVmSummary for the four seeded VMs in VMS: one Available (on,
         # reachable -> ready), one CheckedOut, one Maintenance (off, unreachable),
@@ -178,6 +180,9 @@ class FakeBrokerApi:
         self.gets.append({"url": url, "params": kwargs.get("params"), "timeout": kwargs.get("timeout")})
         if any(url.endswith(path) for path in self.raise_get_paths):
             raise requests.exceptions.RequestException("broker unavailable")
+        for path, (status, body) in self.get_replies.items():
+            if url.endswith(path):
+                return FakeResponse(body, status_code=status)
         if url.endswith("/me"):
             return FakeResponse({"roles": ["FullAccess"], "permissions": {"read": True, "operate": True, "admin": True}, "legacyScopeAccess": False})
         if url.endswith("/vms/summary"):

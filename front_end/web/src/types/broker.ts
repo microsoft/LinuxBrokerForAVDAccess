@@ -471,3 +471,81 @@ export interface ScalingRuleInput {
   scaledownincrement: string;
   stopmode: 'PowerOff' | 'Deallocate';
 }
+
+export type ScheduleDay = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+
+/** A window that overrides the default scaling rule on some days and times. */
+export interface ScalingSchedule {
+  ScheduleID: number;
+  Name: string;
+  Enabled: boolean;
+  Days: ScheduleDay[];
+  DaysOfWeek: number;
+  StartTime: string;
+  EndTime: string;
+  CrossesMidnight: boolean;
+  MinVMs: number;
+  MaxVMs: number;
+  ScaleUpRatio: number;
+  ScaleUpIncrement: number;
+  ScaleDownRatio: number;
+  ScaleDownIncrement: number;
+  StopMode: 'PowerOff' | 'Deallocate' | null;
+  UpdatedBy: string | null;
+  UpdatedAtUtc: string | null;
+}
+
+export interface ScalingPhase {
+  Source: 'Schedule' | 'Rule' | 'Proposed' | null;
+  ScheduleID: number | null;
+  Name: string | null;
+  MinVMs: number | null;
+  MaxVMs: number | null;
+  ScaleUpRatio: number | null;
+  ScaleUpIncrement: number | null;
+  ScaleDownRatio: number | null;
+  ScaleDownIncrement: number | null;
+  StopMode: 'PowerOff' | 'Deallocate' | null;
+}
+
+export interface ScalingPolicy {
+  TimeZone: string;
+  UpdatedBy: string | null;
+  UpdatedAtUtc: string | null;
+  NowUtc: string | null;
+  LocalTime: string | null;
+  ActivePhase: ScalingPhase | null;
+  DefaultRule: ScalingRule | null;
+  Schedules: ScalingSchedule[];
+  NextChange: { InMinutes: number; AtLocal: string; PhaseName: string; ScheduleID: number | null } | null;
+  LastRun: ActivityLogEntry | null;
+}
+
+export interface ScalingPreview {
+  Action: 'PowerOn' | 'PowerOff' | 'None';
+  Summary: string;
+  Reason: string | null;
+  RequestCount: number | null;
+  Candidates: string[];
+  Phase: ScalingPhase;
+  Counts: { PoweredOn: number; Serviceable: number; InUse: number; Draining: number; Utilization: number | null };
+  TimeZone: string | null;
+  LocalTime: string | null;
+  AtUtc: string | null;
+}
+
+export interface TimeZoneOption {
+  Name: string;
+  CurrentUtcOffset: string;
+  IsCurrentlyDst: boolean;
+}
+
+export interface ScheduleInput extends Omit<ScalingRuleInput, 'stopmode'> {
+  name: string;
+  days: ScheduleDay[];
+  start: string;
+  end: string;
+  enabled: boolean;
+  /** Empty uses the default rule's. */
+  stopmode: 'PowerOff' | 'Deallocate' | '';
+}

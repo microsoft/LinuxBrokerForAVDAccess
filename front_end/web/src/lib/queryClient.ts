@@ -46,4 +46,7 @@ export const queryKeys = {
   userSearch: (query: string) => ['users', 'search', query] as const,
   user: (username: string) => ['users', username] as const,
   users: ['users'] as const,
+  scalingPolicy: ['scaling', 'policy'] as const,
+  scalingPreview: ['scaling', 'preview'] as const,
+  timeZones: ['scaling', 'timezones'] as const,
 };

@@ -19,7 +19,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: 'gauge' },
   { to: '/vms', label: 'VM Management', icon: 'server' },
   { to: '/sessions', label: 'Sessions', icon: 'person', match: ['/sessions', '/users'] },
-  { to: '/scaling/rules', label: 'Scaling Management', icon: 'sliders', match: ['/scaling'] },
+  { to: '/scaling', label: 'Scaling Management', icon: 'sliders', match: ['/scaling'] },
   { to: '/settings/hosts', label: 'Host Settings', icon: 'wrench' },
   { to: '/audit', label: 'Audit', icon: 'shield' },
 ];
