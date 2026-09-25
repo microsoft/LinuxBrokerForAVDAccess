@@ -198,7 +198,7 @@ export function UserDetails() {
                         {entry.IsCurrent ? <span className="ml-2 text-xs text-muted">now</span> : null}
                       </td>
                       <td className="text-xs whitespace-nowrap"><RelativeTime value={entry.FirstSeenUtc} showAbsolute /></td>
-                      <td className="font-mono text-xs whitespace-nowrap">
+                      <td className="text-xs whitespace-nowrap">
                         {entry.IsCurrent ? 'Now' : <RelativeTime value={entry.LastSeenUtc} showAbsolute />}
                       </td>
                       <td className="text-right tabular-nums">{entry.Assignments}</td>

@@ -521,11 +521,14 @@ def summary_row(**values):
 
 def test_runs_are_listed_with_the_active_one(client, fake_db):
     fake_db.fetchall_rows["GetMaintenanceRuns"] = [summary_row(), summary_row(RunID=6, Status="Completed", SurgeRequested=False)]
-    fake_db.fetchone_rows["GetMaintenanceRun"] = summary_row(MinReadyInForce=2, ReadyNow=3)
+    fake_db.fetchone_rows["GetMaintenanceRun"] = summary_row(MinReadyInForce=2, ReadyNow=3, LastTickAtUtc=None,
+                                                             LastTickAgeSeconds=None, CreatedAgeSeconds=610)
 
     body = client.get("/api/maintenance/runs").get_json()
 
     assert [run["RunID"] for run in body["Runs"]] == [7, 6]
+    # The portal tells a run never advanced from one just created by the database's clock.
+    assert (body["Active"]["LastTickAgeSeconds"], body["Active"]["CreatedAgeSeconds"]) == (None, 610)
     assert body["Active"]["Counts"] == {"Total": 3, "Pending": 1, "InProgress": 1, "Succeeded": 1, "Failed": 0, "Skipped": 0, "Cancelled": 0}
     assert (body["Active"]["SurgeRequested"], body["Active"]["MinReadyInForce"], body["Active"]["ReadyNow"]) == (True, 2, 3)
 

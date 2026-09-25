@@ -47,7 +47,7 @@ Role groups used below: **READ** = `Reader`, `Operator`, `FullAccess`; **OPERATE
 | POST | `/api/scaling/rules/<int:ruleid>/update` | ADMIN | Updates the scaling rule; the resulting rule is validated. |
 | POST | `/api/scaling/rules/<int:ruleid>/delete` | ADMIN | Deletes a scaling rule. |
 | POST | `/api/scaling/rules/history` | READ | Returns scaling rule history, optionally paged with `page` and `per_page`. |
-| GET | `/api/scaling/policy` | READ | The policy time zone, the default rule, every schedule window, and what applies now and next. |
+| GET | `/api/scaling/policy` | READ | The policy time zone, the default rule, every schedule window, and what applies now and next; `404` until the database has the scaling policy procedures. |
 | POST | `/api/scaling/policy/update` | ADMIN | Sets the time zone every schedule window is read in (`{"timezone": "<Windows zone name>"}`). |
 | GET | `/api/scaling/timezones` | READ | The time zones the policy can use, from `sys.time_zone_info`. |
 | POST | `/api/scaling/schedules/create` | ADMIN | Adds a schedule window; `409` when it overlaps another enabled window. |
@@ -64,7 +64,7 @@ Role groups used below: **READ** = `Reader`, `Operator`, `FullAccess`; **OPERATE
 | POST | `/api/sessions/broadcast` | OPERATE | Shows a message in every session, or in every session on the named hosts (`hostnames`). |
 | POST | `/api/users/<username>/reset-profile` | ADMIN | Requests a fresh profile at the user's next new assignment. The old profile is kept, renamed. |
 | POST | `/api/users/<username>/reset-profile/cancel` | ADMIN | Withdraws a requested profile reset. |
-| GET | `/api/maintenance/runs` | READ | Recent maintenance runs, newest first, and the active one with what admission sees now. |
+| GET | `/api/maintenance/runs` | READ | Recent maintenance runs, newest first, and the active one with what admission sees now. Each run's `LastTickAgeSeconds` and `CreatedAgeSeconds` come from the database's clock, so the portal can tell a run that is not being advanced. |
 | GET | `/api/maintenance/runs/<int:run_id>` | READ | One run and every host in it, with its progress and live state. |
 | POST | `/api/maintenance/runs/create` | ADMIN | Starts a rolling maintenance run over the named hosts; `409` while another run is active. |
 | POST | `/api/maintenance/runs/<int:run_id>/pause`, `/resume`, `/cancel` | ADMIN | Pauses, resumes or cancels a run. Hosts mid-step finish their step. |

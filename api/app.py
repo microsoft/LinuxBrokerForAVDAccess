@@ -1774,7 +1774,9 @@ def resolve_host_address(hostname):
     """The IPv4 address <hostname>.<DOMAIN_NAME> resolves to, or None."""
     try:
         infos = socket.getaddrinfo(host_fqdn(hostname), None, family=socket.AF_INET, type=socket.SOCK_STREAM)
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers the IDNA codec's UnicodeError for a label that is empty or longer than
+        # 63 characters, which Azure allows in a Linux VM name. It is a host that cannot resolve.
         return None
     return infos[0][4][0] if infos else None
 
@@ -1790,11 +1792,21 @@ def resolve_host_addresses(hostnames):
     return {name: (future.result() if future in done else None) for future, name in futures.items()}
 
 
+def dns_name_problem(hostname):
+    """Why <hostname>.<DOMAIN_NAME> can never be looked up in DNS, or None when it can."""
+    fqdn = host_fqdn(hostname)
+    if len(fqdn) > 253 or any(not label or len(label) > 63 for label in fqdn.split('.')):
+        return (f"{fqdn} cannot be a DNS name: each part between dots must be 1 to 63 characters. "
+                "Rename the VM so the broker can reach it by name.")
+    return None
+
+
 def unresolved_problem(hostname):
     if not DOMAIN_NAME:
         return "DOMAIN_NAME is not set, so the broker cannot tell which name to reach the host by."
-    return (f"{host_fqdn(hostname)} does not resolve. Add it to the DNS zone the broker uses "
-            "(the private zone linked to its network), then refresh.")
+    return dns_name_problem(hostname) or (
+        f"{host_fqdn(hostname)} does not resolve. Add it to the DNS zone the broker uses "
+        "(the private zone linked to its network), then refresh.")
 
 
 def import_context():
@@ -3720,7 +3732,10 @@ def get_scaling_policy():
         logger.error("Database connection failed while reading the scaling policy.")
         return database_unavailable_response(e)
 
-    except Exception:
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            logger.warning("GetScalingPolicy is not deployed yet; scaling schedules are unavailable.")
+            return error_response("Scaling schedules are not available until the database is upgraded.", 404)
         logger.exception("Failed to read the scaling policy.")
         return error_response("Unable to retrieve the scaling policy.", 500)
 
@@ -5821,7 +5836,7 @@ def maintenance_run_item(row):
             'RunID', 'Name', 'Status', 'EndStatus', 'PatchMode', 'BatchSize', 'MinReadyOverride',
             'SignOutDeadlineMinutes', 'WarningMinutes', 'WarningMessage', 'MaxFailures', 'CanaryCount',
             'WaitReason', 'StatusReason', 'CreatedBy', 'UpdatedBy', 'CreatedAtUtc', 'UpdatedAtUtc',
-            'EndedAtUtc', 'LastTickAtUtc', 'LastTickAgeSeconds',
+            'EndedAtUtc', 'LastTickAtUtc', 'LastTickAgeSeconds', 'CreatedAgeSeconds',
         )
     }
     item.update({

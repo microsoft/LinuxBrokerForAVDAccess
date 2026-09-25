@@ -375,6 +375,11 @@ def test_one_advance_at_a_time(conn):
     assert one(conn, "EXEC dbo.BeginMaintenanceTick")["Result"] == "NoRun"
     a = add_vm(conn, "lnx-01")
     run_id = create_run(conn, [a])["RunID"]
+    # Before its first advance a run has no tick age, but its age since creation is known.
+    fresh = run_row(conn, run_id)
+    assert fresh["LastTickAgeSeconds"] is None and 0 <= fresh["CreatedAgeSeconds"] < 60
+    exec_sql(conn, "UPDATE dbo.MaintenanceRuns SET CreatedAt=DATEADD(MINUTE, -10, CreatedAt) WHERE RunID=%s", (run_id,))
+    assert 599 <= run_row(conn, run_id)["CreatedAgeSeconds"] <= 660
 
     claimed = one(conn, "EXEC dbo.BeginMaintenanceTick @LeaseSeconds=60")
     assert (claimed["Result"], claimed["RunID"], claimed["Status"]) == ("Claimed", run_id, "Active") and claimed["TickToken"]

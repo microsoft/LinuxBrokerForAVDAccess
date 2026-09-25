@@ -552,7 +552,7 @@ This release completes the admin console: sessions and users, broadcast messages
 2. Open **Fleet health** and confirm no powered-on host is flagged **Agent outdated**; rerun the migration with `-LinuxHostNames` for any that are.
 3. On **Sessions**, send a message to one test session, then run a restart-only maintenance run over one idle host and confirm it comes back in service. Try **Security updates** on a single host before a larger run.
 
-Every layer tolerates the others being one release behind during the rollout. The previous API build keeps working against the new database: the changed procedures only add result columns, and scaling's normal call is unchanged. A portal that meets an older API hides the dashboard's trends and Attention panel, pages the host list itself, and shows the new pages' errors. A task that meets an older API logs a `404` from the maintenance timer and carries on.
+Every layer tolerates the others being one release behind during the rollout. The previous API build keeps working against the new database: the changed procedures only add result columns, and scaling's normal call is unchanged. A portal that meets an older API hides the dashboard's trends and Attention panel, pages the host list itself, points the Scaling section at the scaling rules, and shows the new pages' errors. A task that meets an older API logs a `404` from the maintenance timer and carries on.
 ## Manual Steps After `azd up`
 
 ### Admin consent

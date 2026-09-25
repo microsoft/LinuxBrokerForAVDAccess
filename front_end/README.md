@@ -99,7 +99,7 @@ a path that serves the SPA shell.
 | POST | `/api/ui/scaling/rules/<ruleid>/delete` | |
 | GET | `/api/ui/scaling/log` | Paged. |
 | GET | `/api/ui/scaling/rules/history` | Paged. |
-| GET | `/api/ui/scaling/policy` | The time zone, the default rule, the windows, and what applies now and next. |
+| GET | `/api/ui/scaling/policy` | The time zone, the default rule, the windows, and what applies now and next. `{Available: false}` when the broker predates it, so the Scaling section offers the scaling rules instead. |
 | POST | `/api/ui/scaling/policy` | Body `{timezone}`. |
 | GET | `/api/ui/scaling/timezones` | |
 | POST | `/api/ui/scaling/schedules` | Adds a window. |

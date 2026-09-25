@@ -22,7 +22,10 @@ import type { MaintenanceRun } from '../../types/broker';
 const STALLED_AFTER_SECONDS = 5 * 60;
 
 export function RunReadiness({ run }: { run: MaintenanceRun }) {
-  const stalled = run.Status !== 'Paused' && (run.LastTickAgeSeconds ?? 0) > STALLED_AFTER_SECONDS;
+  // A run never advanced has no tick to measure from, so it counts from when it was created:
+  // that is exactly the run a task function without the AdvanceMaintenance timer leaves behind.
+  const waitingSeconds = run.LastTickAtUtc ? run.LastTickAgeSeconds : (run.CreatedAgeSeconds ?? null);
+  const stalled = run.Status !== 'Paused' && (waitingSeconds ?? 0) > STALLED_AFTER_SECONDS;
   return (
     <>
       <p className="m-0 text-xs text-muted">
@@ -37,8 +40,10 @@ export function RunReadiness({ run }: { run: MaintenanceRun }) {
       </p>
       {stalled ? (
         <Notice tone="warning" className="mt-3">
-          This run has not been advanced for {formatAge(run.LastTickAgeSeconds).replace(' ago', '')}. Check that the scheduled
-          task function app is running a build with the AdvanceMaintenance timer.
+          {run.LastTickAtUtc
+            ? `This run has not been advanced for ${formatAge(waitingSeconds).replace(' ago', '')}.`
+            : `This run was started ${formatAge(waitingSeconds)} and has not been advanced yet.`}{' '}
+          Check that the scheduled task function app is running a build with the AdvanceMaintenance timer.
         </Notice>
       ) : null}
     </>

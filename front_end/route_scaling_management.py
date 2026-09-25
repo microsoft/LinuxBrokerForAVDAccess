@@ -2,6 +2,7 @@
 
 import logging
 
+import requests
 from flask import jsonify, request
 
 from function_authentication import login_required
@@ -75,7 +76,17 @@ def register_route_scaling_management(app):
     @login_required
     @broker_endpoint("Unable to retrieve the scaling policy. Please try again later.")
     def ui_scaling_policy():
-        return jsonify(api_get('/scaling/policy'))
+        # The Scaling section opens on this page. A broker API or database older than scaling
+        # schedules answers 404, which becomes Available: false so the page can offer the
+        # scaling rules instead of an error with no way to reach them.
+        try:
+            body = api_get('/scaling/policy')
+        except requests.exceptions.HTTPError as e:
+            if getattr(getattr(e, 'response', None), 'status_code', None) != 404:
+                raise
+            logger.info("The broker has no scaling policy yet; offering the scaling rules instead.")
+            return jsonify({'Available': False})
+        return jsonify(dict(body if isinstance(body, dict) else {}, Available=True))
 
     @app.route(f'{API_PREFIX}/scaling/policy', methods=['POST'])
     @login_required

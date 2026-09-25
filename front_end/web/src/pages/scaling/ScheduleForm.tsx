@@ -69,7 +69,8 @@ export function ScheduleForm() {
   const editing = Boolean(scheduleid);
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const { data: policy, isPending, error } = useScalingPolicy();
+  const { data: response, isPending, error } = useScalingPolicy();
+  const policy = response && response.Available !== false ? response : undefined;
   const save = useSaveSchedule(scheduleid);
   const proposed = usePreviewProposed();
 
@@ -103,6 +104,20 @@ export function ScheduleForm() {
 
   if (isPending) {
     return <LoadingPanel label="Loading the scaling policy" />;
+  }
+
+  if (response?.Available === false) {
+    return (
+      <ErrorPanel
+        title="Scaling windows need the upgraded broker API"
+        message="The broker API is older than this portal, so scaling windows cannot be added or edited yet. Scaling follows the scaling rule until it is upgraded."
+        action={
+          <ButtonLink to="/scaling/rules" icon="list">
+            Scaling rules
+          </ButtonLink>
+        }
+      />
+    );
   }
 
   if (error || !policy || (editing && !existing)) {

@@ -204,6 +204,27 @@ out=$(printf 'Plain text' | bash "$SCRIPT" message "$BROKER_USER")
 assert_contains "$out" "__SESSION_CONTROL_DELIVERED=1" "xmessage fallback"
 sleep 0.2
 assert_file_contains "$FAKE_CALLS" "xmessage [-center] [-timeout] [300] [Message from your administrator: Plain text]"
+# The fallback runs as the session's owner too: the display comes from a process they own.
+assert_file_contains "$FAKE_CALLS" "runuser -u $BROKER_USER -- xmessage -center -timeout 300"
+assert_eq "$(grep -c '^runuser ' "$FAKE_CALLS")" "2" "notify-send and xmessage both through runuser"
+kill "$xorg_pid" 2>/dev/null
+wait "$xorg_pid" 2>/dev/null
+
+# Without runuser nothing is shown, rather than running an X client as root.
+setup_case
+start_fake_xorg :17
+xorg_pid=$FAKE_XORG_PID
+printf '%s 3102 /usr/lib/xorg/Xorg :17 -config xrdp/xorg.conf\n' "$xorg_pid" > "$FAKE_PS_XORG"
+mv "$SHIM_DIR/runuser" "$SHIM_DIR/runuser.off"
+real_runuser=$(command -v runuser || true)
+[ -n "$real_runuser" ] && mv "$real_runuser" "$real_runuser.off"
+out=$(printf 'Plain text' | bash "$SCRIPT" message "$BROKER_USER")
+[ -n "$real_runuser" ] && mv "$real_runuser.off" "$real_runuser"
+mv "$SHIM_DIR/runuser.off" "$SHIM_DIR/runuser"
+assert_contains "$out" "__SESSION_CONTROL_SESSIONS=1" "session found without runuser"
+assert_contains "$out" "__SESSION_CONTROL_DELIVERED=0" "nothing delivered without runuser"
+sleep 0.2
+assert_eq "$(grep -c '^xmessage' "$FAKE_CALLS")" "0" "no xmessage as root"
 kill "$xorg_pid" 2>/dev/null
 wait "$xorg_pid" 2>/dev/null
 

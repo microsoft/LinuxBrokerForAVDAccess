@@ -1,6 +1,8 @@
 -- Every maintenance run with how many of its hosts are at each stage, for the run list, the
 -- run details and the scheduled advance. Times are ISO-8601 UTC. InProgress counts the hosts
--- out of rotation for the run right now (Draining through Verifying).
+-- out of rotation for the run right now (Draining through Verifying). The ages are measured
+-- here, on the database's clock, so a portal can tell a run that is not being advanced
+-- (including one never advanced since it was created) whatever its own clock says.
 
 CREATE OR ALTER FUNCTION dbo.fnMaintenanceRunSummary ()
 RETURNS TABLE
@@ -15,6 +17,7 @@ RETURN
         CONVERT(VARCHAR(33), r.EndedAt, 126) + 'Z' AS EndedAtUtc,
         CONVERT(VARCHAR(33), r.LastTickAt, 126) + 'Z' AS LastTickAtUtc,
         DATEDIFF(SECOND, r.LastTickAt, SYSUTCDATETIME()) AS LastTickAgeSeconds,
+        DATEDIFF(SECOND, r.CreatedAt, SYSUTCDATETIME()) AS CreatedAgeSeconds,
         COALESCE(c.Total, 0) AS Total,
         COALESCE(c.Pending, 0) AS Pending,
         COALESCE(c.InProgress, 0) AS InProgress,

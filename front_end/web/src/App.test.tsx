@@ -234,7 +234,7 @@ const SCALING_POLICY = {
   LastRun: null,
 };
 
-let scalingPolicy: typeof SCALING_POLICY = SCALING_POLICY;
+let scalingPolicy: typeof SCALING_POLICY | { Available: false } = SCALING_POLICY;
 
 const PREVIEW = {
   Action: 'PowerOn', Summary: 'Start 2 hosts (linux-host-05, linux-host-06).', Reason: 'Serviceable hosts are below the minimum.',
@@ -993,6 +993,20 @@ describe('App', () => {
     const operatorTabs = await screen.findByRole('navigation', { name: 'Hosts pages' });
     expect(within(operatorTabs).queryByRole('link', { name: 'Import' })).not.toBeInTheDocument();
   });
+  it('still leads to the scaling rules when the broker predates scaling schedules', async () => {
+    scalingPolicy = { Available: false };
+    const { unmount } = renderApp('/scaling');
+    expect(await screen.findByText('Scaling schedules need the upgraded broker API')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Scaling rules' })).toHaveAttribute('href', '/scaling/rules');
+    // The section's tabs stay, so the activity log and rule history are one click away too.
+    expect(within(screen.getByRole('navigation', { name: 'Scaling pages' })).getByRole('link', { name: 'Activity log' })).toBeInTheDocument();
+    unmount();
+
+    renderApp('/scaling/schedules/new');
+    expect(await screen.findByText('Scaling windows need the upgraded broker API')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Scaling rules' })).toHaveAttribute('href', '/scaling/rules');
+  });
+
   it('summarises fleet health on the dashboard when the broker reports it', async () => {
     dashboard = { ...DASHBOARD, fleetHealth: { ...FLEET_HEALTH.Summary, ExpectedAgentVersion: '1.0.0' } };
     renderApp('/');
@@ -1086,6 +1100,20 @@ describe('App', () => {
     maintenance = maintenancePage(maintenanceRun({ LastTickAgeSeconds: 900 }));
     renderApp('/vms/maintenance');
     expect(await screen.findByText(/has not been advanced for 15 min/)).toBeInTheDocument();
+  });
+
+  it('warns when a run was never advanced, as with a task function too old to advance it', async () => {
+    maintenance = maintenancePage(maintenanceRun({ LastTickAtUtc: null, LastTickAgeSeconds: null, CreatedAgeSeconds: 600 }));
+    const { unmount } = renderApp('/vms/maintenance');
+    expect(await screen.findByText(/This run was started 10 min ago and has not been advanced yet/)).toBeInTheDocument();
+    expect(screen.getByText(/Not advanced yet\./)).toBeInTheDocument();
+    unmount();
+
+    // A run created moments ago is not reported: the first advance comes within a minute.
+    maintenance = maintenancePage(maintenanceRun({ LastTickAtUtc: null, LastTickAgeSeconds: null, CreatedAgeSeconds: 30 }));
+    renderApp('/vms/maintenance');
+    expect(await screen.findByText(/Not advanced yet\./)).toBeInTheDocument();
+    expect(screen.queryByText(/has not been advanced/)).not.toBeInTheDocument();
   });
 
   it('shows each host of a maintenance run and what it is waiting for', async () => {

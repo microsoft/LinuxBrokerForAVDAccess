@@ -200,7 +200,7 @@ export function ImportHosts() {
                     <td>
                       <PowerBadge value={candidate.PowerState} />
                     </td>
-                    <td className="max-w-md">
+                    <td className="min-w-64 max-w-md">
                       {candidate.Importable ? (
                         <Badge tone="ok" icon="check-circle">
                           Ready to import

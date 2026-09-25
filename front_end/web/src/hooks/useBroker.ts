@@ -27,7 +27,7 @@ import type {
   PowerSyncResult,
   ProfileResetResult,
   SaveSettingsResult,
-  ScalingPolicy,
+  ScalingPolicyResponse,
   ScalingPreview,
   ScalingRule,
   ScalingRuleInput,
@@ -486,7 +486,7 @@ function useRuleInvalidation() {
 export function useScalingPolicy() {
   return useQuery({
     queryKey: queryKeys.scalingPolicy,
-    queryFn: ({ signal }) => apiGet<ScalingPolicy>('/scaling/policy', signal),
+    queryFn: ({ signal }) => apiGet<ScalingPolicyResponse>('/scaling/policy', signal),
   });
 }
 

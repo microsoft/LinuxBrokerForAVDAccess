@@ -14,8 +14,22 @@ def test_the_policy_and_time_zones_are_read_through(signed_in_client, broker_api
     broker_api.get_replies["/scaling/policy"] = (200, {"TimeZone": "UTC", "Schedules": []})
     broker_api.get_replies["/scaling/timezones"] = (200, [{"Name": "UTC"}])
 
-    assert signed_in_client.get(f"{API}/scaling/policy").get_json()["TimeZone"] == "UTC"
+    policy = signed_in_client.get(f"{API}/scaling/policy").get_json()
+    assert (policy["TimeZone"], policy["Available"]) == ("UTC", True)
     assert signed_in_client.get(f"{API}/scaling/timezones").get_json() == [{"Name": "UTC"}]
+
+
+def test_an_older_broker_without_a_policy_is_reported_as_unavailable(signed_in_client, broker_api):
+    broker_api.get_replies["/scaling/policy"] = (404, {"error": "That endpoint does not exist."})
+
+    response = signed_in_client.get(f"{API}/scaling/policy")
+
+    assert response.status_code == 200 and response.get_json() == {"Available": False}
+
+
+def test_other_policy_failures_are_still_errors(signed_in_client, broker_api):
+    broker_api.get_replies["/scaling/policy"] = (500, {"error": "Unable to retrieve the scaling policy."})
+    assert signed_in_client.get(f"{API}/scaling/policy").status_code == 502
 
 
 def test_a_window_is_forwarded_with_only_its_fields(signed_in_client, broker_api):

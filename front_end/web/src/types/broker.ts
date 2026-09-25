@@ -654,6 +654,8 @@ export interface MaintenanceRun {
   EndedAtUtc: string | null;
   LastTickAtUtc: string | null;
   LastTickAgeSeconds: number | null;
+  /** Seconds since the run was created, on the database's clock. Absent from an older API. */
+  CreatedAgeSeconds?: number | null;
   Counts: MaintenanceCounts;
   /** Only for a single run: what admission works from now. */
   MinReadyInForce?: number | null;
@@ -817,7 +819,11 @@ export interface ScalingPolicy {
   Schedules: ScalingSchedule[];
   NextChange: { InMinutes: number; AtLocal: string; PhaseName: string; ScheduleID: number | null } | null;
   LastRun: ActivityLogEntry | null;
+  Available?: true;
 }
+
+/** What the portal gets for the policy: the policy, or word that the broker predates it. */
+export type ScalingPolicyResponse = ScalingPolicy | { Available: false };
 
 export interface ScalingPreview {
   Action: 'PowerOn' | 'PowerOff' | 'None';

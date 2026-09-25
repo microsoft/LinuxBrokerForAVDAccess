@@ -151,6 +151,9 @@ escape_markup() {
 }
 
 # Shows the message in one X session: a notification as its owner, or xmessage as a fallback.
+# Both run as the session's owner, never as root: the display and its authority file come from
+# a process the user owns, so connecting to them with root's privileges would let a user who
+# fakes an X server have root run an X client against it.
 deliver_to_session() {
     local pid="$1"
     local uid="$2"
@@ -159,11 +162,13 @@ deliver_to_session() {
     local display
     local xauthority
 
+    command -v runuser >/dev/null 2>&1 || return 1
+
     display=$(session_display "$pid")
     [ -z "$display" ] && return 1
     xauthority=$(session_xauthority "$pid")
 
-    if command -v notify-send >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
+    if command -v notify-send >/dev/null 2>&1; then
         if DISPLAY="$display" XAUTHORITY="$xauthority" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
             timeout "$NOTIFY_TIMEOUT_SECONDS" runuser -u "$username" -- \
             notify-send --urgency=critical --app-name="Linux Broker" -- "$MESSAGE_TITLE" "$(escape_markup "$message")" >/dev/null 2>&1; then
@@ -173,7 +178,7 @@ deliver_to_session() {
 
     if command -v xmessage >/dev/null 2>&1; then
         DISPLAY="$display" XAUTHORITY="$xauthority" \
-            xmessage -center -timeout 300 "$MESSAGE_TITLE: $message" >/dev/null 2>&1 &
+            runuser -u "$username" -- xmessage -center -timeout 300 "$MESSAGE_TITLE: $message" >/dev/null 2>&1 &
         return 0
     fi
 

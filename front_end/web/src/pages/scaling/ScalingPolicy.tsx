@@ -92,18 +92,48 @@ function TimeZoneEditor({ policy }: { policy: Policy }) {
   );
 }
 
+/**
+ * The Scaling section opens here, so a broker API older than scaling schedules must still lead
+ * to the scaling rules, which it does support.
+ */
+function PolicyUnavailable() {
+  return (
+    <>
+      <PageHeader
+        title="Scaling policy"
+        subtitle="How many Linux hosts to keep ready, hour by hour across the week."
+        icon="sliders"
+      />
+      <EmptyState
+        title="Scaling schedules need the upgraded broker API"
+        message="The broker API is older than this portal, so schedule windows and the preview of the next scaling run are not available yet. Scaling follows the scaling rule, which you can view and edit as before."
+        icon="sliders"
+        action={
+          <ButtonLink to="/scaling/rules" variant="primary" icon="list">
+            Scaling rules
+          </ButtonLink>
+        }
+      />
+    </>
+  );
+}
 export function ScalingPolicy() {
   const navigate = useNavigate();
   const can = useCan();
   const { showToast } = useToast();
   const { confirm, dialog } = useConfirm();
-  const { data: policy, isPending, error } = useScalingPolicy();
+  const { data: response, isPending, error } = useScalingPolicy();
+  const policy = response && response.Available !== false ? response : undefined;
   const preview = useScalingPreview();
   const deleteSchedule = useDeleteSchedule();
   const saveSchedule = useSaveSchedule();
 
   if (isPending) {
     return <LoadingPanel label="Loading the scaling policy" />;
+  }
+
+  if (response?.Available === false) {
+    return <PolicyUnavailable />;
   }
 
   if (error || !policy) {
@@ -183,19 +213,11 @@ export function ScalingPolicy() {
         subtitle="How many Linux hosts to keep ready, hour by hour across the week."
         icon="sliders"
         actions={
-          <>
-            <ButtonLink to="/scaling/log" size="sm" icon="activity">
-              Activity log
+          can.admin ? (
+            <ButtonLink to="/scaling/schedules/new" size="sm" variant="primary" icon="plus">
+              Add a window
             </ButtonLink>
-            <ButtonLink to="/scaling/rules/history" size="sm" icon="clock">
-              Rule history
-            </ButtonLink>
-            {can.admin ? (
-              <ButtonLink to="/scaling/schedules/new" size="sm" variant="primary" icon="plus">
-                Add a window
-              </ButtonLink>
-            ) : null}
-          </>
+          ) : undefined
         }
       />
 

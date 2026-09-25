@@ -151,6 +151,30 @@ def test_an_azure_failure_is_reported(client, fake_db, app_module, monkeypatch):
     assert response.status_code == 502 and response.get_json()["error"] == "Unable to list the Linux hosts in Azure."
 
 
+@pytest.mark.parametrize("name", ["a" * 64, "lnx..01"])
+def test_a_name_dns_cannot_hold_is_unresolved_not_an_error(app_module, monkeypatch, name):
+    # The real resolver: the IDNA codec refuses the name before any lookup is made.
+    monkeypatch.setattr(app_module, "DOMAIN_NAME", "contoso.internal")
+    assert app_module.resolve_host_address(name) is None
+    assert app_module.resolve_host_addresses([name]) == {name: None}
+    assert "each part between dots must be 1 to 63 characters" in app_module.unresolved_problem(name)
+
+
+def test_a_long_vm_name_does_not_break_the_candidate_list(client, fake_db, app_module, monkeypatch):
+    long_name = "l" * 64
+    monkeypatch.setattr(app_module, "VM_SUBSCRIPTION_ID", "sub")
+    monkeypatch.setattr(app_module, "VM_RESOURCE_GROUP", "rg")
+    monkeypatch.setattr(app_module, "DOMAIN_NAME", "contoso.internal")
+    monkeypatch.setattr(app_module, "get_compute_client", lambda: Compute([(long_name, {"broker-role": "linux-host"})]))
+    monkeypatch.setattr(app_module, "read_azure_power_states", lambda client, names: ([{"hostname": n, "powerState": "On"} for n in names], 0))
+
+    response = client.get("/api/vms/import/candidates")
+
+    assert response.status_code == 200
+    [candidate] = response.get_json()["Candidates"]
+    assert candidate["Importable"] is False and "1 to 63 characters" in candidate["Problem"]
+
+
 def test_resolution_stops_at_its_deadline(app_module, monkeypatch):
     import threading
     release = threading.Event()
