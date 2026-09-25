@@ -178,10 +178,15 @@ class RemoteHost:
         "create": (0, "__CREATE_USER_RESULT=ok__\n", ""),
         "clear": (0, "__LEASE_ACTION=cleared__\n", ""),
         "clear-any": (0, "__LEASE_ACTION=cleared__\n", ""),
+        "signout": (0, "__SESSION_CONTROL_RESULT=signed-out\n", ""),
+        "message": (0, "__SESSION_CONTROL_RESULT=delivered\n__SESSION_CONTROL_SESSIONS=1\n__SESSION_CONTROL_DELIVERED=1\n", ""),
+        "message-all": (0, "__SESSION_CONTROL_RESULT=delivered\n__SESSION_CONTROL_SESSIONS=1\n__SESSION_CONTROL_DELIVERED=1\n", ""),
+        "reset-profile": (0, "__SESSION_CONTROL_RESULT=profile-reset\n__SESSION_CONTROL_RENAMED_TO=renamed\n", ""),
     }
 
     def __init__(self):
         self.calls = []
+        self.stdin = []
         self.replies = {}
 
     def reply(self, kind, returncode=0, stdout="", stderr=""):
@@ -199,11 +204,15 @@ class RemoteHost:
             return "userdel"
         if "apply-host-settings.sh" in command:
             return "apply"
+        if "session-control.sh" in command:
+            verb = command.split("session-control.sh", 1)[1].split()
+            return verb[0] if verb else "other"
         return "other"
 
     def __call__(self, hostname, command, stdin_input=None, timeout=120):
         kind = self.kind_of(command)
         self.calls.append((hostname, kind))
+        self.stdin.append(stdin_input)
         returncode, stdout, stderr = self.replies.get(kind, self.DEFAULTS.get(kind, (0, "", "")))
         return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr), f"avdadmin@{hostname}"
 

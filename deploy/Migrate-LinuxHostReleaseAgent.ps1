@@ -202,6 +202,7 @@ xorg_script="$output_directory/xrdp-who-xorg.sh"
 create_user_script="$output_directory/create-user.sh"
 manage_lease_script="$output_directory/manage-lease.sh"
 apply_settings_script="$output_directory/apply-host-settings.sh"
+session_control_script="$output_directory/session-control.sh"
 release_service_name='linuxbroker-release-session.service'
 release_timer_name='linuxbroker-release-session.timer'
 watcher_service_name='linuxbroker-release-session-watcher.service'
@@ -298,6 +299,7 @@ watcher_script_url="$script_source_root/linux_host/session_release_buffer/logind
 create_user_script_url="$script_source_root/linux_host/create-user.sh"
 manage_lease_script_url="$script_source_root/linux_host/manage-lease.sh"
 apply_settings_script_url="$script_source_root/linux_host/apply-host-settings.sh"
+session_control_script_url="$script_source_root/linux_host/session-control.sh"
 
 mkdir -p "$output_directory" "$state_directory" "$state_directory/leases"
 
@@ -307,8 +309,9 @@ download_file "$watcher_script_url" "$watcher_script"
 download_file "$create_user_script_url" "$create_user_script"
 download_file "$manage_lease_script_url" "$manage_lease_script"
 download_file "$apply_settings_script_url" "$apply_settings_script"
+download_file "$session_control_script_url" "$session_control_script"
 
-chmod +x "$release_script" "$xorg_script" "$watcher_script" "$create_user_script" "$manage_lease_script" "$apply_settings_script"
+chmod +x "$release_script" "$xorg_script" "$watcher_script" "$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script"
 
 sed -i "s|YOUR_LINUX_BROKER_API_CLIENT_ID|$api_client_id|g" "$release_script"
 sed -i "s|YOUR_LINUX_BROKER_API_BASE_URL|$api_base_url|g" "$release_script"
@@ -331,7 +334,7 @@ for command_name in userdel groupadd usermod chpasswd; do
         sudoers_commands+=("$resolved_command")
     fi
 done
-sudoers_commands+=("$create_user_script" "$manage_lease_script" "$apply_settings_script")
+sudoers_commands+=("$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script")
 
 sudoers_tmp="${sudoers_path}.tmp"
 (
@@ -453,10 +456,37 @@ $remoteScript = $remoteScript.Replace('__SCRIPT_SOURCE_ROOT__', (ConvertTo-BashS
 $remoteScript = $remoteScript.Replace('__WATCHER_DEBOUNCE__', $WatcherDebounceSeconds.ToString())
 $remoteScript = $remoteScript.Replace('__WATCHER_SETTLE__', $WatcherSettleSeconds.ToString())
 
+# One host that is off or failing must not leave the rest of the fleet on the old agent, so
+# every host is attempted and the failures are reported together at the end.
+$failures = [System.Collections.Generic.List[string]]::new()
+$skipped = [System.Collections.Generic.List[string]]::new()
+
 foreach ($linuxHost in $linuxHosts) {
-    Write-Host "Migrating Linux host '$($linuxHost.name)'..."
-    $message = Invoke-RunCommandWithRetry -VmName $linuxHost.name -Script $remoteScript
-    if (-not [string]::IsNullOrWhiteSpace($message)) {
-        Write-Host $message
+    $powerProperty = $linuxHost.PSObject.Properties['powerState']
+    $powerState = if ($powerProperty) { [string]$powerProperty.Value } else { '' }
+    if (-not [string]::IsNullOrWhiteSpace($powerState) -and $powerState -notmatch 'running') {
+        Write-Warning "Skipping Linux host '$($linuxHost.name)' because it is not running ($powerState). Start it and run this script again with -LinuxHostNames $($linuxHost.name)."
+        $skipped.Add($linuxHost.name)
+        continue
     }
+
+    Write-Host "Migrating Linux host '$($linuxHost.name)'..."
+    try {
+        $message = Invoke-RunCommandWithRetry -VmName $linuxHost.name -Script $remoteScript
+        if (-not [string]::IsNullOrWhiteSpace($message)) {
+            Write-Host $message
+        }
+    }
+    catch {
+        Write-Warning $_.Exception.Message
+        $failures.Add($linuxHost.name)
+    }
+}
+
+if ($skipped.Count -gt 0) {
+    Write-Warning "Not migrated because they are not running: $($skipped -join ', ')."
+}
+
+if ($failures.Count -gt 0) {
+    throw "Linux host migration failed on: $($failures -join ', '). Rerun with -LinuxHostNames to retry them."
 }

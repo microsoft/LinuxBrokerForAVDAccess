@@ -42,4 +42,8 @@ export const queryKeys = {
   fleetHealth: ['hosts', 'health'] as const,
   hostHealth: (hostname: string) => ['hosts', 'health', hostname] as const,
   audit: (search: string) => ['audit', search] as const,
+  sessions: ['sessions'] as const,
+  userSearch: (query: string) => ['users', 'search', query] as const,
+  user: (username: string) => ['users', username] as const,
+  users: ['users'] as const,
 };

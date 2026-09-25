@@ -1,18 +1,9 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useId, useRef, useState } from 'react';
 
 import { Icon } from '../Icon';
 import { Button } from './Button';
 import type { ButtonVariant } from './Button';
-
-const FOCUSABLE = [
-  'a[href]',
-  'button:not([disabled])',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  '[tabindex]:not([tabindex="-1"])',
-].join(',');
+import { Modal } from './Modal';
 
 export interface ConfirmDialogProps {
   open: boolean;
@@ -31,13 +22,7 @@ export interface ConfirmDialogProps {
   onCancel: () => void;
 }
 
-/**
- * Confirmation dialog for destructive and state-changing actions.
- *
- * Hand-built rather than using `<dialog>` so the focus trap, the Escape handling
- * and the restore-focus-on-close behaviour are explicit and testable, and so the
- * backdrop can carry the same glass treatment as the rest of the portal.
- */
+/** Confirmation dialog for destructive and state-changing actions. */
 export function ConfirmDialog({
   open,
   title,
@@ -49,155 +34,81 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  const panelRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const typedRef = useRef<HTMLInputElement>(null);
-  const previouslyFocused = useRef<HTMLElement | null>(null);
   const typedId = useId();
   const [typed, setTyped] = useState('');
 
   const matches = !requireText || typed.trim().toLowerCase() === requireText.trim().toLowerCase();
 
-  const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        onCancel();
-        return;
-      }
-
-      if (event.key !== 'Tab' || !panelRef.current) {
-        return;
-      }
-
-      // No visibility filtering: everything focusable inside the panel is visible
-      // while the dialog is open, and an `offsetParent` check would silently
-      // collapse the list to one element in environments without layout.
-      const focusable = Array.from(panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-        (element) => !element.hasAttribute('disabled'),
-      );
-
-      if (focusable.length < 2) {
-        return;
-      }
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-
-      // Wrap at both ends so focus can never escape the dialog while it is open.
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    },
-    [onCancel],
-  );
-
   useEffect(() => {
-    if (!open) {
-      return;
+    if (open) {
+      setTyped('');
     }
-
-    previouslyFocused.current = document.activeElement as HTMLElement | null;
-    setTyped('');
-    // With a required confirmation the confirm button starts disabled, so the input
-    // takes focus instead.
-    if (requireText) {
-      typedRef.current?.focus();
-    } else {
-      confirmRef.current?.focus();
-    }
-
-    const { overflow } = document.body.style;
-    document.body.style.overflow = 'hidden';
-
-    return () => {
-      document.body.style.overflow = overflow;
-      // Send focus back where it came from, so keyboard users do not land at the
-      // top of the document after confirming a row action.
-      previouslyFocused.current?.focus?.();
-    };
   }, [open, requireText]);
 
-  if (!open) {
-    return null;
-  }
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[rgb(8_16_28/0.55)] p-4 backdrop-blur-sm"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onCancel();
-        }
-      }}
-      onKeyDown={handleKeyDown}
+  return (
+    <Modal
+      open={open}
+      labelledBy="lb-confirm-title"
+      describedBy="lb-confirm-body"
+      onClose={onCancel}
+      // With a required confirmation the confirm button starts disabled, so the input
+      // takes focus instead.
+      initialFocus={requireText ? typedRef : confirmRef}
     >
-      <div
-        ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="lb-confirm-title"
-        aria-describedby="lb-confirm-body"
-        className="lb-glass lb-glass-strong w-full max-w-md p-5"
-      >
-        <div className="flex items-start justify-between gap-3">
-          <h2 id="lb-confirm-title" className="text-lg">
-            {title}
-          </h2>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded p-1 text-muted hover:bg-[var(--lb-hover)] hover:text-ink"
-            aria-label="Close"
-          >
-            <Icon name="x" size={16} />
-          </button>
-        </div>
-
-        <p id="lb-confirm-body" className="mt-3 mb-0 text-sm text-muted">
-          {body}
-        </p>
-
-        {requireText ? (
-          <form
-            className="mt-4 flex flex-col gap-1.5"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (matches && !busy) {
-                onConfirm();
-              }
-            }}
-          >
-            <label htmlFor={typedId} className="text-sm font-medium text-ink">
-              Type <span className="font-mono">{requireText}</span> to confirm
-            </label>
-            <input
-              id={typedId}
-              ref={typedRef}
-              className="lb-field font-mono"
-              autoComplete="off"
-              spellCheck={false}
-              value={typed}
-              disabled={busy}
-              onChange={(event) => setTyped(event.target.value)}
-            />
-          </form>
-        ) : null}
-
-        <div className="mt-5 flex justify-end gap-2">
-          <Button variant="secondary" onClick={onCancel} disabled={busy}>
-            Cancel
-          </Button>
-          <Button ref={confirmRef} variant={variant} onClick={onConfirm} disabled={busy || !matches}>
-            {busy ? 'Working…' : confirmLabel}
-          </Button>
-        </div>
+      <div className="flex items-start justify-between gap-3">
+        <h2 id="lb-confirm-title" className="text-lg">
+          {title}
+        </h2>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded p-1 text-muted hover:bg-[var(--lb-hover)] hover:text-ink"
+          aria-label="Close"
+        >
+          <Icon name="x" size={16} />
+        </button>
       </div>
-    </div>,
-    document.body,
+
+      <p id="lb-confirm-body" className="mt-3 mb-0 text-sm text-muted">
+        {body}
+      </p>
+
+      {requireText ? (
+        <form
+          className="mt-4 flex flex-col gap-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (matches && !busy) {
+              onConfirm();
+            }
+          }}
+        >
+          <label htmlFor={typedId} className="text-sm font-medium text-ink">
+            Type <span className="font-mono">{requireText}</span> to confirm
+          </label>
+          <input
+            id={typedId}
+            ref={typedRef}
+            className="lb-field font-mono"
+            autoComplete="off"
+            spellCheck={false}
+            value={typed}
+            disabled={busy}
+            onChange={(event) => setTyped(event.target.value)}
+          />
+        </form>
+      ) : null}
+
+      <div className="mt-5 flex justify-end gap-2">
+        <Button variant="secondary" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+        <Button ref={confirmRef} variant={variant} onClick={onConfirm} disabled={busy || !matches}>
+          {busy ? 'Working…' : confirmLabel}
+        </Button>
+      </div>
+    </Modal>
   );
 }

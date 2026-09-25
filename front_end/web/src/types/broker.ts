@@ -192,6 +192,124 @@ export interface AuditFilterValues {
   outcome: '' | AuditOutcome;
 }
 
+/*
+ * Sessions and users. A session's State is derived by the broker from its assignment and
+ * the host's latest heartbeat.
+ */
+export type SessionState =
+  | 'active'
+  | 'disconnected'
+  | 'released'
+  | 'connecting'
+  | 'not-connected'
+  | 'cleanup-pending'
+  | 'unmanaged'
+  | 'unknown';
+
+export interface BrokerSession {
+  Hostname: string;
+  VMID: number | null;
+  Username: string;
+  AvdHost: string | null;
+  State: SessionState;
+  VmStatus: string | null;
+  PowerState: string | null;
+  NetworkStatus: string | null;
+  DrainRequested: boolean;
+  HasAssignment: boolean;
+  CleanupPending: boolean;
+  ReportedState: 'active' | 'disconnected' | 'unknown' | null;
+  SessionStartUtc: string | null;
+  DisconnectedForSeconds: number | null;
+  IdleSeconds: number | null;
+  AssignedForSeconds: number | null;
+  LastCheckoutAgeSeconds: number | null;
+  GraceRemainingSeconds: number | null;
+  GracePeriodSeconds: number | null;
+  HeartbeatAgeSeconds: number | null;
+  HeartbeatFresh: boolean;
+}
+
+export type SessionSummary = Record<SessionState, number> & { Total: number };
+
+export interface SessionsPage {
+  Sessions: BrokerSession[];
+  Summary: SessionSummary;
+}
+
+export interface BrokerUserMatch {
+  Username: string;
+  Uid: number | null;
+  ProfileResetPending: boolean;
+  CurrentVMID: number | null;
+  CurrentHostname: string | null;
+  CurrentVmStatus: string | null;
+}
+
+export interface UserSearchResult {
+  Users: BrokerUserMatch[];
+  Query: string | null;
+}
+
+export interface UserAssignment {
+  VMID: number;
+  Hostname: string;
+  VmStatus: string | null;
+  PowerState: string | null;
+  NetworkStatus: string | null;
+  AvdHost: string | null;
+  DrainRequested: boolean;
+  CleanupPending: boolean;
+  AssignedForSeconds: number | null;
+  LastCheckoutAgeSeconds: number | null;
+  ReleasedForSeconds: number | null;
+}
+
+export interface UserHostHistoryEntry {
+  VMID: number;
+  Hostname: string;
+  FirstSeenUtc: string;
+  LastSeenUtc: string;
+  Assignments: number;
+  IsCurrent: boolean;
+}
+
+export interface BrokerUserDetails {
+  Username: string;
+  Uid: number | null;
+  FirstProvisionedDate: string | null;
+  ProfileReset: { RequestedAtUtc: string; RequestedBy: string | null } | null;
+  Assignments: UserAssignment[];
+  Sessions: BrokerSession[];
+  HostHistory: UserHostHistoryEntry[];
+  RecentActivity: AuditEntry[];
+}
+
+export interface SignOutResult {
+  Hostname: string;
+  Username: string;
+  Result: 'SignedOut' | 'NoSession';
+  Released: boolean;
+  Returned: boolean;
+  CleanupResult: string | null;
+  message: string;
+}
+
+export interface MessageResult {
+  Hostname: string;
+  Username: string;
+  Sessions: number;
+  Delivered: number;
+  message: string;
+}
+
+export interface ProfileResetResult {
+  Username: string;
+  message: string;
+  CurrentlyAssigned?: boolean;
+  Result?: string;
+}
+
 /** One saved version of the host settings profile. */
 export interface HostSettingsVersion extends HostSettings {
   UpdatedBy: string | null;

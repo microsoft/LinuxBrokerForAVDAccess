@@ -20,6 +20,7 @@ from route_vm_management import register_route_vm_management
 from route_scaling_management import register_route_scaling_management
 from route_host_settings import register_route_host_settings
 from route_audit import register_route_audit
+from route_sessions import register_route_sessions
 
 # ===============================
 # Flask App
@@ -299,6 +300,11 @@ register_route_host_settings(app)
 # Audit log
 
 register_route_audit(app)
+
+# ===============================
+# Sessions and users
+
+register_route_sessions(app)
 
 # ===============================
 # Main

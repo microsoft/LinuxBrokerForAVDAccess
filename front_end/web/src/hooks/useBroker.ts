@@ -6,18 +6,24 @@ import type {
   ActivityLogEntry,
   ApplySettingsResult,
   AuditEntry,
+  BrokerUserDetails,
   Dashboard,
   DrainResult,
   FleetHealth,
   HostSettings,
   HostSettingsPage,
   HostSettingsVersion,
+  MessageResult,
   Paged,
   PowerActionResult,
   PowerSyncResult,
+  ProfileResetResult,
   SaveSettingsResult,
   ScalingRule,
   ScalingRuleInput,
+  SessionsPage,
+  SignOutResult,
+  UserSearchResult,
   Vm,
   VmAttributesInput,
   VmInput,
@@ -74,6 +80,7 @@ function useVmInvalidation() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard });
     void queryClient.invalidateQueries({ queryKey: queryKeys.hostSettings });
     void queryClient.invalidateQueries({ queryKey: queryKeys.fleetHealth });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
   };
 }
 
@@ -224,6 +231,92 @@ export function useAuditLog(search: string) {
     queryKey: queryKeys.audit(search),
     queryFn: ({ signal }) => apiGet<Paged<AuditEntry>>(`/audit${search}`, signal),
     placeholderData: (previous) => previous,
+  });
+}
+
+/* ------------------------------------------------------ sessions and users */
+
+export function useSessions(refreshMs: number | false = false) {
+  return useQuery({
+    queryKey: queryKeys.sessions,
+    queryFn: ({ signal }) => apiGet<SessionsPage>('/sessions', signal),
+    refetchInterval: refreshMs,
+  });
+}
+
+/** Broker users whose name contains the query. Waits for two characters. */
+export function useUserSearch(query: string) {
+  const trimmed = query.trim();
+  return useQuery({
+    queryKey: queryKeys.userSearch(trimmed),
+    queryFn: ({ signal }) =>
+      apiGet<UserSearchResult>(`/users?q=${encodeURIComponent(trimmed)}&limit=8`, signal),
+    enabled: trimmed.length >= 2,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useUserDetails(username: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.user(username ?? ''),
+    queryFn: ({ signal }) => apiGet<BrokerUserDetails>(`/users/${encodeURIComponent(username ?? '')}`, signal),
+    enabled: Boolean(username),
+  });
+}
+
+/** A session action changes the sessions, the user, and everything derived from the VM list. */
+function useSessionInvalidation() {
+  const queryClient = useQueryClient();
+  const invalidateVms = useVmInvalidation();
+
+  return () => {
+    invalidateVms();
+    void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.users });
+  };
+}
+
+export interface SessionTarget {
+  hostname: string;
+  username: string;
+}
+
+export function useSignOutSession() {
+  const invalidate = useSessionInvalidation();
+
+  return useMutation({
+    mutationFn: ({ hostname, username, returnHost }: SessionTarget & { returnHost?: boolean }) =>
+      apiPost<SignOutResult>(
+        `/sessions/${encodeURIComponent(hostname)}/${encodeURIComponent(username)}/signout`,
+        returnHost ? { returnHost: true } : {},
+      ),
+    onSuccess: invalidate,
+  });
+}
+
+export function useMessageSession() {
+  const invalidate = useSessionInvalidation();
+
+  return useMutation({
+    mutationFn: ({ hostname, username, message }: SessionTarget & { message: string }) =>
+      apiPost<MessageResult>(
+        `/sessions/${encodeURIComponent(hostname)}/${encodeURIComponent(username)}/message`,
+        { message },
+      ),
+    onSuccess: invalidate,
+  });
+}
+
+export function useProfileReset() {
+  const invalidate = useSessionInvalidation();
+
+  return useMutation({
+    mutationFn: ({ username, cancel }: { username: string; cancel?: boolean }) =>
+      apiPost<ProfileResetResult>(
+        `/users/${encodeURIComponent(username)}/reset-profile${cancel ? '/cancel' : ''}`,
+        cancel ? undefined : { confirm: username },
+      ),
+    onSuccess: invalidate,
   });
 }
 

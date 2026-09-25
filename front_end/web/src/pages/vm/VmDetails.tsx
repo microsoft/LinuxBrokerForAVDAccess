@@ -1,4 +1,4 @@
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { Breadcrumbs, DetailList } from '../../components/layout/Breadcrumbs';
 import { HostAgentCard } from '../../components/hosts/HostAgentCard';
@@ -103,7 +103,16 @@ export function VmDetails() {
                 label: 'IP address',
                 value: <span className="font-mono">{valueOrDash(vm.IPAddress)}</span>,
               },
-              { label: 'Assigned to', value: valueOrDash(vm.Username) },
+              {
+                label: 'Assigned to',
+                value: vm.Username ? (
+                  <Link to={`/users/${encodeURIComponent(vm.Username)}`} className="no-underline hover:underline">
+                    {vm.Username}
+                  </Link>
+                ) : (
+                  valueOrDash(vm.Username)
+                ),
+              },
               { label: 'AVD host', value: valueOrDash(vm.AvdHost) },
               { label: 'Released', value: valueOrDash(vm.ReleasedDate) },
               ...(vm.DrainRequested ? [{ label: 'Drain requested', value: valueOrDash(vm.DrainRequestedDate) }] : []),

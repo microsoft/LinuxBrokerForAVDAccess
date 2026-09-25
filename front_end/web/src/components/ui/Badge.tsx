@@ -89,3 +89,14 @@ export const NetworkBadge = ({ value }: { value: string | null | undefined }) =>
 
 export const ActionBadge = ({ value }: { value: string | null | undefined }) =>
   renderStatus(value, SCALING_ACTION);
+
+/** The outcome of an audited action. */
+export function AuditOutcomeBadge({ outcome }: { outcome: 'success' | 'failure' | 'denied' }) {
+  if (outcome === 'success') {
+    return <Badge tone="ok" icon="check-circle">Succeeded</Badge>;
+  }
+  if (outcome === 'denied') {
+    return <Badge tone="warn" icon="shield">Denied</Badge>;
+  }
+  return <Badge tone="danger" icon="x-circle">Failed</Badge>;
+}

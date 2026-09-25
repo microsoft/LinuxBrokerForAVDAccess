@@ -68,7 +68,8 @@ heartbeat_for_script() {
     mkdir -p "$STATE_DIRECTORY" "$bin"
     : > "$LOG_FILE"
 
-    [ "$LINUXBROKER_AGENT_VERSION" = "1.0.0" ] || fail "$label declares agent version $LINUXBROKER_AGENT_VERSION"
+    [ "$LINUXBROKER_AGENT_VERSION" = "1.1.0" ] || fail "$label declares agent version $LINUXBROKER_AGENT_VERSION"
+    [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" session-control.sh "* ]] || fail "$label does not report session-control.sh"
 
     # One script is current and one predates the version constant.
     printf '#!/bin/bash\nLINUXBROKER_AGENT_VERSION="1.0.0"\n' > "$bin/release-session.sh"
@@ -81,7 +82,7 @@ heartbeat_for_script() {
     assert_json "$session" '(.sessionStart | type) == "number" and .idleSeconds == null' "$label session times"
 
     payload=$(build_heartbeat "[$session]")
-    assert_json "$payload" '.agentVersion == "1.0.0" and .settingsVersion == 7' "$label versions"
+    assert_json "$payload" '.agentVersion == "1.1.0" and .settingsVersion == 7' "$label versions"
     assert_json "$payload" '.scriptVersions["manage-lease.sh"] == null and .scriptVersions["release-session.sh"] == "1.0.0"' "$label scripts"
     assert_json "$payload" '(.os.id | type) == "string" and (.kernel | type) == "string"' "$label os"
     assert_json "$payload" '.desktop == "none" and .xrdp.version == null and .xrdp.active == true' "$label desktop and xrdp"

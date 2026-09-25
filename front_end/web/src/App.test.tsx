@@ -138,6 +138,39 @@ const SETTINGS_HISTORY = [
   { ...HOST_SETTINGS.settings, SettingsVersion: 2, GracePeriodSeconds: 600, UpdatedBy: null, ValidFromUtc: '2026-08-01T10:00:00Z', ValidToUtc: '2026-09-01T10:00:00Z', IsCurrent: false },
 ];
 
+const SESSION_BASE = {
+  AvdHost: 'avd-01', VmStatus: 'CheckedOut', PowerState: 'On', NetworkStatus: 'Reachable', DrainRequested: false,
+  HasAssignment: true, CleanupPending: false, ReportedState: null, SessionStartUtc: null, DisconnectedForSeconds: null,
+  IdleSeconds: null, AssignedForSeconds: 3600, LastCheckoutAgeSeconds: 3600, GraceRemainingSeconds: null,
+  GracePeriodSeconds: 1200, HeartbeatAgeSeconds: 20, HeartbeatFresh: true,
+};
+
+const SESSIONS = {
+  Sessions: [
+    { ...SESSION_BASE, Hostname: 'linux-host-02', VMID: 2, Username: 'alice', State: 'active', ReportedState: 'active', IdleSeconds: 720 },
+    { ...SESSION_BASE, Hostname: 'linux-host-04', VMID: 4, Username: 'bob', State: 'released', VmStatus: 'Released', GraceRemainingSeconds: 600 },
+    { ...SESSION_BASE, Hostname: 'linux-host-01', VMID: 1, Username: 'carol', State: 'not-connected', LastCheckoutAgeSeconds: 5400 },
+  ],
+  Summary: {
+    Total: 3, active: 1, disconnected: 0, released: 1, connecting: 0, 'not-connected': 1,
+    'cleanup-pending': 0, unmanaged: 0, unknown: 0,
+  },
+};
+
+let userDetails: Record<string, unknown> = {};
+
+function freshUserDetails() {
+  return {
+    Username: 'alice', Uid: 2001, FirstProvisionedDate: null, ProfileReset: null,
+    Assignments: [{ VMID: 2, Hostname: 'linux-host-02', VmStatus: 'CheckedOut', PowerState: 'On', NetworkStatus: 'Reachable', AvdHost: 'avd-01', DrainRequested: false, CleanupPending: false, AssignedForSeconds: 3600, LastCheckoutAgeSeconds: 3600, ReleasedForSeconds: null }],
+    Sessions: [SESSIONS.Sessions[0]],
+    HostHistory: [{ VMID: 2, Hostname: 'linux-host-02', FirstSeenUtc: '2026-09-20T10:00:00Z', LastSeenUtc: '2026-09-24T12:00:00Z', Assignments: 3, IsCurrent: true }],
+    RecentActivity: [
+      { AuditId: 9, OccurredAtUtc: '2026-09-24T12:30:00.000Z', ActorOid: 'oid-op', ActorName: 'op@contoso.com', ActorType: 'user', Action: 'session.message', TargetType: 'user', TargetId: 'alice', Outcome: 'success', Detail: null, CorrelationId: null },
+    ],
+  };
+}
+
 function jsonResponse(body: unknown, status = 200) {
   return {
     ok: status < 400,
@@ -155,7 +188,7 @@ function stubFetch() {
     const url = String(input);
     requests.push(url);
 
-    if (url.startsWith('/api/ui/session')) return jsonResponse(session);
+    if (url === '/api/ui/session' || url.startsWith('/api/ui/session?')) return jsonResponse(session);
     if (url.startsWith('/api/ui/dashboard')) return jsonResponse(dashboard);
     if (url.startsWith('/api/ui/vms/history')) return jsonResponse(EMPTY_PAGE);
     const action = /^\/api\/ui\/vms\/(\d+)\/(start|stop|restart|drain|undrain)$/.exec(url);
@@ -169,6 +202,23 @@ function stubFetch() {
     if (url.startsWith('/api/ui/hosts/settings/history')) return jsonResponse(SETTINGS_HISTORY);
     if (url.startsWith('/api/ui/hosts/settings')) return jsonResponse(HOST_SETTINGS);
     if (url.startsWith('/api/ui/audit')) return jsonResponse(AUDIT_PAGE);
+    if (/^\/api\/ui\/sessions\/[^/]+\/[^/]+\/signout$/.test(url)) {
+      return jsonResponse({ Result: 'SignedOut', Released: true, Returned: false, message: 'Signed alice out of linux-host-02.' });
+    }
+    if (/^\/api\/ui\/sessions\/[^/]+\/[^/]+\/message$/.test(url)) {
+      return jsonResponse({ Delivered: 1, Sessions: 1, message: 'Sent to alice on linux-host-02.' });
+    }
+    if (url.startsWith('/api/ui/sessions')) return jsonResponse(SESSIONS);
+    if (/^\/api\/ui\/users\/[^/]+\/reset-profile/.test(url)) {
+      return jsonResponse({ Username: 'alice', message: 'alice gets a fresh profile at their next sign-in.' });
+    }
+    if (url.startsWith('/api/ui/users/')) return jsonResponse(userDetails);
+    if (url.startsWith('/api/ui/users')) {
+      return jsonResponse({
+        Users: [{ Username: 'alice', Uid: 2001, ProfileResetPending: false, CurrentVMID: 2, CurrentHostname: 'linux-host-02', CurrentVmStatus: 'CheckedOut' }],
+        Query: 'al',
+      });
+    }
 
     return jsonResponse({ error: 'Unexpected request' }, 404);
   });
@@ -193,6 +243,7 @@ function renderApp(route: string) {
 beforeEach(() => {
   session = SESSION;
   dashboard = DASHBOARD;
+  userDetails = freshUserDetails();
   requests.length = 0;
   setCsrfToken(null);
   vi.stubGlobal('fetch', stubFetch());
@@ -296,6 +347,8 @@ describe('App', () => {
     ['/settings/hosts', 'Linux host settings'],
     ['/vms/health', 'Fleet health'],
     ['/audit', 'Audit log'],
+    ['/sessions', 'Sessions'],
+    ['/users/alice', 'alice'],
   ])('mounts %s', async (route, heading) => {
     renderApp(route);
     expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
@@ -510,5 +563,114 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Version history' })).toBeInTheDocument();
     expect(await screen.findByText('Saved by alice@contoso.com', { exact: false })).toBeInTheDocument();
     expect(screen.getByText('600 s (10 minutes)', { exact: false })).toBeInTheDocument();
+  });
+
+  it('lists sessions with what an operator needs to know', async () => {
+    renderApp('/sessions');
+
+    expect(await screen.findByRole('link', { name: 'alice' })).toHaveAttribute('href', '/users/alice');
+    expect(screen.getByText('In use, idle 12 min')).toBeInTheDocument();
+    expect(screen.getByText('Grace ends in 10 min')).toBeInTheDocument();
+    expect(screen.getByText('Checked out 1 h 30 min ago; no session since')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /Never connected/ }));
+    expect(screen.getByRole('button', { name: /Never connected/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('link', { name: 'alice' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'carol' })).toBeInTheDocument();
+  });
+
+  it('finds a user who may not have a session', async () => {
+    renderApp('/sessions');
+    await userEvent.type(await screen.findByLabelText('Find a user'), 'al');
+
+    const result = await screen.findByText('On linux-host-02');
+    expect(within(result.closest('li') as HTMLElement).getByRole('link', { name: 'alice' })).toHaveAttribute('href', '/users/alice');
+    expect(requests.some((url) => url.startsWith('/api/ui/users?q=al'))).toBe(true);
+  });
+
+  it('messages a user from the sessions page', async () => {
+    renderApp('/sessions');
+    await userEvent.click(await screen.findByRole('button', { name: 'Session actions for alice on linux-host-02' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Send message' }));
+
+    const dialog = await screen.findByRole('dialog');
+    const send = within(dialog).getByRole('button', { name: 'Send message' });
+    expect(send).toBeDisabled();
+    await userEvent.type(within(dialog).getByLabelText('Message'), 'Please save your work');
+    await userEvent.click(send);
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/sessions/linux-host-02/alice/message',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ message: 'Please save your work' });
+    });
+    expect(await screen.findByText('Sent to alice on linux-host-02.')).toBeInTheDocument();
+  });
+
+  it('signs a user out only after confirming', async () => {
+    renderApp('/sessions');
+    await userEvent.click(await screen.findByRole('button', { name: 'Session actions for alice on linux-host-02' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Send message', 'Sign out', 'Sign out and return host',
+    ]);
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Sign out and return host' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/The assignment ends now/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Sign out and return' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/sessions/linux-host-02/alice/signout',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ returnHost: true });
+    });
+  });
+
+  it('gives readers no session actions', async () => {
+    session = { ...SESSION, roles: ['Reader'], permissions: { read: true, operate: false, admin: false } };
+    renderApp('/sessions');
+    await screen.findByRole('link', { name: 'alice' });
+    expect(screen.queryByRole('button', { name: /Session actions for/ })).not.toBeInTheDocument();
+  });
+
+  it('resets a profile only after the administrator types the username', async () => {
+    renderApp('/users/alice');
+
+    expect(await screen.findByRole('heading', { name: 'alice', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText('Linux user ID 2001')).toBeInTheDocument();
+    expect(screen.getByText('session.message')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Reset profile' }));
+
+    const dialog = await screen.findByRole('dialog');
+    const reset = within(dialog).getByRole('button', { name: 'Reset profile' });
+    expect(reset).toBeDisabled();
+    await userEvent.type(within(dialog).getByLabelText(/to confirm/), 'alice');
+    await userEvent.click(reset);
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/users/alice/reset-profile',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ confirm: 'alice' });
+    });
+  });
+
+  it('shows a pending profile reset and lets an administrator cancel it', async () => {
+    userDetails = { ...freshUserDetails(), ProfileReset: { RequestedAtUtc: '2026-09-24T10:00:00Z', RequestedBy: 'admin@contoso.com' } };
+    renderApp('/users/alice');
+
+    expect(await screen.findByText(/admin@contoso.com asked for a fresh profile/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel profile reset' }));
+    await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel the reset' }));
+    await waitFor(() => expect(requests).toContain('/api/ui/users/alice/reset-profile/cancel'));
+  });
+
+  it('hides profile resets from operators', async () => {
+    session = { ...SESSION, roles: ['Operator'], permissions: { read: true, operate: true, admin: false } };
+    renderApp('/users/alice');
+    await screen.findByRole('heading', { name: 'alice', level: 1 });
+    expect(screen.queryByRole('button', { name: 'Reset profile' })).not.toBeInTheDocument();
   });
 });

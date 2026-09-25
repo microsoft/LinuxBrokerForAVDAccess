@@ -27,6 +27,8 @@ import { RuleList } from './pages/scaling/RuleList';
 import { UpdateRule } from './pages/scaling/UpdateRule';
 import { HostSettingsPage } from './pages/settings/HostSettings';
 import { AuditLog } from './pages/audit/AuditLog';
+import { SessionList } from './pages/sessions/SessionList';
+import { UserDetails } from './pages/sessions/UserDetails';
 
 /**
  * Routes deliberately mirror the URLs the Jinja portal served, so existing
@@ -82,6 +84,9 @@ function AuthenticatedRoutes() {
       <Route path="/scaling/log" element={<ActivityLog />} />
 
       <Route path="/settings/hosts" element={<HostSettingsPage />} />
+
+      <Route path="/sessions" element={<SessionList />} />
+      <Route path="/users/:username" element={<UserDetails />} />
 
       <Route path="/audit" element={<AuditLog />} />
 

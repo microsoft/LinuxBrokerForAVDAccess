@@ -51,6 +51,13 @@ EXPECTED_ROLES = {
     "get_host_health": READ,
     "get_audit_log": READ,
     "purge_audit_log": {"ScheduledTask", "FullAccess"},
+    "get_sessions": READ,
+    "search_users": READ,
+    "get_user_details": READ,
+    "sign_out_session": OPERATE,
+    "message_session": OPERATE,
+    "request_profile_reset": ADMIN,
+    "cancel_profile_reset": ADMIN,
 }
 
 EXPECTED_GROUPS = {

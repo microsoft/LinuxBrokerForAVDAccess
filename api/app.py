@@ -14,7 +14,7 @@ import re
 import shlex
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from azure.monitor.opentelemetry import configure_azure_monitor
 
@@ -51,6 +51,7 @@ cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 REMOTE_CREATE_USER_SCRIPT = '/usr/local/bin/create-user.sh'
 REMOTE_MANAGE_LEASE_SCRIPT = '/usr/local/bin/manage-lease.sh'
 REMOTE_APPLY_SETTINGS_SCRIPT = '/usr/local/bin/apply-host-settings.sh'
+REMOTE_SESSION_CONTROL_SCRIPT = '/usr/local/bin/session-control.sh'
 
 # Output markers shared with linux_host/manage-lease.sh, linux_host/create-user.sh and the
 # delete command below. manage-lease.sh printed cleared-in-use before it learned to keep the
@@ -1731,6 +1732,11 @@ def checkout_vm():
 
         if not vm_hostname or not lease_id:
             return error_response("No hostname or LeaseId found for the checked-out VM.", 500)
+
+        # A requested profile reset is applied on a new assignment only, before create-user.sh
+        # mounts the home. It never stops the user signing in.
+        if checked_out_vm.get('ProfileResetRequested') and checked_out_vm.get('CheckoutType') == 'Assigned':
+            apply_pending_profile_reset(vmid, vm_hostname, username)
 
         if not create_or_update_remote_user(vm_hostname, username, user_password, lease_id):
             # create-user.sh may already have written the lease and mounted the home. The VM
@@ -3446,7 +3452,7 @@ HEARTBEAT_TOKEN_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z.+~_:-]*$')
 HEARTBEAT_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
 HEARTBEAT_SCRIPTS = (
     'release-session.sh', 'logind-session-watcher.sh', 'xrdp-who-xorg.sh',
-    'create-user.sh', 'manage-lease.sh', 'apply-host-settings.sh',
+    'create-user.sh', 'manage-lease.sh', 'apply-host-settings.sh', 'session-control.sh',
 )
 HEARTBEAT_DESKTOPS = ('gnome', 'xfce', 'mate', 'kde', 'other', 'none', 'unknown')
 HEARTBEAT_SESSION_STATES = ('active', 'disconnected', 'unknown')
@@ -3842,6 +3848,632 @@ def get_host_health():
     except Exception:
         logger.exception("Failed to read fleet health.")
         return error_response("Unable to retrieve fleet health.", 500)
+
+# ===============================
+# Sessions and Users APIs
+#
+# Where each user is and why they cannot connect: the broker's assignments joined with the
+# sessions the host agents last reported. The actions a helpdesk operator needs, signing a
+# user out and messaging a session, run session-control.sh on the host, which checks again
+# that it only touches accounts the broker created. A profile reset is only requested here;
+# checkout applies it at the user's next new assignment, so the rename can never race a
+# sign-in.
+
+BROKER_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
+SESSION_STATES = (
+    'active', 'disconnected', 'released', 'connecting', 'not-connected',
+    'cleanup-pending', 'unmanaged', 'unknown',
+)
+_SESSION_CONTROL_LINE_RE = re.compile(r'^__SESSION_CONTROL_([A-Z_]+)=(.*)$')
+_MESSAGE_CONTROL_CHARACTERS_RE = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+
+
+class HostAgentOutdated(Exception):
+    """The host has no session-control.sh, or sudo does not allow it: its agent predates 1.1.0."""
+
+
+def host_agent_outdated_response(hostname, what):
+    return error_response(
+        f"{hostname} runs a host agent older than 1.1.0, which cannot {what}. "
+        "Update it with deploy/Migrate-LinuxHostReleaseAgent.ps1.", 409
+    )
+
+
+def parse_session_control_output(stdout):
+    values = {}
+    for line in (stdout or '').splitlines():
+        match = _SESSION_CONTROL_LINE_RE.match(line.strip())
+        if match:
+            values[match.group(1)] = match.group(2).strip()
+    return values
+
+
+def run_session_control(hostname, arguments, stdin_input=None, timeout=SESSION_CONTROL_TIMEOUT_SECONDS):
+    """Run session-control.sh on a host and return what it reported.
+
+    `sudo -n` fails at once, instead of waiting for a password, on a host whose agent has no
+    session-control.sh or does not allow it yet; that is raised as HostAgentOutdated.
+    """
+    command = "sudo -n {script} {arguments}".format(
+        script=REMOTE_SESSION_CONTROL_SCRIPT,
+        arguments=' '.join(shlex.quote(str(argument)) for argument in arguments),
+    )
+    result, host_fqdn = run_remote_command(hostname, command, stdin_input=stdin_input, timeout=timeout)
+    values = parse_session_control_output(result.stdout)
+
+    if not values and result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        if any(line.strip().startswith('sudo:') for line in stderr.splitlines()):
+            raise HostAgentOutdated(hostname)
+        logger.error("session-control.sh %s failed on %s (exit %s): %s",
+                     arguments[0] if arguments else '', host_fqdn, result.returncode, stderr)
+
+    return values, result.returncode
+
+
+def normalize_session_message(value):
+    """(message, problem) for a message an operator wants shown in sessions."""
+    if not isinstance(value, str):
+        return None, "Provide the message to send."
+    text = _MESSAGE_CONTROL_CHARACTERS_RE.sub('', value.replace('\r\n', '\n').replace('\t', ' ')).strip()
+    if not text:
+        return None, "Provide the message to send."
+    if len(text) > SESSION_MESSAGE_MAX_CHARS:
+        return None, f"The message must be at most {SESSION_MESSAGE_MAX_CHARS} characters."
+    return text, None
+
+
+def _epoch_to_utc(value):
+    if not isinstance(value, int) or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def session_state(row, stale_after):
+    """What an operator should read from one row of GetSessions."""
+    age = row.get('HeartbeatAgeSeconds')
+    fresh = age is not None and age <= stale_after
+    reported = row.get('SessionState')
+
+    if row.get('CleanupPending'):
+        return 'cleanup-pending'
+    if not row.get('BrokerTracked'):
+        return 'unmanaged' if fresh else 'unknown'
+    if reported in ('active', 'disconnected') and fresh:
+        return reported
+    if row.get('VmStatus') == 'Released':
+        return 'released'
+    if not fresh:
+        return 'unknown'
+    last_checkout = row.get('LastCheckoutAgeSeconds')
+    if last_checkout is not None and last_checkout < SESSION_CONNECTING_SECONDS:
+        return 'connecting'
+    return 'not-connected'
+
+
+def session_item(row):
+    stale_after = heartbeat_stale_after(row.get('ReconcileIntervalSeconds'))
+    age = row.get('HeartbeatAgeSeconds')
+    grace = row.get('GraceRemainingSeconds')
+    return serialize_for_json({
+        'Hostname': row.get('Hostname'),
+        'VMID': row.get('VMID'),
+        'Username': row.get('Username'),
+        'AvdHost': row.get('AvdHost'),
+        'State': session_state(row, stale_after),
+        'VmStatus': row.get('VmStatus'),
+        'PowerState': row.get('PowerState'),
+        'NetworkStatus': row.get('NetworkStatus'),
+        'DrainRequested': bool(row.get('DrainRequested')),
+        'HasAssignment': bool(row.get('HasAssignment')),
+        'CleanupPending': bool(row.get('CleanupPending')),
+        'ReportedState': row.get('SessionState'),
+        'SessionStartUtc': _epoch_to_utc(row.get('SessionStartEpoch')),
+        'DisconnectedForSeconds': row.get('DisconnectedForSeconds'),
+        'IdleSeconds': row.get('IdleSeconds'),
+        'AssignedForSeconds': row.get('AssignedForSeconds'),
+        'LastCheckoutAgeSeconds': row.get('LastCheckoutAgeSeconds'),
+        'GraceRemainingSeconds': max(0, grace) if isinstance(grace, int) else None,
+        'GracePeriodSeconds': row.get('GracePeriodSeconds'),
+        'HeartbeatAgeSeconds': age,
+        'HeartbeatFresh': age is not None and age <= stale_after,
+    })
+
+
+def fetch_sessions():
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetSessions")
+            rows = cursor.fetchall() or []
+    return [session_item(row) for row in rows]
+
+
+def summarize_sessions(sessions):
+    summary = {'Total': len(sessions)}
+    summary.update({state: 0 for state in SESSION_STATES})
+    for session in sessions:
+        summary[session['State']] = summary.get(session['State'], 0) + 1
+    return summary
+
+
+@app.route('/api/sessions', methods=['GET'])
+@token_required(READ_ROLES)
+def get_sessions():
+    """Every assignment and reported session. ?q= matches user or host; ?state= one state."""
+    try:
+        query = (request.args.get('q') or '').strip().lower()
+        state = (request.args.get('state') or '').strip().lower() or None
+        if state and state not in SESSION_STATES:
+            return error_response(f"state must be one of: {', '.join(SESSION_STATES)}.", 400)
+
+        sessions = fetch_sessions()
+        summary = summarize_sessions(sessions)
+        if query:
+            sessions = [
+                session for session in sessions
+                if query in str(session.get('Username') or '').lower() or query in str(session.get('Hostname') or '').lower()
+            ]
+        if state:
+            sessions = [session for session in sessions if session['State'] == state]
+
+        return jsonify({'Sessions': sessions, 'Summary': summary}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading sessions.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read sessions.")
+        return error_response("Unable to retrieve sessions.", 500)
+
+
+@app.route('/api/users', methods=['GET'])
+@token_required(READ_ROLES)
+def search_users():
+    """Broker users whose name contains ?q=, exact and prefix matches first."""
+    try:
+        query = re.sub(r'[^A-Za-z0-9_]', '', request.args.get('q') or '')[:64] or None
+        limit = coerce_optional_int(request.args.get('limit'), default=25, minimum=1, maximum=USER_SEARCH_MAX_RESULTS)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC SearchUsers @Query = %s, @Limit = %s", (query, limit))
+                rows = cursor.fetchall() or []
+
+        return jsonify({'Users': serialize_for_json(rows), 'Query': query}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while searching users.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to search users.")
+        return error_response("Unable to search users.", 500)
+
+
+def user_audit_entries(username, limit=20):
+    """Recent audit entries about one user. The reader matches part of a target, so exact
+    matches are kept here."""
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC GetAuditLogPaged @TargetType = %s, @TargetId = %s, @Offset = 0, @PageSize = %s",
+                    ('user', username, limit * 2)
+                )
+                rows = cursor.fetchall() or []
+    except DatabaseUnavailable:
+        raise
+    except Exception:
+        logger.exception("Could not read the audit entries for %s.", username)
+        return []
+    return [_audit_item(row) for row in rows if str(row.get('TargetId') or '').lower() == username.lower()][:limit]
+
+
+@app.route('/api/users/<username>', methods=['GET'])
+@token_required(READ_ROLES)
+def get_user_details(username):
+    """One user: where they are now, their sessions, the hosts they had, and recent actions."""
+    try:
+        if not BROKER_USERNAME_RE.match(username or ''):
+            return error_response("The username is not valid.", 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetUserDetails @Username = %s", (username,))
+                details = cursor.fetchone()
+
+        if not details:
+            return error_response(f"The broker has no user named {username}.", 404)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetUserHostHistory @Username = %s", (username,))
+                history = cursor.fetchall() or []
+
+        sessions = [session for session in fetch_sessions() if str(session.get('Username') or '').lower() == username.lower()]
+        requested_at = details.get('ProfileResetRequestedAtUtc')
+
+        return jsonify(serialize_for_json({
+            'Username': details.get('Username'),
+            'Uid': details.get('Uid'),
+            'FirstProvisionedDate': details.get('FirstProvisionedDate'),
+            'ProfileReset': {
+                'RequestedAtUtc': requested_at,
+                'RequestedBy': details.get('ProfileResetRequestedBy'),
+            } if requested_at else None,
+            'Assignments': _json_column(details.get('AssignmentsJson'), list) or [],
+            'Sessions': sessions,
+            'HostHistory': history,
+            'RecentActivity': user_audit_entries(username),
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading user %s.", username)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read user %s.", username)
+        return error_response("Unable to retrieve the user.", 500)
+
+
+def lookup_vm_by_hostname(hostname):
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetVmByHostname @Hostname = %s", (hostname,))
+            return cursor.fetchone()
+
+
+def reported_session_users(hostname):
+    """The users the host's latest heartbeat reports signed in, when that heartbeat is fresh."""
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetHostHealth @Hostname = %s", (hostname,))
+            row = cursor.fetchone() or {}
+
+    age = row.get('HeartbeatAgeSeconds')
+    if age is None or age > heartbeat_stale_after(row.get('ReconcileIntervalSeconds')):
+        return set()
+    return {
+        str(session.get('username')).lower()
+        for session in (_json_column(row.get('SessionsJson'), list) or [])
+        if isinstance(session, dict) and session.get('username')
+    }
+
+
+def resolve_session_target(hostname, username):
+    """(vm, error response) for an action on one user's session on one host.
+
+    The host must be registered, and the user must be one the broker has on it (assigned or
+    waiting for cleanup) or one the host's fresh heartbeat reports there.
+    """
+    if not HEARTBEAT_HOSTNAME_RE.match(hostname or ''):
+        return None, error_response("The hostname is not valid.", 400)
+    if not BROKER_USERNAME_RE.match(username or ''):
+        return None, error_response("The username is not valid.", 400)
+
+    vm = lookup_vm_by_hostname(hostname)
+    if not vm:
+        return None, error_response(f"No VM found with Hostname {hostname}.", 404)
+
+    g.audit_detail = {'hostname': vm.get('Hostname')}
+    name = username.lower()
+    bound = (
+        str(vm.get('Username') or '').lower() == name
+        or (vm.get('CleanupPending') and str(vm.get('CleanupUsername') or '').lower() == name)
+        or name in reported_session_users(vm.get('Hostname'))
+    )
+    if not bound:
+        return None, error_response(f"The broker has no session for {username} on {vm.get('Hostname')}.", 409)
+    if vm.get('PowerState') != 'On':
+        return None, error_response(f"{vm.get('Hostname')} is powered off.", 409)
+    return vm, None
+
+
+def release_after_signout(vm, username):
+    """Mark the assignment released, as the agent would, so grace starts without it."""
+    if str(vm.get('Username') or '').lower() != username.lower() or vm.get('VmStatus') != 'CheckedOut':
+        return False
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC ReleaseVm @Hostname = %s, @LeaseId = %s, @Username = %s",
+                    (vm.get('Hostname'), normalize_lease_id(vm.get('LeaseId')), vm.get('Username'))
+                )
+                row = cursor.fetchone() or {}
+            conn.commit()
+        return (row.get('ReleaseStatus') or '').strip() == 'Released'
+    except DatabaseUnavailable:
+        raise
+    except Exception:
+        logger.exception("Could not release %s after signing %s out.", vm.get('Hostname'), username)
+        return False
+
+
+def return_after_signout(vm, username):
+    """End the assignment that sign-out left in grace. Returns the cleanup outcome, or None."""
+    lease_id = normalize_lease_id(vm.get('LeaseId'))
+    if str(vm.get('Username') or '').lower() != username.lower() or not lease_id:
+        return None
+
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            # The lease must still match, so an assignment made since the lookup is untouched.
+            cursor.execute("EXEC ReturnVm @VMID = %s, @ExpectedLeaseId = %s", (vm.get('VMID'), lease_id))
+            returned = cursor.fetchone()
+        conn.commit()
+
+    if not returned or is_procedure_error(returned):
+        return None
+    return clean_up_returned_user(
+        vm.get('VMID'),
+        returned.get('Hostname') or vm.get('Hostname'),
+        returned.get('ReturnedUsername') or vm.get('Username'),
+        returned.get('ReturnedLeaseId') or lease_id,
+        timeout=60,
+    )
+
+
+@app.route('/api/sessions/<hostname>/<username>/signout', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('session.signout', target_type='user', target_param='username')
+def sign_out_session(hostname, username):
+    """End a user's desktop on a host, then release the host. returnHost also ends the assignment."""
+    try:
+        body = request.get_json(silent=True)
+        return_host = isinstance(body, dict) and body.get('returnHost') is True
+
+        vm, problem = resolve_session_target(hostname, username)
+        if problem:
+            return problem
+        hostname = vm.get('Hostname')
+        g.audit_detail = {'hostname': hostname, 'returnHost': return_host}
+
+        try:
+            values, _ = run_session_control(hostname, ['signout', username])
+        except HostAgentOutdated:
+            return host_agent_outdated_response(hostname, 'sign users out')
+
+        result = values.get('RESULT')
+        g.audit_detail['result'] = result
+        if result == 'refused':
+            return error_response(f"{hostname} refused to sign out {username}: it is not an account the broker created.", 409)
+        if result not in ('signed-out', 'no-session'):
+            return error_response(f"Could not sign {username} out of {hostname}. Try again, or restart the host.", 502)
+
+        released = release_after_signout(vm, username)
+        cleanup = return_after_signout(vm, username) if return_host else None
+        g.audit_detail.update({'released': released, 'cleanupResult': cleanup})
+
+        if cleanup in (CLEANUP_COMPLETED, CLEANUP_NOT_REQUIRED):
+            message = f"Signed {username} out of {hostname} and returned the host."
+        elif cleanup:
+            message = f"Signed {username} out of {hostname}. The host was returned; its cleanup is retried automatically."
+        elif result == 'no-session':
+            message = f"{username} had no session left on {hostname}."
+        else:
+            message = f"Signed {username} out of {hostname}. They can reconnect within the grace period."
+
+        return jsonify({
+            'Hostname': hostname,
+            'Username': username,
+            'Result': 'SignedOut' if result == 'signed-out' else 'NoSession',
+            'Released': released,
+            'Returned': cleanup is not None,
+            'CleanupResult': cleanup,
+            'message': message,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while signing %s out of %s.", username, hostname)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to sign %s out of %s.", username, hostname)
+        return error_response("Unable to sign the user out.", 500)
+
+
+@app.route('/api/sessions/<hostname>/<username>/message', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('session.message', target_type='user', target_param='username')
+def message_session(hostname, username):
+    """Show a message in a user's sessions on a host."""
+    try:
+        body = request.get_json(silent=True)
+        message, problem = normalize_session_message(body.get('message') if isinstance(body, dict) else None)
+        if problem:
+            return error_response(problem, 400)
+
+        vm, problem = resolve_session_target(hostname, username)
+        if problem:
+            return problem
+        hostname = vm.get('Hostname')
+        g.audit_detail = {'hostname': hostname, 'message': message[:SESSION_AUDIT_MESSAGE_CHARS]}
+
+        try:
+            values, _ = run_session_control(hostname, ['message', username], stdin_input=message)
+        except HostAgentOutdated:
+            return host_agent_outdated_response(hostname, 'show messages')
+
+        result = values.get('RESULT')
+        delivered = coerce_optional_int(values.get('DELIVERED'), default=0, minimum=0)
+        sessions = coerce_optional_int(values.get('SESSIONS'), default=0, minimum=0)
+        g.audit_detail.update({'result': result, 'delivered': delivered})
+
+        if result == 'refused':
+            return error_response(f"{hostname} refused to message {username}: it is not an account the broker created.", 409)
+        if result not in ('delivered', 'no-session'):
+            return error_response(f"Could not send the message to {hostname}.", 502)
+
+        if result == 'no-session' or not sessions:
+            text = f"{username} has no session on {hostname} to show the message in."
+        elif delivered < sessions:
+            text = f"Sent to {delivered} of {username}'s {sessions} sessions on {hostname}."
+        else:
+            text = f"Sent to {username} on {hostname}."
+
+        return jsonify({
+            'Hostname': hostname,
+            'Username': username,
+            'Sessions': sessions,
+            'Delivered': delivered,
+            'message': text,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while messaging %s on %s.", username, hostname)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to message %s on %s.", username, hostname)
+        return error_response("Unable to send the message.", 500)
+
+
+@app.route('/api/users/<username>/reset-profile', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('user.reset_profile_requested', target_type='user', target_param='username')
+def request_profile_reset(username):
+    """Ask for a fresh profile at the user's next new assignment. The old one is kept."""
+    try:
+        if not BROKER_USERNAME_RE.match(username or ''):
+            return error_response("The username is not valid.", 400)
+
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+        if str(body.get('confirm') or '').strip().lower() != username.lower():
+            return jsonify({
+                'error': f"Send the username as confirm to reset {username}'s profile.",
+                'requiresConfirmation': True,
+                'Username': username,
+            }), 409
+
+        _, requested_by, _ = audit_actor()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC RequestProfileReset @Username = %s, @RequestedBy = %s",
+                    (username, requested_by)
+                )
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        if row.get('Result') != 'Requested':
+            return error_response(f"The broker has no user named {username}.", 404)
+
+        assigned = bool(row.get('CurrentlyAssigned'))
+        g.audit_detail = {'currentlyAssigned': assigned}
+        message = (
+            f"{username} gets a fresh profile at their next sign-in after the current session ends. "
+            "The current profile is kept, renamed."
+            if assigned else
+            f"{username} gets a fresh profile at their next sign-in. The current profile is kept, renamed."
+        )
+        return jsonify(serialize_for_json({
+            'Username': row.get('Username'),
+            'RequestedAtUtc': row.get('ProfileResetRequestedAtUtc'),
+            'RequestedBy': row.get('ProfileResetRequestedBy'),
+            'CurrentlyAssigned': assigned,
+            'message': message,
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while requesting a profile reset for %s.", username)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to request a profile reset for %s.", username)
+        return error_response("Unable to request the profile reset.", 500)
+
+
+@app.route('/api/users/<username>/reset-profile/cancel', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('user.reset_profile_cancelled', target_type='user', target_param='username')
+def cancel_profile_reset(username):
+    try:
+        if not BROKER_USERNAME_RE.match(username or ''):
+            return error_response("The username is not valid.", 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC CancelProfileReset @Username = %s", (username,))
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        result = row.get('Result')
+        g.audit_detail = {'result': result}
+        if result == 'NotFound':
+            return error_response(f"The broker has no user named {username}.", 404)
+        if result == 'NotPending':
+            return jsonify({'Username': username, 'Result': result, 'message': f"{username} had no profile reset pending."}), 200
+        return jsonify({'Username': username, 'Result': result, 'message': f"Cancelled the profile reset for {username}."}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while cancelling a profile reset for %s.", username)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to cancel a profile reset for %s.", username)
+        return error_response("Unable to cancel the profile reset.", 500)
+
+
+def apply_pending_profile_reset(vmid, hostname, username):
+    """Apply a requested profile reset during a new checkout, before the home is mounted.
+
+    Never fails the checkout: if the reset cannot be applied now, the user signs in with the
+    existing profile and the reset stays pending for a later checkout. Returns the outcome.
+    """
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC BeginProfileReset @Username = %s, @VMID = %s", (username, vmid))
+                row = cursor.fetchone() or {}
+
+        readiness = row.get('Result')
+        if readiness != 'Ready':
+            if readiness == 'InUseElsewhere':
+                logger.info("Left the profile reset for %s pending: the profile may be in use on another host.", username)
+            return readiness
+
+        if not NFS_SHARE:
+            logger.error("Cannot reset the profile of %s: NFS_SHARE is not configured.", username)
+            return 'NotConfigured'
+
+        try:
+            values, _ = run_session_control(
+                hostname, ['reset-profile', NFS_SHARE, username], timeout=PROFILE_RESET_TIMEOUT_SECONDS
+            )
+        except HostAgentOutdated:
+            logger.warning("Left the profile reset for %s pending: %s runs a host agent older than 1.1.0.", username, hostname)
+            audit('user.reset_profile_applied', 'user', username, AUDIT_FAILURE, {
+                'hostname': hostname, 'error': 'The host agent is older than 1.1.0.',
+            })
+            return 'AgentOutdated'
+
+        outcome = values.get('RESULT')
+        if outcome not in ('profile-reset', 'profile-missing'):
+            logger.error("The profile reset for %s failed on %s (%s); it stays pending.", username, hostname, outcome)
+            audit('user.reset_profile_applied', 'user', username, AUDIT_FAILURE, {
+                'hostname': hostname, 'result': outcome or 'error',
+            })
+            return outcome or 'Failed'
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC CompleteProfileReset @Username = %s", (username,))
+                cursor.fetchone()
+            conn.commit()
+
+        audit('user.reset_profile_applied', 'user', username, AUDIT_SUCCESS, {
+            'hostname': hostname, 'result': outcome, 'renamedTo': values.get('RENAMED_TO'),
+        })
+        return outcome
+    except Exception:
+        logger.exception("Could not apply the profile reset for %s on %s; it stays pending.", username, hostname)
+        return 'Failed'
 
 # ===============================
 # Audit APIs

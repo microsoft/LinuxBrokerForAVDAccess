@@ -185,7 +185,7 @@ AUDIT_PURGE_TIME_BUDGET_SECONDS = 90
 # with any change to those scripts; api/tests checks they agree. Fleet health flags a host
 # whose reported agent or scripts are older. The override exists so an operator can silence
 # the flag during a staged rollout.
-HOST_AGENT_VERSION = '1.0.0'
+HOST_AGENT_VERSION = '1.1.0'
 EXPECTED_HOST_AGENT_VERSION = (os.environ.get('EXPECTED_HOST_AGENT_VERSION') or '').strip() or HOST_AGENT_VERSION
 
 HEARTBEAT_MAX_BYTES = 32 * 1024
@@ -194,3 +194,18 @@ HEARTBEAT_MAX_SESSIONS = 50
 HEARTBEAT_STALE_INTERVALS = 3
 HEARTBEAT_STALE_MINIMUM_SECONDS = 180
 LOW_DISK_FREE_PERCENT = 10
+
+# ===============================
+# Sessions and users
+#
+# Signing a user out, messaging a session and resetting a profile all run
+# linux_host/session-control.sh on the host over SSH. A message is at most this many characters
+# (the host script refuses anything that could be longer in bytes), and the audit log keeps the
+# first SESSION_AUDIT_MESSAGE_CHARS of it.
+SESSION_CONTROL_TIMEOUT_SECONDS = 30
+PROFILE_RESET_TIMEOUT_SECONDS = 60
+SESSION_MESSAGE_MAX_CHARS = 500
+SESSION_AUDIT_MESSAGE_CHARS = 200
+# A checkout this recent with no session reported yet is still connecting, not stuck.
+SESSION_CONNECTING_SECONDS = 180
+USER_SEARCH_MAX_RESULTS = 200
