@@ -42,6 +42,8 @@ session_control_script_url="$script_source_root/linux_host/session-control.sh"
 session_control_script="/usr/local/bin/session-control.sh"
 patch_host_script_url="$script_source_root/linux_host/patch-host.sh"
 patch_host_script="/usr/local/bin/patch-host.sh"
+xrdp_startwm_script_url="$script_source_root/linux_host/xrdp-startwm.sh"
+xrdp_startwm_script="/usr/local/bin/xrdp-startwm.sh"
 
 arch=$( /bin/arch )
 remoteAccessTool="both"  # Options: "xrdp", "xpra", or "both"
@@ -66,6 +68,7 @@ activationKey="${RHEL_ACTIVATION_KEY:-}"
 
 output_directory="/usr/local/bin"
 state_directory="/var/lib/linuxbroker-release-session"
+desktop_file="/etc/linuxbroker/desktop.conf"
 
 SCRIPT_PATH="$output_directory/release-session.sh"
 WATCHER_SCRIPT_PATH="$output_directory/logind-session-watcher.sh"
@@ -241,6 +244,9 @@ sudo wget -O "$session_control_script" "$session_control_script_url"
 echo "Downloading patch-host.sh..."
 sudo wget -O "$patch_host_script" "$patch_host_script_url"
 
+echo "Downloading xrdp-startwm.sh..."
+sudo wget -O "$xrdp_startwm_script" "$xrdp_startwm_script_url"
+
 echo "Setting execute permissions for downloaded scripts..."
 sudo chmod +x "$SCRIPT_PATH"
 sudo chmod +x "$output_directory/xrdp-who-xorg.sh"
@@ -250,7 +256,25 @@ sudo chmod +x "$manage_lease_script"
 sudo chmod +x "$apply_settings_script"
 sudo chmod +x "$session_control_script"
 sudo chmod +x "$patch_host_script"
+sudo chmod +x "$xrdp_startwm_script"
 echo "Downloaded scripts are now executable."
+
+# xrdp starts every session through xrdp-startwm.sh, which starts the desktop named here.
+# On RHEL that is the distribution's own session script, as before.
+echo "Configuring xrdp to start sessions through xrdp-startwm.sh..."
+sudo mkdir -p "$(dirname "$desktop_file")"
+sudo chmod 755 "$(dirname "$desktop_file")"
+cat <<'EOF' | sudo tee "$desktop_file" >/dev/null
+# Written by the Linux Broker host bootstrap: the desktop xrdp-startwm.sh starts in every
+# xrdp session.
+DESKTOP=gnome
+EOF
+sudo chmod 644 "$desktop_file"
+
+if ! sudo "$xrdp_startwm_script" --install; then
+    echo "ERROR: Could not configure xrdp to start sessions through $xrdp_startwm_script."
+    exit 1
+fi
 
 echo "Creating log and user details files..."
 sudo mkdir -p "$state_directory"

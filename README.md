@@ -186,11 +186,12 @@ The custom script extension for the AVD host:
 The custom script extensions support the following Linux distributions:
 
 - **Red Hat Enterprise Linux (RHEL) 8 and 9**
-- **Ubuntu 24 Desktop**
+- **Ubuntu 24.04**: Canonical's server image with the Ubuntu desktop added, which xrdp sessions run as Ubuntu on Xorg
 
 These scripts:
 
 - **Install XRDP and xpra**: Set up XRDP for full desktop access (RDP) and xpra for application virtualization, enabling users to connect via AVD.
+- **Start the desktop**: xrdp starts every session through `xrdp-startwm.sh`, which runs the host's GNOME desktop, as Ubuntu on Xorg on Ubuntu.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the timer-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.
 - **Install the Host Settings Agent**: Installs `apply-host-settings.sh` and seeds the settings profile, so screen lock policy and session timings are applied consistently on every supported distribution rather than only on RHEL 8. `LINUXBROKER_DISABLE_SCREEN_LOCK` still chooses the screen lock posture that is seeded; from then on the values are managed from the portal.
@@ -341,7 +342,7 @@ The rest of the admin console (sessions, broadcast messages, scaling schedules, 
 
 ## Roadmap
 
-Planned work beyond this release, including Ubuntu desktop and RHEL 10 support, starting a host on demand, golden images and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
+Planned work beyond this release, including RHEL 10 support, starting a host on demand, golden images and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contributing
 

@@ -87,7 +87,7 @@ param linuxHostSshPublicKey string = ''
 ])
 param linuxHostOsVersion string = '9-LVM'
 
-@description('Disable the GNOME screen saver and screen lock on RHEL hosts. Set to false to keep the lock screen.')
+@description('Disable the GNOME screen saver and screen lock on the Linux hosts. Set to false to keep the lock screen.')
 param linuxHostDisableScreenLock bool = true
 
 param avdHostPoolName string = ''

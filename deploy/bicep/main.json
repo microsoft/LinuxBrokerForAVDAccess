@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "18396639136736869414"
+      "templateHash": "5357812922203999908"
     }
   },
   "parameters": {
@@ -326,7 +326,7 @@
       "type": "bool",
       "defaultValue": true,
       "metadata": {
-        "description": "Disable the GNOME screen saver and screen lock on RHEL hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control. Has no effect on the Ubuntu server image, which has no desktop."
+        "description": "Disable the GNOME screen saver and screen lock on the Linux hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
       }
     },
     "avdHostPoolName": {
@@ -550,7 +550,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "14380665631401972090"
+              "templateHash": "13893275988389033575"
             }
           },
           "parameters": {
@@ -766,7 +766,7 @@
               "type": "bool",
               "defaultValue": true,
               "metadata": {
-                "description": "Disable the GNOME screen saver and screen lock on RHEL hosts. Set to false to keep the lock screen."
+                "description": "Disable the GNOME screen saver and screen lock on the Linux hosts. Set to false to keep the lock screen."
               }
             },
             "avdHostPoolName": {
@@ -2839,7 +2839,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "2955371549082891553"
+                      "templateHash": "9444761510623079381"
                     }
                   },
                   "parameters": {
@@ -2913,7 +2913,7 @@
                       "type": "bool",
                       "defaultValue": true,
                       "metadata": {
-                        "description": "Disable the GNOME screen saver and screen lock on RHEL hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control. Has no effect on the Ubuntu server image, which has no desktop."
+                        "description": "Disable the GNOME screen saver and screen lock on the Linux hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
                       }
                     }
                   },

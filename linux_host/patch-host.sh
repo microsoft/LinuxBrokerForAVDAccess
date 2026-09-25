@@ -15,7 +15,9 @@
 # so a run only succeeds when the kernel the host boots next has a usable initramfs; when /boot
 # is too small for another kernel, the run keeps two kernels rather than the default three.
 #
-# The package manager is dnf on RHEL 8 and 9, yum on RHEL 7 and apt on Ubuntu. Output goes to
+# The package manager is dnf on RHEL 8 and 9, yum on RHEL 7 and apt on Ubuntu, where both
+# modes keep configuration files that were changed locally. After every run, xrdp is pointed
+# at xrdp-startwm.sh again in case the run replaced its sesman.ini. Output goes to
 # /var/log/linuxbroker-patch.log; the state of the last run is kept under
 # /var/lib/linuxbroker-release-session.
 
@@ -37,6 +39,8 @@ UNIT_PREFIX="linuxbroker-patch"
 # A run that has not recorded its process yet is still starting for this long.
 START_GRACE_SECONDS=60
 SUMMARY_MAX_CHARS=200
+XRDP_STARTWM_SCRIPT="/usr/local/bin/xrdp-startwm.sh"
+LAUNCHER_LOG_TAG="xrdp-startwm.sh:"
 
 usage() {
     echo "Usage: $0 start <security|all> [TOKEN]" >&2
@@ -188,7 +192,7 @@ failure_summary() {
     tail -n 50 "$LOG_FILE" 2>/dev/null \
         | LC_ALL=C tr -d '\000-\010\013-\037\177' \
         | grep -v '^[[:space:]]*$' \
-        | grep -v ' - Patch run ' \
+        | grep -v -e ' - Patch run ' -e " - $LAUNCHER_LOG_TAG " \
         | tail -n 1 \
         | cut -c "1-$SUMMARY_MAX_CHARS"
 }
@@ -407,6 +411,36 @@ status() {
     report_status
 }
 
+# unattended-upgrade takes dpkg's options only from the apt configuration, and without these
+# it holds back a package whose update would ask about a configuration file that was changed
+# locally, such as xrdp's sesman.ini.
+apt_security_upgrade() {
+    local config status=0
+
+    config=$(mktemp) || return 1
+    printf 'Dpkg::Options { "--force-confdef"; "--force-confold"; };\n' > "$config"
+    APT_CONFIG="$config" unattended-upgrade -v || status=$?
+    rm -f "$config"
+    return "$status"
+}
+
+# Points xrdp at the launcher again in case the run replaced sesman.ini. Whatever the launcher
+# reports is marked, so the failure summary still shows the upgrade's own last line, and it
+# never changes the result of the run.
+reinstall_launcher() {
+    local output
+    local line
+    local status=0
+
+    [ -x "$XRDP_STARTWM_SCRIPT" ] || return 0
+    output=$("$XRDP_STARTWM_SCRIPT" --install 2>&1) || status=$?
+    while IFS= read -r line; do
+        [ -n "$line" ] && log "$LAUNCHER_LOG_TAG $line"
+    done <<< "$output"
+    log "$LAUNCHER_LOG_TAG --install exited with $status."
+    return 0
+}
+
 # The upgrade itself, in the detached unit or session.
 run() {
     local mode="$1"
@@ -460,7 +494,7 @@ run() {
             if [ "$code" -eq 0 ]; then
                 if [ "$mode" = "security" ]; then
                     if command -v unattended-upgrade >/dev/null 2>&1; then
-                        unattended-upgrade -v >> "$LOG_FILE" 2>&1 || code=$?
+                        apt_security_upgrade >> "$LOG_FILE" 2>&1 || code=$?
                     else
                         log "unattended-upgrades is not installed, so security updates alone cannot be applied. Use all updates instead."
                         code=3
@@ -481,6 +515,8 @@ run() {
     if [ -n "$manager" ] && ! verify_next_boot "$manager"; then
         [ "$code" -eq 0 ] && code=5
     fi
+
+    reinstall_launcher
 
     with_lock
     load_state

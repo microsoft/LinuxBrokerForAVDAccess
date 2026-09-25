@@ -26,6 +26,7 @@ new_form_success() {
 
     assert_contains "$out" "__CREATE_USER_RESULT=ok__"
     assert_eq "$(id -u "$user")" "$uid"
+    assert_eq "$(getent passwd "$user" | cut -d: -f7)" "/bin/bash" "login shell"
     id -nG "$user" | grep -qw tsusers || fail "missing tsusers membership"
     id -nG "$user" | grep -qw appusers || fail "missing appusers membership"
     shadow_after=$(getent shadow "$user")
@@ -86,8 +87,30 @@ legacy_form_still_works() {
     cleanup_user "$user"
     bash "$SCRIPT" nfs.example:/profiles 21006 "$user" "$LEASE"
     assert_eq "$(id -u "$user")" "21006"
+    assert_eq "$(getent passwd "$user" | cut -d: -f7)" "/bin/bash" "login shell"
     assert_eq "$(cat "/var/lib/linuxbroker-release-session/leases/$user.lease")" "$LEASE"
     cleanup_user "$user"
+}
+
+# Ubuntu users that an earlier version created have /bin/sh; any other shell is left alone.
+existing_users_get_bash_instead_of_sh() {
+    local user="lbtestcu8" other="lbtestcu9"
+    setup_case
+    cleanup_user "$user"
+    cleanup_user "$other"
+    useradd -d "/home/$user" -u 21008 -U -s /bin/sh "$user" -M
+    useradd -d "/home/$other" -u 21009 -U -s /usr/bin/dash "$other" -M
+
+    printf 'pw1\n' | bash "$SCRIPT" --password-stdin nfs.example:/profiles 21008 "$user" "$LEASE" >/dev/null \
+        || fail "the existing user was not prepared"
+    assert_eq "$(getent passwd "$user" | cut -d: -f7)" "/bin/bash" "switched from /bin/sh"
+    assert_file_contains /var/log/createuser.log "Changed the login shell of $user from /bin/sh to /bin/bash."
+
+    printf 'pw2\n' | bash "$SCRIPT" --password-stdin nfs.example:/profiles 21009 "$other" "$LEASE" >/dev/null \
+        || fail "the other user was not prepared"
+    assert_eq "$(getent passwd "$other" | cut -d: -f7)" "/usr/bin/dash" "a chosen shell"
+    cleanup_user "$user"
+    cleanup_user "$other"
 }
 
 legacy_fixture_rejects_new_form() {
@@ -105,4 +128,5 @@ new_form_success
 validation_failures
 mount_failure
 legacy_form_still_works
+existing_users_get_bash_instead_of_sh
 legacy_fixture_rejects_new_form

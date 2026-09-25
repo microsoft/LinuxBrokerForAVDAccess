@@ -100,8 +100,8 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `avdSessionHostCount`: number of AVD hosts to provision.
 - `linuxHostVmSize`: Linux host VM size.
 - `avdVmSize`: AVD host VM size.
-- `linuxHostOsVersion`: Linux image SKU. Defaults to `9-LVM` (RHEL 9). The RHEL options (`8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires.
-- `linuxHostDisableScreenLock`: `true` or `false`. Disables the GNOME screen saver and screen lock on RHEL hosts. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
+- `linuxHostOsVersion`: Linux image SKU. Defaults to `9-LVM` (RHEL 9). The RHEL options (`8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires. `24_04-lts` deploys Canonical's Ubuntu 24.04 server image and adds the Ubuntu desktop, which xrdp sessions run as Ubuntu on Xorg.
+- `linuxHostDisableScreenLock`: `true` or `false`. Disables the GNOME screen saver and screen lock on the Linux hosts. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - `azureCloudName`: `AzurePublic`, `AzureUSGovernment`, or `AzureCustom`. See [Choosing The Target Azure Cloud](#choosing-the-target-azure-cloud).
 - `scriptSourceRoot`: root URL the Linux host and AVD host bootstrap scripts are downloaded from.
 - `domainName`: DNS suffix the broker appends to Linux host names when it connects over SSH. Leave empty to use the deployment's private DNS zone, `linuxbroker.internal`. If you set it, you are responsible for DNS records that resolve `<hostname>.<domainName>` from the API's virtual network.
@@ -237,8 +237,9 @@ If you prefer to be prompted locally, leave both values unset and run `azd up` f
 
 ## Linux Host Screen Lock
 
-RHEL hosts install the `Server with GUI` group, so they run a GNOME desktop. By default the
-bootstrap script disables the GNOME screen saver and screen lock on those hosts.
+RHEL hosts install the `Server with GUI` group and Ubuntu hosts install the Ubuntu desktop, so
+both run a GNOME desktop. By default the bootstrap script disables the GNOME screen saver and
+screen lock on those hosts.
 
 This is on by default because a locked GNOME greeter inside an xrdp or xpra session frequently
 cannot be unlocked after a reconnect. When that happens the user cannot get back into the
@@ -276,14 +277,11 @@ azd env set linuxHostDisableScreenLock false
 ```
 
 The bootstrap then seeds the profile with the lock screen left enabled. You can also set
-`LINUXBROKER_DISABLE_SCREEN_LOCK=false` in the environment if you run `Configure-RHEL8-Host.sh`
-or `Configure-RHEL9-Host.sh` by hand.
+`LINUXBROKER_DISABLE_SCREEN_LOCK=false` in the environment if you run `Configure-RHEL8-Host.sh`,
+`Configure-RHEL9-Host.sh` or `Configure-Ubuntu24_desktop-Host.sh` by hand.
 
 Because the values are part of the host settings profile, this posture can also be changed after
 deployment from **Host Settings** in the portal, without redeploying anything.
-
-This setting has no effect on the Ubuntu 24.04 image. That target uses the `server` SKU and does
-not install a desktop environment, so there is no GNOME screen lock to disable.
 
 ### Verifying on a host
 
@@ -368,7 +366,7 @@ Important deployment characteristics:
 - The API's `NFS_SHARE` setting points at the provisioned Azure Files share unless `nfsShare` is set. The storage account disables public network access and shared key access, and it allows non-HTTPS traffic because NFS does not use HTTPS; the private endpoint is the only path to it.
 - RHEL hosts use Generation 2 images so they can run with Trusted Launch.
 - The AVD host pool prefers RemoteApp and sets RDP properties that enable Microsoft Entra single sign-on to the Microsoft Entra joined session hosts.
-- RHEL hosts have the GNOME screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
+- Linux hosts have the GNOME screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - Key Vault stores `db-password` and `linux-host`.
 - The API app receives Key Vault Secrets User access so it can read those secrets at runtime.
 
@@ -561,6 +559,15 @@ This release changes which Linux distributions and desktops the deployment offer
 - **RHEL 9 is the default Linux host.** New azd environments, and templates deployed without a value, now use `linuxHostOsVersion=9-LVM` instead of `24_04-lts`, which deployed an Ubuntu server with no desktop. An existing environment keeps the value it stored; check it with `azd env get-value linuxHostOsVersion`.
 - **RHEL 7 is no longer offered.** `7-LVM` is removed from `linuxHostOsVersion`, along with `Configure-RHEL7-Host.sh`; RHEL 7 left maintenance on June 30, 2024. An azd environment that still stores `linuxHostOsVersion=7-LVM` fails template validation at the next `azd provision`, even with `deployLinuxHosts=false`, so set it to a supported value first. A VM's image cannot be changed in place, so for existing RHEL 7 hosts either also set `deployLinuxHosts=false`, which leaves them as they are, or replace them: drain them, delete the VMs in Azure and their records in the portal, and run `azd provision`. Existing RHEL 7 hosts keep working with the broker, and `patch-host.sh` and the host migration still support them.
 - **One release agent for every distribution.** The separate RHEL and Ubuntu copies of `release-session.sh` are merged into `linux_host/session_release_buffer/release-session.sh`, and the unused `xrdp-who-xnc.sh` is deleted. Ubuntu hosts now also unmount orphaned NFS homes, as RHEL hosts did. Run [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) from this release: a copy from an earlier release downloads the old paths, which no longer exist, and stops before it changes anything.
+- **xrdp starts sessions through `xrdp-startwm.sh`.** The bootstrap and the host migration install `/usr/local/bin/xrdp-startwm.sh` and make it the `DefaultWindowManager` in `/etc/xrdp/sesman.ini`. The first change keeps the original file as `sesman.ini.linuxbroker-orig`, the previous value is recorded in `/etc/linuxbroker/xrdp-startwm.conf`, and xrdp-sesman reloads its configuration without ending any session. The launcher starts the desktop named in `/etc/linuxbroker/desktop.conf`, which the bootstrap writes; without that file, as on a migrated host, it runs the distribution's own session script as before. It also adds `/etc/polkit-1/rules.d/45-linuxbroker-xrdp.rules`, so members of `tsusers` are not asked for an administrator's password when their session creates a color profile or refreshes the package lists. Every maintenance patch run installs it again in case an update replaced `sesman.ini`, and security updates on Ubuntu now keep configuration files that were changed locally, as all updates already did.
+- **Ubuntu hosts run the Ubuntu desktop.** `24_04-lts` still deploys Canonical's Ubuntu 24.04 server image, and the bootstrap now adds `ubuntu-desktop-minimal`, which xrdp sessions run as Ubuntu on Xorg, so the screen lock and host settings apply to Ubuntu hosts too. The first-login wizard, crash reporting and update notifications are left out, because broker users cannot act on them. Firefox, a snap on Ubuntu, is installed on its own, and a host that cannot reach the Snap Store finishes without it. The bootstrap no longer adds Microsoft's package repository or installs the Azure CLI, and broker users get `/bin/bash` rather than Ubuntu's default `/bin/sh`; existing users are switched at their next sign-in. The previous bootstrap's package install failed on Ubuntu 24.04, because Microsoft's repository has no `azure-cli` package for it, so existing Ubuntu hosts lack `nfs-common`, `jq` and `dconf-cli` and cannot mount NFS homes. Replace them as described for RHEL 7 above, or drain each one and run the new bootstrap on it. Restarting xrdp ends the connections to the host, so it must be drained:
+
+  ```powershell
+  $root = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
+  $api = azd env get-value apiUrl
+  $clientId = azd env get-value apiClientId
+  az vm run-command invoke -g <resource-group> -n <vm-name> --command-id RunShellScript --scripts "curl -fsSL -o /tmp/linuxbroker-bootstrap.sh $root/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh && LINUXBROKER_SCRIPT_SOURCE_ROOT=$root bash /tmp/linuxbroker-bootstrap.sh $api $clientId"
+  ```
 
 ## Manual Steps After `azd up`
 

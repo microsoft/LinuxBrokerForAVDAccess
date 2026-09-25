@@ -143,16 +143,25 @@ if [ "$PASSWORD_MODE" = "true" ]; then
     fi
 fi
 
-# Create local user if it doesn't exist
+# Create local user if it doesn't exist. Ubuntu's useradd would give the user /bin/sh, which
+# makes a poor shell in a desktop terminal.
 log "Check or create user: $USERID $USERNAME $LOCAL_USERHOME"
 if ! id "$USERNAME" &>/dev/null; then
     if [ "$PASSWORD_MODE" = "true" ]; then
-        run_checked "Failed to create user $USERNAME." useradd -d "$LOCAL_USERHOME" -u "$USERID" -U "$USERNAME" -M
+        run_checked "Failed to create user $USERNAME." useradd -d "$LOCAL_USERHOME" -u "$USERID" -U -s /bin/bash "$USERNAME" -M
     else
-        useradd -d "$LOCAL_USERHOME" -u "$USERID" -U "$USERNAME" -M
+        useradd -d "$LOCAL_USERHOME" -u "$USERID" -U -s /bin/bash "$USERNAME" -M
     fi
 else
     log "User $USERNAME already exists. Skipping useradd."
+    # Users that an earlier version created on Ubuntu have /bin/sh.
+    if [ "$PASSWORD_MODE" = "true" ] && [ "$(getent passwd "$USERNAME" | cut -d: -f7)" = "/bin/sh" ]; then
+        if usermod -s /bin/bash "$USERNAME"; then
+            log "Changed the login shell of $USERNAME from /bin/sh to /bin/bash."
+        else
+            log "Could not change the login shell of $USERNAME from /bin/sh to /bin/bash."
+        fi
+    fi
 fi
 
 if [ "$PASSWORD_MODE" = "true" ]; then

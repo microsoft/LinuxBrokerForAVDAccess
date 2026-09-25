@@ -7,7 +7,7 @@ SCRIPT="$ROOT_DIR/linux_host/patch-host.sh"
 STATE_DIR="/var/lib/linuxbroker-release-session"
 STATE_FILE="$STATE_DIR/patch-state"
 LOG_FILE="/var/log/linuxbroker-patch.log"
-MANAGER_SHIMS=(dnf yum apt-get unattended-upgrade needs-restarting systemd-run)
+MANAGER_SHIMS=(dnf yum apt-get unattended-upgrade needs-restarting systemd-run xrdp-startwm.sh)
 BOOT_SHIMS=(grubby dracut lsinitrd update-initramfs uname df)
 MADE_SYSTEMD_DIR=0
 HID_APT_GET=0
@@ -31,15 +31,18 @@ remove_shims() {
 }
 trap remove_shims EXIT
 
-# A package manager that records its arguments. It fails when FAKE_PM_FAIL is set, and waits
-# while FAKE_PM_HOLD names a file, so a test can see a run in progress. With FAKE_NEW_KERNEL
-# it installs that kernel into /boot, and its initramfs unless FAKE_NO_INITRAMFS is set, and
-# makes it the default as RHEL does.
+# A package manager that records its arguments, and the apt configuration it was given. It
+# fails when FAKE_PM_FAIL is set, and waits while FAKE_PM_HOLD names a file, so a test can
+# see a run in progress. With FAKE_NEW_KERNEL it installs that kernel into /boot, and its
+# initramfs unless FAKE_NO_INITRAMFS is set, and makes it the default as RHEL does.
 install_manager() {
     local name="$1"
     cat > "$SHIM_DIR/$name" <<'SHIM'
 #!/bin/bash
 echo "$(basename "$0") $*" >> "${FAKE_CALLS:-/dev/null}"
+if [ -n "${APT_CONFIG:-}" ]; then
+  echo "APT_CONFIG=$APT_CONFIG $(cat "$APT_CONFIG")" >> "${FAKE_CALLS:-/dev/null}"
+fi
 while [ -n "${FAKE_PM_HOLD:-}" ] && [ -e "$FAKE_PM_HOLD" ]; do sleep 0.2; done
 if [ -n "${FAKE_NEW_KERNEL:-}" ]; then
   printf 'kernel' > "/boot/vmlinuz-$FAKE_NEW_KERNEL"
@@ -135,7 +138,19 @@ setup_case() {
     export FAKE_CALLS="$WORK_DIR/calls.log"
     : > "$FAKE_CALLS"
     unset FAKE_PM_FAIL FAKE_PM_HOLD FAKE_NEW_KERNEL FAKE_NO_INITRAMFS FAKE_BOOT_FREE_MB FAKE_DRACUT_FAIL \
-        FAKE_BOOT_STYLE FAKE_GRUBBY_DEFAULT FAKE_RUNNING
+        FAKE_BOOT_STYLE FAKE_GRUBBY_DEFAULT FAKE_RUNNING FAKE_LAUNCHER_STATUS
+}
+
+# The session launcher, which records its arguments, reports as the real one does and exits
+# with FAKE_LAUNCHER_STATUS.
+install_launcher_shim() {
+    cat > "$SHIM_DIR/xrdp-startwm.sh" <<'SHIM'
+#!/bin/bash
+echo "xrdp-startwm.sh $*" >> "${FAKE_CALLS:-/dev/null}"
+echo "xrdp already starts sessions through /usr/local/bin/xrdp-startwm.sh."
+exit "${FAKE_LAUNCHER_STATUS:-0}"
+SHIM
+    chmod +x "$SHIM_DIR/xrdp-startwm.sh"
 }
 
 marker() {
@@ -267,6 +282,7 @@ test_apt_on_ubuntu() {
     install_manager apt-get
     install_manager unattended-upgrade
     local out
+    local config
 
     bash "$SCRIPT" start all run5-vm1-1 >/dev/null
     out=$(wait_for_run)
@@ -281,6 +297,13 @@ test_apt_on_ubuntu() {
     out=$(wait_for_run)
     assert_file_contains "$FAKE_CALLS" "unattended-upgrade -v"
     assert_eq "$(marker "$out" REBOOT_REQUIRED)" "yes"
+    # Only unattended-upgrade is given the configuration that keeps local conffiles, and the
+    # file is gone afterwards.
+    assert_eq "$(grep -c '^APT_CONFIG=' "$FAKE_CALLS")" "1" "apt configurations"
+    assert_file_contains "$FAKE_CALLS" 'Dpkg::Options { "--force-confdef"; "--force-confold"; };'
+    config=$(sed -n 's/^APT_CONFIG=\([^ ]*\) .*/\1/p' "$FAKE_CALLS")
+    [ -n "$config" ] || fail "unattended-upgrade was given no apt configuration"
+    assert_not_exists "$config"
 
     # Security updates alone need unattended-upgrades.
     rm -f "$SHIM_DIR/unattended-upgrade"
@@ -471,6 +494,37 @@ test_ubuntu_rebuilds_a_missing_initrd() {
     assert_eq "$(marker "$out" EXIT_CODE)" "5"
 }
 
+test_every_run_points_xrdp_at_the_launcher() {
+    setup_case
+    install_manager dnf
+    install_launcher_shim
+    local out
+
+    bash "$SCRIPT" start security run13-vm1-1 >/dev/null
+    out=$(wait_for_run)
+    assert_eq "$(marker "$out" STATE)" "succeeded"
+    assert_eq "$(tail -n 1 "$FAKE_CALLS")" "xrdp-startwm.sh --install" "after the upgrade"
+    assert_file_contains "$LOG_FILE" "xrdp-startwm.sh: xrdp already starts sessions through"
+    assert_file_contains "$LOG_FILE" "xrdp-startwm.sh: --install exited with 0."
+
+    # A launcher that fails does not fail the run.
+    export FAKE_LAUNCHER_STATUS=1
+    bash "$SCRIPT" start security run13-vm1-2 >/dev/null
+    out=$(wait_for_run)
+    assert_eq "$(marker "$out" STATE)" "succeeded"
+    assert_eq "$(marker "$out" EXIT_CODE)" "0"
+    assert_file_contains "$LOG_FILE" "xrdp-startwm.sh: --install exited with 1."
+
+    # It runs after a failed upgrade too, and the summary is still the upgrade's own error.
+    export FAKE_PM_FAIL=1
+    bash "$SCRIPT" start security run13-vm1-3 >/dev/null
+    out=$(wait_for_run)
+    assert_eq "$(marker "$out" STATE)" "failed"
+    assert_eq "$(marker "$out" EXIT_CODE)" "1"
+    assert_contains "$(marker "$out" SUMMARY)" "Failed to download metadata"
+    assert_eq "$(grep -c '^xrdp-startwm.sh --install$' "$FAKE_CALLS")" "3" "launcher runs"
+}
+
 test_arguments_are_validated
 test_status_without_a_run
 test_dnf_run_detaches_and_succeeds
@@ -488,5 +542,6 @@ test_a_full_boot_keeps_two_kernels
 test_a_missing_or_damaged_initramfs_is_rebuilt
 test_a_kernel_that_cannot_boot_fails_the_run
 test_ubuntu_rebuilds_a_missing_initrd
+test_every_run_points_xrdp_at_the_launcher
 
 echo "patch-host.sh tests passed"
