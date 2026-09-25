@@ -8,6 +8,8 @@ on:
       - 'task/**'
       - 'sql_queries/**'
       - 'linux_host/**'
+      - 'custom_script_extensions/**'
+      - 'deploy/bicep/**'
       - '.github/workflows/front-end-tests.yml'
   push:
     paths:
@@ -16,6 +18,8 @@ on:
       - 'task/**'
       - 'sql_queries/**'
       - 'linux_host/**'
+      - 'custom_script_extensions/**'
+      - 'deploy/bicep/**'
       - '.github/workflows/front-end-tests.yml'
 
 jobs:
@@ -190,8 +194,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Also lints the bootstrap scripts in custom_script_extensions.
       - name: Run the host script tests
         run: bash linux_host/tests/run.sh
+
+  bicep-build:
+    name: Bicep templates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Compile only. main.json is regenerated with the template changes, and its exact
+      # contents depend on the Bicep version, so it is not compared here.
+      - name: Build the Bicep templates
+        run: |
+          az bicep install
+          az bicep build --file deploy/bicep/main.bicep --stdout > /dev/null
 
   task-test:
     name: Scheduled task function
