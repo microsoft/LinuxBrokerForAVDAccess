@@ -290,22 +290,8 @@ else
     exit 1
 fi
 
-release_variant='RHEL'
-case "${ID:-}" in
-    ubuntu|debian)
-        release_variant='Ubuntu'
-        ;;
-    rhel|almalinux|centos|rocky)
-        release_variant='RHEL'
-        ;;
-    *)
-        if [[ "${ID_LIKE:-}" == *'debian'* ]]; then
-            release_variant='Ubuntu'
-        fi
-        ;;
-esac
-
-release_script_url="$script_source_root/linux_host/session_release_buffer/${release_variant}/release-session.sh"
+# One release agent serves every distribution.
+release_script_url="$script_source_root/linux_host/session_release_buffer/release-session.sh"
 xorg_script_url="$script_source_root/linux_host/session_release_buffer/xrdp-who-xorg.sh"
 watcher_script_url="$script_source_root/linux_host/session_release_buffer/logind-session-watcher.sh"
 create_user_script_url="$script_source_root/linux_host/create-user.sh"

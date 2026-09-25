@@ -48,7 +48,7 @@ microsoft_packages_url="https://packages.microsoft.com/config/rhel/8/packages-mi
 script_source_root="${LINUXBROKER_SCRIPT_SOURCE_ROOT:-https://raw.githubusercontent.com/$GH_OWNER/$GH_REPO/refs/heads/$GH_BRANCH}"
 script_source_root="${script_source_root%/}"
 
-release_session_url="$script_source_root/linux_host/session_release_buffer/RHEL/release-session.sh"
+release_session_url="$script_source_root/linux_host/session_release_buffer/release-session.sh"
 xrdp_who_xorg_url="$script_source_root/linux_host/session_release_buffer/xrdp-who-xorg.sh"
 logind_watcher_url="$script_source_root/linux_host/session_release_buffer/logind-session-watcher.sh"
 create_user_script_url="$script_source_root/linux_host/create-user.sh"

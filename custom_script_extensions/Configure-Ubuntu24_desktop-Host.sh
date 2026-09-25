@@ -24,7 +24,7 @@ LINUXBROKER_API_BASE_URL="${LINUXBROKER_API_BASE_URL%/}"
 script_source_root="${LINUXBROKER_SCRIPT_SOURCE_ROOT:-https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/main}"
 script_source_root="${script_source_root%/}"
 
-release_session_url="$script_source_root/linux_host/session_release_buffer/Ubuntu/release-session.sh"
+release_session_url="$script_source_root/linux_host/session_release_buffer/release-session.sh"
 xrdp_who_xorg_url="$script_source_root/linux_host/session_release_buffer/xrdp-who-xorg.sh"
 logind_watcher_url="$script_source_root/linux_host/session_release_buffer/logind-session-watcher.sh"
 create_user_script_url="$script_source_root/linux_host/create-user.sh"

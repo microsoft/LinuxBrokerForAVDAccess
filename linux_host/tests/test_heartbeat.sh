@@ -149,5 +149,4 @@ heartbeat_for_script() {
     assert_file_contains "$LOG_FILE" "accepting heartbeats again"
 }
 
-heartbeat_for_script "$ROOT_DIR/linux_host/session_release_buffer/Ubuntu/release-session.sh" ubuntu
-heartbeat_for_script "$ROOT_DIR/linux_host/session_release_buffer/RHEL/release-session.sh" rhel
+heartbeat_for_script "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh" agent

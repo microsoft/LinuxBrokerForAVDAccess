@@ -147,7 +147,44 @@ INFO
     assert_file_exists "$WORK_DIR/agg-heartbeat-$label"
 }
 
-run_for_script "$ROOT_DIR/linux_host/session_release_buffer/Ubuntu/release-session.sh" ubuntu
-run_for_script "$ROOT_DIR/linux_host/session_release_buffer/RHEL/release-session.sh" rhel
-aggregation_for_script "$ROOT_DIR/linux_host/session_release_buffer/Ubuntu/release-session.sh" ubuntu
-aggregation_for_script "$ROOT_DIR/linux_host/session_release_buffer/RHEL/release-session.sh" rhel
+run_for_script "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh" agent
+aggregation_for_script "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh" agent
+
+# The agent runs on every distribution. jq is put back when it is missing, with the
+# distribution's package manager.
+jq_install_for() {
+    local manager="$1"
+
+    reset_work
+    install_basic_shims
+    # shellcheck source=/dev/null
+    . "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh"
+    LOG_FILE="$WORK_DIR/jq-$manager.log"
+    export FAKE_JQ_CALLS="$WORK_DIR/jq-calls-$manager"
+    : > "$FAKE_JQ_CALLS"
+
+    command() {
+        if [ "$1" = "-v" ]; then
+            case "$2" in
+                jq) [ -e "$WORK_DIR/jq-installed" ] ;;
+                "$manager") return 0 ;;
+                apt-get|dnf|yum) return 1 ;;
+                *) builtin command "$@" ;;
+            esac
+            return
+        fi
+        builtin command "$@"
+    }
+    apt-get() { echo "apt-get $*" >> "$FAKE_JQ_CALLS"; [[ " $* " == *" install "* ]] && : > "$WORK_DIR/jq-installed"; return 0; }
+    dnf() { echo "dnf $*" >> "$FAKE_JQ_CALLS"; : > "$WORK_DIR/jq-installed"; return 0; }
+    yum() { echo "yum $*" >> "$FAKE_JQ_CALLS"; : > "$WORK_DIR/jq-installed"; return 0; }
+
+    ensure_jq_installed
+    assert_file_contains "$FAKE_JQ_CALLS" "$manager"
+    assert_file_contains "$FAKE_JQ_CALLS" "install -y jq"
+    unset -f command apt-get dnf yum
+}
+
+jq_install_for apt-get
+jq_install_for dnf
+jq_install_for yum

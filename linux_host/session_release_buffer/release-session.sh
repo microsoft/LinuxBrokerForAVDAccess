@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Support for RHEL systems
+# The Linux Broker session release agent. The same script runs on every supported
+# distribution, RHEL-like and Ubuntu.
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -81,6 +82,33 @@ release_reconcile_lock() {
         eval "exec ${LOCK_FD}>&-"
         LOCK_FD=""
     fi
+}
+
+# The bootstrap and the host migration install jq. This puts it back on a host where it was
+# removed, since nothing else in a run works without it.
+ensure_jq_installed() {
+    if command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log "jq not found. Installing jq..."
+
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y jq >/dev/null 2>&1 \
+            || { apt-get -o DPkg::Lock::Timeout=120 update >/dev/null 2>&1 \
+                && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y jq >/dev/null 2>&1; }
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y jq >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y jq >/dev/null 2>&1
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        log "ERROR: Failed to install jq."
+        exit 1
+    fi
+
+    log "jq installed successfully."
 }
 
 resolve_xrdp_users_info_script() {
@@ -1008,6 +1036,7 @@ main() {
     declare -A user_start_times=()
 
     ensure_state_files
+    ensure_jq_installed
     load_settings
     refresh_settings
 
