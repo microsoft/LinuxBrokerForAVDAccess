@@ -1,8 +1,10 @@
 .git
 .github
-.azure
-.env
-local.settings.json
+# azd keeps each environment's settings, secrets included, under deploy/.azure. As with the
+# patterns below, only the `**/` form excludes them anywhere in the build context.
+**/.azure
+**/.env
+**/local.settings.json
 artifacts
 example_code
 priv-folder
