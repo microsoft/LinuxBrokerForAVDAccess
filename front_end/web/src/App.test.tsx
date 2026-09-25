@@ -7,7 +7,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App } from './App';
 import { ToastProvider } from './components/ui/Toast';
 import { setCsrfToken } from './lib/api';
-import type { SessionInfo } from './types/broker';
+import type { DashboardStats, SessionInfo } from './types/broker';
 
 /*
  * Integration cover for the whole client: session bootstrap, the app shell, the
@@ -66,6 +66,65 @@ const VMS = [
   },
 ];
 
+/** The BFF's host list page for a request, filtered as the API would. */
+function vmPage(url: string) {
+  const params = new URL(url, 'http://portal.test').searchParams;
+  const status = params.get('status') ?? 'all';
+  const q = (params.get('q') ?? '').toLowerCase();
+  const all = VMS.map((vm) => ({
+    ...vm,
+    Ready: vm.VmStatus === 'Available',
+    DrainRequested: false,
+    OsName: 'Ubuntu',
+    OsVersion: '24.04',
+    AgentVersion: '1.1.0',
+    AgentOutdated: false,
+    XrdpActive: true,
+    SessionCount: vm.Username ? 1 : 0,
+    LastHeartbeatUtc: '2026-09-24T12:00:00.000Z',
+    HeartbeatAgeSeconds: 30,
+    HeartbeatFresh: true,
+    SessionState: vm.Username ? 'active' : null,
+    SettingsVersion: 3,
+    CurrentSettingsVersion: 3,
+    SettingsCurrent: true,
+  }));
+  const tests: Record<string, (vm: (typeof all)[number]) => boolean> = {
+    all: () => true,
+    ready: (vm) => vm.Ready,
+    'in-use': (vm) => vm.VmStatus === 'CheckedOut',
+  };
+  const items = all.filter((vm) => (tests[status] ?? (() => false))(vm) && (!q || vm.Hostname.includes(q)));
+  if (params.get('sort') === 'hostname' && params.get('dir') === 'desc') items.reverse();
+  return {
+    items,
+    page: Number(params.get('page') ?? 1),
+    per_page: Number(params.get('per_page') ?? 50),
+    total: items.length,
+    total_pages: items.length ? 1 : 0,
+    counts: { all: 2, ready: 1, 'in-use': 1, released: 0, maintenance: 0, draining: 0, unreachable: 0, off: 0, cleanup: 0 },
+    q: q || null,
+    status,
+    sort: params.get('sort') ?? 'hostname',
+    dir: params.get('dir') ?? 'asc',
+    ...(legacyHostList ? { legacy: true } : {}),
+  };
+}
+
+const IMPORT_CANDIDATES = {
+  Candidates: [
+    { Hostname: 'linux-host-07', Fqdn: 'linux-host-07.contoso.local', IPAddress: '10.0.0.17', PowerState: 'On', Importable: true, Problem: null },
+    {
+      Hostname: 'linux-host-08', Fqdn: 'linux-host-08.contoso.local', IPAddress: null, PowerState: 'Off', Importable: false,
+      Problem: 'linux-host-08.contoso.local does not resolve. Add it to the DNS zone the hosts register in, then refresh.',
+    },
+  ],
+  TaggedCount: 4,
+  RegisteredCount: 2,
+  Tag: 'broker-role=linux-host',
+  ResourceGroup: 'rg-linux-hosts',
+  DomainName: 'contoso.local',
+};
 const RULES = [
   {
     RuleID: 1, MinVMs: 2, MaxVMs: 20, ScaleUpRatio: 80, ScaleUpIncrement: 2,
@@ -138,6 +197,163 @@ const SETTINGS_HISTORY = [
   { ...HOST_SETTINGS.settings, SettingsVersion: 2, GracePeriodSeconds: 600, UpdatedBy: null, ValidFromUtc: '2026-08-01T10:00:00Z', ValidToUtc: '2026-09-01T10:00:00Z', IsCurrent: false },
 ];
 
+const SESSION_BASE = {
+  AvdHost: 'avd-01', VmStatus: 'CheckedOut', PowerState: 'On', NetworkStatus: 'Reachable', DrainRequested: false,
+  HasAssignment: true, CleanupPending: false, ReportedState: null, SessionStartUtc: null, DisconnectedForSeconds: null,
+  IdleSeconds: null, AssignedForSeconds: 3600, LastCheckoutAgeSeconds: 3600, GraceRemainingSeconds: null,
+  GracePeriodSeconds: 1200, HeartbeatAgeSeconds: 20, HeartbeatFresh: true,
+};
+
+const SESSIONS = {
+  Sessions: [
+    { ...SESSION_BASE, Hostname: 'linux-host-02', VMID: 2, Username: 'alice', State: 'active', ReportedState: 'active', IdleSeconds: 720 },
+    { ...SESSION_BASE, Hostname: 'linux-host-04', VMID: 4, Username: 'bob', State: 'released', VmStatus: 'Released', GraceRemainingSeconds: 600 },
+    { ...SESSION_BASE, Hostname: 'linux-host-01', VMID: 1, Username: 'carol', State: 'not-connected', LastCheckoutAgeSeconds: 5400 },
+  ],
+  Summary: {
+    Total: 3, active: 1, disconnected: 0, released: 1, connecting: 0, 'not-connected': 1,
+    'cleanup-pending': 0, unmanaged: 0, unknown: 0,
+  },
+};
+
+let userDetails: Record<string, unknown> = {};
+
+const SCHEDULE_BASE = {
+  Enabled: true, DaysOfWeek: 31, Days: ['mon', 'tue', 'wed', 'thu', 'fri'], CrossesMidnight: false, MinVMs: 4, MaxVMs: 20,
+  ScaleUpRatio: 70, ScaleUpIncrement: 2, ScaleDownRatio: 30, ScaleDownIncrement: 1, StopMode: null,
+  UpdatedBy: 'op@contoso.com', UpdatedAtUtc: '2026-09-20T10:00:00Z',
+};
+
+const SCALING_POLICY = {
+  TimeZone: 'UTC', UpdatedBy: null, UpdatedAtUtc: '2026-09-01T10:00:00Z', NowUtc: '2026-09-24T10:15:00Z',
+  LocalTime: '2026-09-24T10:15:00',
+  ActivePhase: { Source: 'Schedule', ScheduleID: 1, Name: 'Business hours', MinVMs: 4, MaxVMs: 20, ScaleUpRatio: 70, ScaleUpIncrement: 2, ScaleDownRatio: 30, ScaleDownIncrement: 1, StopMode: 'PowerOff' },
+  DefaultRule: RULES[0],
+  Schedules: [{ ...SCHEDULE_BASE, ScheduleID: 1, Name: 'Business hours', StartTime: '08:00', EndTime: '18:00' }],
+  NextChange: { InMinutes: 465, AtLocal: 'Thursday 18:00', PhaseName: 'Default rule', ScheduleID: null },
+  LastRun: null,
+};
+
+let scalingPolicy: typeof SCALING_POLICY | { Available: false } = SCALING_POLICY;
+
+const PREVIEW = {
+  Action: 'PowerOn', Summary: 'Start 2 hosts (linux-host-05, linux-host-06).', Reason: 'Serviceable hosts are below the minimum.',
+  RequestCount: 2, Candidates: ['linux-host-05', 'linux-host-06'],
+  Phase: SCALING_POLICY.ActivePhase, Counts: { PoweredOn: 7, Serviceable: 2, InUse: 1, Draining: 0, Utilization: 50 },
+  TimeZone: 'UTC', LocalTime: '2026-09-24T10:15:00', AtUtc: '2026-09-24T10:15:00Z',
+};
+
+const PROPOSED_PREVIEW = { ...PREVIEW, Action: 'None', Summary: 'No change.', Reason: 'No scaling threshold was crossed.', Candidates: [] };
+
+const TIME_ZONES = [
+  { Name: 'UTC', CurrentUtcOffset: '+00:00', IsCurrentlyDst: false },
+  { Name: 'Eastern Standard Time', CurrentUtcOffset: '-04:00', IsCurrentlyDst: true },
+];
+
+function freshUserDetails() {
+  return {
+    Username: 'alice', Uid: 2001, FirstProvisionedDate: null, ProfileReset: null,
+    Assignments: [{ VMID: 2, Hostname: 'linux-host-02', VmStatus: 'CheckedOut', PowerState: 'On', NetworkStatus: 'Reachable', AvdHost: 'avd-01', DrainRequested: false, CleanupPending: false, AssignedForSeconds: 3600, LastCheckoutAgeSeconds: 3600, ReleasedForSeconds: null }],
+    Sessions: [SESSIONS.Sessions[0]],
+    HostHistory: [{ VMID: 2, Hostname: 'linux-host-02', FirstSeenUtc: '2026-09-20T10:00:00Z', LastSeenUtc: '2026-09-24T12:00:00Z', Assignments: 3, IsCurrent: true }],
+    RecentActivity: [
+      { AuditId: 9, OccurredAtUtc: '2026-09-24T12:30:00.000Z', ActorOid: 'oid-op', ActorName: 'op@contoso.com', ActorType: 'user', Action: 'session.message', TargetType: 'user', TargetId: 'alice', Outcome: 'success', Detail: null, CorrelationId: null },
+    ],
+  };
+}
+
+function utilizationFixture(hours: 24 | 168) {
+  const bucket = hours === 24 ? 15 : 60;
+  const count = (hours * 60) / bucket;
+  const end = Date.UTC(2026, 6, 13, 12, 0, 0);
+  const Series = Array.from({ length: count }, (_, index) => {
+    const idle = index < 4;
+    return {
+      BucketStartUtc: new Date(end - (count - index) * bucket * 60_000).toISOString().replace('.000Z', 'Z'),
+      Runs: idle ? 0 : 3,
+      PoweredOn: idle ? null : 4,
+      InUse: idle ? null : 2 + (index % 2),
+      Serviceable: idle ? null : 4,
+      PeakInUse: idle ? null : 3,
+      MinVMs: idle ? null : 2,
+      MaxVMs: idle ? null : 6,
+      Checkouts: index % 10 === 0 ? 2 : 0,
+      Denied: index === 50 ? 2 : 0,
+      Failed: 0,
+    };
+  });
+  return {
+    Available: true, Hours: hours, BucketMinutes: bucket, Series,
+    Checkouts: {
+      Total: 40, Assigned: 22, Reused: 16, NoneAvailable: 2, ProvisionFailed: 0, Errors: 0, P50Ms: 2100, P95Ms: 8400,
+      DeniedLastHour: 0, DeniedPercent: 5, LastDeniedUtc: '2026-07-13T09:30:00Z', HostStarts: 3, StartP50Seconds: 95,
+      StartP95Seconds: 180,
+    },
+  };
+}
+
+function maintenanceRun(overrides: Record<string, unknown> = {}) {
+  return {
+    RunID: 7, Name: 'October patching', Status: 'Active', EndStatus: null, PatchMode: 'Security', BatchSize: 1,
+    MinReadyOverride: null, SignOutDeadlineMinutes: 60, WarningMinutes: 15, WarningMessage: null, IncludePoweredOff: false,
+    MaxFailures: 1, CanaryCount: 0, CanaryReached: false, SurgeRequested: true,
+    WaitReason: 'Waiting for a spare ready host: taking linux-host-03 now would leave fewer than 2 ready. Scaling is keeping one more host on.',
+    StatusReason: null, CreatedBy: 'op@contoso.com', UpdatedBy: null, CreatedAtUtc: '2026-09-24T22:00:00.000Z',
+    UpdatedAtUtc: null, EndedAtUtc: null, LastTickAtUtc: '2026-09-24T22:10:00.000Z', LastTickAgeSeconds: 40,
+    Counts: { Total: 3, Pending: 1, InProgress: 1, Succeeded: 1, Failed: 0, Skipped: 0, Cancelled: 0 },
+    MinReadyInForce: 2, PhaseMinVMs: 2, ReadyNow: 2,
+    ...overrides,
+  };
+}
+
+function maintenanceHost(overrides: Record<string, unknown>) {
+  return {
+    RunHostID: 1, VMID: 1, Hostname: 'linux-host-01', Position: 1, State: 'Pending', Attempts: 0, Detail: null,
+    RebootRequired: null, AdmittedAtUtc: null, WarningSentAtUtc: null, SignOutRequestedAtUtc: null, PatchStartedAtUtc: null,
+    PatchFinishedAtUtc: null, RestartRequestedAtUtc: null, VerifiedAtUtc: null, CompletedAtUtc: null, StepAgeSeconds: null,
+    PowerState: 'On', NetworkStatus: 'Reachable', VmStatus: 'Maintenance', Username: null, AgentVersion: '1.1.0',
+    HeartbeatAgeSeconds: 20, WasDrained: false, WasMaintenance: false, WasPoweredOff: false, Registered: true,
+    DrainRequested: false, XrdpActive: true, AgentCanPatch: true,
+    ...overrides,
+  };
+}
+
+const MAINTENANCE_DETAILS = {
+  Run: maintenanceRun(),
+  Hosts: [
+    maintenanceHost({ State: 'Succeeded', Detail: 'Patched and restarted.', CompletedAtUtc: '2026-09-24T22:08:00.000Z' }),
+    maintenanceHost({ RunHostID: 2, VMID: 2, Hostname: 'linux-host-02', Position: 2, State: 'Draining', VmStatus: 'CheckedOut',
+                      Detail: 'Waiting for alice to sign out.', Username: 'alice', StepAgeSeconds: 300 }),
+    maintenanceHost({ RunHostID: 3, VMID: 3, Hostname: 'linux-host-03', Position: 3, State: 'Pending', VmStatus: 'Available',
+                      AgentVersion: '1.0.0', AgentCanPatch: false }),
+  ],
+};
+
+function maintenancePage(active: ReturnType<typeof maintenanceRun> | null = maintenanceRun()) {
+  return {
+    Available: true,
+    Active: active,
+    Runs: [
+      ...(active ? [active] : []),
+      maintenanceRun({ RunID: 6, Name: null, Status: 'Completed', EndStatus: 'Completed', SurgeRequested: false, WaitReason: null,
+                       EndedAtUtc: '2026-09-20T23:00:00.000Z', Counts: { Total: 4, Pending: 0, InProgress: 0, Succeeded: 4, Failed: 0, Skipped: 0, Cancelled: 0 } }),
+    ],
+  };
+}
+
+const NO_TRENDS = { Available: false, Hours: 24 };
+const NOTHING_NEEDS_ATTENTION = { Available: true, Items: [], Summary: { Total: 0 }, Incomplete: false };
+const ATTENTION = {
+  Available: true,
+  Incomplete: false,
+  Summary: { Total: 3, Critical: 1, Warning: 2, Info: 0 },
+  Items: [
+    { Kind: 'no-ready-hosts', Severity: 'critical' },
+    { Kind: 'unreachable', Severity: 'warning', VMID: 2, Hostname: 'linux-host-02', AgeSeconds: 1500, Count: null },
+    { Kind: 'health', Severity: 'warning', Flag: 'xrdp-down', Count: 1, Hostnames: ['linux-host-01'] },
+  ],
+};
+
 function jsonResponse(body: unknown, status = 200) {
   return {
     ok: status < 400,
@@ -147,28 +363,89 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 let session: typeof SESSION = SESSION;
-let dashboard: typeof DASHBOARD & { fleetHealth?: unknown } = DASHBOARD;
+let dashboard: Omit<typeof DASHBOARD, 'stats'> & { stats: DashboardStats; fleetHealth?: unknown } = DASHBOARD;
+let trends: 'off' | 'on' = 'off';
+let attention: unknown = NOTHING_NEEDS_ATTENTION;
+let maintenance: unknown = maintenancePage();
+let legacyHostList = false;
 const requests: string[] = [];
 
 function stubFetch() {
-  return vi.fn(async (input: RequestInfo | URL) => {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const method = init?.method ?? 'GET';
     requests.push(url);
 
-    if (url.startsWith('/api/ui/session')) return jsonResponse(session);
+    if (url === '/api/ui/session' || url.startsWith('/api/ui/session?')) return jsonResponse(session);
     if (url.startsWith('/api/ui/dashboard')) return jsonResponse(dashboard);
+    if (url.startsWith('/api/ui/metrics/utilization')) {
+      return jsonResponse(trends === 'off' ? NO_TRENDS : utilizationFixture(url.includes('hours=168') ? 168 : 24));
+    }
+    if (url.startsWith('/api/ui/metrics/attention')) return jsonResponse(attention);
+    if (url === '/api/ui/maintenance/runs' && method === 'POST') {
+      return jsonResponse({ RunID: 8, HostCount: 1, message: 'Maintenance run 8 started for 1 host.' }, 201);
+    }
+    const runAction = /^\/api\/ui\/maintenance\/runs\/(\d+)\/(pause|resume|cancel)$/.exec(url);
+    if (runAction) {
+      return jsonResponse({ Run: maintenanceRun(), Result: 'Updated', message: `Done: ${runAction[2]} run ${runAction[1]}.` });
+    }
+    if (/^\/api\/ui\/maintenance\/runs\/\d+$/.test(url)) return jsonResponse(MAINTENANCE_DETAILS);
+    if (url.startsWith('/api/ui/maintenance/runs')) return jsonResponse(maintenance);
     if (url.startsWith('/api/ui/vms/history')) return jsonResponse(EMPTY_PAGE);
     const action = /^\/api\/ui\/vms\/(\d+)\/(start|stop|restart|drain|undrain)$/.exec(url);
     if (action) return jsonResponse({ VMID: Number(action[1]), Hostname: 'linux-host-02', message: `${action[2]} requested.` });
+    if (url === '/api/ui/vms/import/candidates') return jsonResponse(IMPORT_CANDIDATES);
+    if (url === '/api/ui/vms/import' && method === 'POST') {
+      const names = JSON.parse(String(init?.body)).hostnames as string[];
+      return jsonResponse({
+        Results: names.map((name) => ({ Hostname: name, Result: 'Imported', VMID: 7, IPAddress: '10.0.0.17', PowerState: 'On', message: 'Imported. It is offered to users once the probe reaches it.' })),
+        Imported: names.length,
+        message: `Imported ${names.length} of ${names.length} host${names.length === 1 ? '' : 's'}. Each is offered to users once the reachability probe reaches it.`,
+      });
+    }
     if (url.startsWith('/api/ui/vms/')) return jsonResponse(VMS[0]);
+    if (url.startsWith('/api/ui/vms?')) return jsonResponse(vmPage(url));
     if (url.startsWith('/api/ui/vms')) return jsonResponse(VMS);
     if (url.startsWith('/api/ui/scaling/rules/history')) return jsonResponse(EMPTY_PAGE);
     if (url.startsWith('/api/ui/scaling/log')) return jsonResponse(EMPTY_PAGE);
     if (url.startsWith('/api/ui/scaling/rules')) return jsonResponse(RULES);
+    if (url.startsWith('/api/ui/scaling/policy')) {
+      return method === 'POST'
+        ? jsonResponse({ TimeZone: 'Eastern Standard Time', message: 'Schedules are now read in Eastern Standard Time.' })
+        : jsonResponse(scalingPolicy);
+    }
+    if (url.startsWith('/api/ui/scaling/preview')) return jsonResponse(method === 'POST' ? PROPOSED_PREVIEW : PREVIEW);
+    if (url.startsWith('/api/ui/scaling/timezones')) return jsonResponse(TIME_ZONES);
+    if (url.startsWith('/api/ui/scaling/schedules')) {
+      return jsonResponse({ ScheduleID: 5, message: "Saved 'Evening'. It applies from the next scaling run." });
+    }
     if (url.startsWith('/api/ui/hosts/health')) return jsonResponse(FLEET_HEALTH);
+    if (url === '/api/ui/hosts/settings/apply') {
+      return jsonResponse({ settingsVersion: 3, targetCount: 1, succeededCount: 1, unreachable: [], message: 'Applied settings v3 to 1 host.', tone: 'success' });
+    }
     if (url.startsWith('/api/ui/hosts/settings/history')) return jsonResponse(SETTINGS_HISTORY);
     if (url.startsWith('/api/ui/hosts/settings')) return jsonResponse(HOST_SETTINGS);
     if (url.startsWith('/api/ui/audit')) return jsonResponse(AUDIT_PAGE);
+    if (/^\/api\/ui\/sessions\/[^/]+\/[^/]+\/signout$/.test(url)) {
+      return jsonResponse({ Result: 'SignedOut', Released: true, Returned: false, message: 'Signed alice out of linux-host-02.' });
+    }
+    if (/^\/api\/ui\/sessions\/[^/]+\/[^/]+\/message$/.test(url)) {
+      return jsonResponse({ Delivered: 1, Sessions: 1, message: 'Sent to alice on linux-host-02.' });
+    }
+    if (url === '/api/ui/sessions/broadcast') {
+      return jsonResponse({ TargetCount: 2, Delivered: 2, Results: [{ Hostname: 'linux-host-02', Result: 'Delivered', Sessions: 1, Delivered: 1 }, { Hostname: 'linux-host-04', Result: 'Delivered', Sessions: 1, Delivered: 1 }], NotAttempted: [], UnknownHostnames: [], SkippedHostnames: [], message: 'Shown in 2 session(s) on 2 of 2 host(s).' });
+    }
+    if (url.startsWith('/api/ui/sessions')) return jsonResponse(SESSIONS);
+    if (/^\/api\/ui\/users\/[^/]+\/reset-profile/.test(url)) {
+      return jsonResponse({ Username: 'alice', message: 'alice gets a fresh profile at their next sign-in.' });
+    }
+    if (url.startsWith('/api/ui/users/')) return jsonResponse(userDetails);
+    if (url.startsWith('/api/ui/users')) {
+      return jsonResponse({
+        Users: [{ Username: 'alice', Uid: 2001, ProfileResetPending: false, CurrentVMID: 2, CurrentHostname: 'linux-host-02', CurrentVmStatus: 'CheckedOut' }],
+        Query: 'al',
+      });
+    }
 
     return jsonResponse({ error: 'Unexpected request' }, 404);
   });
@@ -193,6 +470,13 @@ function renderApp(route: string) {
 beforeEach(() => {
   session = SESSION;
   dashboard = DASHBOARD;
+  trends = 'off';
+  attention = NOTHING_NEEDS_ATTENTION;
+  maintenance = maintenancePage();
+  legacyHostList = false;
+  window.localStorage.removeItem('lb-host-columns');
+  userDetails = freshUserDetails();
+  scalingPolicy = SCALING_POLICY;
   requests.length = 0;
   setCsrfToken(null);
   vi.stubGlobal('fetch', stubFetch());
@@ -260,7 +544,7 @@ describe('App', () => {
     expect(
       await screen.findByRole('heading', { name: 'Linux Broker Management Portal', level: 1 }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'Virtual machines' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Hosts' })).not.toBeInTheDocument();
   });
 
   it('reports a backend it cannot reach, and can retry', async () => {
@@ -283,9 +567,10 @@ describe('App', () => {
   it.each([
     ['/', 'Pool overview'],
     ['/profile', 'Profile'],
-    ['/vms', 'Virtual machines'],
+    ['/vms', 'Hosts'],
     ['/vms/add', 'Add virtual machine'],
-    ['/vms/checkout', 'Checkout a virtual machine'],
+    ['/vms/checkout', 'Test brokering'],
+    ['/vms/import', 'Import from Azure'],
     ['/vms/history', 'Virtual machine history'],
     ['/vms/1', 'linux-host-01'],
     ['/vms/1/update', 'Update linux-host-01'],
@@ -296,12 +581,62 @@ describe('App', () => {
     ['/settings/hosts', 'Linux host settings'],
     ['/vms/health', 'Fleet health'],
     ['/audit', 'Audit log'],
+    ['/sessions', 'Sessions'],
+    ['/users/alice', 'alice'],
+    ['/scaling', 'Scaling policy'],
+    ['/scaling/schedules/new', 'Add a scaling window'],
+    ['/scaling/schedules/1', 'Edit Business hours'],
+    ['/vms/maintenance', 'Rolling maintenance'],
+    ['/vms/maintenance/7', 'October patching (run 7)'],
   ])('mounts %s', async (route, heading) => {
     renderApp(route);
     expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
   });
 
 
+
+  it('shows the pages of the current section as tabs', async () => {
+    renderApp('/vms/maintenance/7');
+    const tabs = await screen.findByRole('navigation', { name: 'Hosts pages' });
+    expect(within(tabs).getByRole('link', { name: 'Maintenance' })).toHaveAttribute('aria-current', 'page');
+    expect(within(tabs).getByRole('link', { name: 'All hosts' })).not.toHaveAttribute('aria-current');
+    expect(screen.getByRole('link', { name: 'Hosts' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('moves between sections and searches from the keyboard', async () => {
+    renderApp('/vms');
+    await screen.findByRole('heading', { name: 'Hosts', level: 1 });
+
+    await userEvent.keyboard('/');
+    expect(screen.getByRole('searchbox')).toHaveFocus();
+    await userEvent.keyboard('g');
+    expect(screen.getByRole('searchbox')).toHaveValue('g');
+
+    (document.activeElement as HTMLElement).blur();
+    await userEvent.keyboard('gs');
+    expect(await screen.findByRole('heading', { name: 'Sessions', level: 1 })).toBeInTheDocument();
+
+    await userEvent.keyboard('?');
+    const help = screen.getByRole('dialog', { name: 'Keyboard shortcuts' });
+    expect(within(help).getByText('Go to Maintenance')).toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('lets shortcuts and compact tables be turned off and on in the profile', async () => {
+    renderApp('/profile');
+    const shortcuts = await screen.findByRole('switch', { name: /Keyboard shortcuts/ });
+    expect(shortcuts).toBeChecked();
+    await userEvent.click(shortcuts);
+    expect(window.localStorage.getItem('lb-shortcuts')).toBe('off');
+
+    await userEvent.keyboard('?');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('switch', { name: /Compact tables/ }));
+    expect(document.documentElement).toHaveAttribute('data-density', 'compact');
+    expect(window.localStorage.getItem('lb-density')).toBe('compact');
+  });
 
   it('shows no-access page for authenticated users without read permission', async () => {
     session = { ...SESSION, roles: [], permissions: { read: false, operate: false, admin: false } };
@@ -331,17 +666,20 @@ describe('App', () => {
   it('gates VM actions for reader and operator roles', async () => {
     session = { ...SESSION, roles: ['Reader'], permissions: { read: true, operate: false, admin: false } };
     const { unmount } = renderApp('/vms');
-    await screen.findByRole('heading', { name: 'Virtual machines' });
-    expect(screen.queryByRole('button', { name: 'Release linux-host-02' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Delete linux-host-01' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Add VM' })).not.toBeInTheDocument();
+    await screen.findByRole('link', { name: 'linux-host-02' });
+    expect(screen.queryByRole('button', { name: /Host actions for/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /^Select/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Tools' })).not.toBeInTheDocument();
     unmount();
 
     session = { ...SESSION, roles: ['Operator'], permissions: { read: true, operate: true, admin: false } };
     renderApp('/vms');
-    expect(await screen.findByRole('button', { name: 'Release linux-host-02' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Delete linux-host-01' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Add VM' })).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: 'Host actions for linux-host-02' }));
+    expect(screen.getByRole('menuitem', { name: 'Release' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Delete' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Update attributes' })).not.toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('button', { name: 'Tools' })).not.toBeInTheDocument();
   });
 
   it('renders the not-found state for an unknown client route', async () => {
@@ -352,22 +690,26 @@ describe('App', () => {
   it('lists VMs with lifecycle-appropriate row actions', async () => {
     renderApp('/vms');
     // Wait for the rows, not just the page header, which renders while loading.
-    await screen.findByRole('button', { name: 'Delete linux-host-01' });
+    await userEvent.click(await screen.findByRole('button', { name: 'Host actions for linux-host-01' }));
 
     // linux-host-01 is Available, so neither release nor return applies.
-    expect(screen.queryByRole('button', { name: 'Release linux-host-01' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Return linux-host-01' })).not.toBeInTheDocument();
+    const free = screen.getAllByRole('menuitem').map((item) => item.textContent);
+    expect(free).not.toContain('Release');
+    expect(free).not.toContain('Return to the pool');
+    expect(free).toEqual(expect.arrayContaining(['Update attributes', 'Delete']));
+    await userEvent.keyboard('{Escape}');
 
     // linux-host-02 is CheckedOut, so both do.
-    expect(screen.getByRole('button', { name: 'Release linux-host-02' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Return linux-host-02' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Host actions for linux-host-02' }));
+    expect(screen.getByRole('menuitem', { name: 'Release' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Return to the pool' })).toBeInTheDocument();
   });
 
   it('confirms before sending a destructive action', async () => {
     renderApp('/vms');
-    const deleteButton = await screen.findByRole('button', { name: 'Delete linux-host-01' });
+    await userEvent.click(await screen.findByRole('button', { name: 'Host actions for linux-host-01' }));
 
-    await userEvent.click(deleteButton);
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
 
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
     expect(screen.getByText(/Permanently delete linux-host-01/)).toBeInTheDocument();
@@ -381,7 +723,8 @@ describe('App', () => {
 
   it('sends the CSRF header on a confirmed mutation', async () => {
     renderApp('/vms');
-    await userEvent.click(await screen.findByRole('button', { name: 'Delete linux-host-01' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Host actions for linux-host-01' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
 
     const dialog = await screen.findByRole('dialog');
     await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
@@ -397,14 +740,14 @@ describe('App', () => {
 
   it('surfaces a BFF error message to the operator', async () => {
     renderApp('/vms');
-    const deleteButton = await screen.findByRole('button', { name: 'Delete linux-host-01' });
+    await userEvent.click(await screen.findByRole('button', { name: 'Host actions for linux-host-01' }));
 
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => jsonResponse({ error: 'Unable to delete VM. Please try again later.' }, 502)),
     );
 
-    await userEvent.click(deleteButton);
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
     const dialog = await screen.findByRole('dialog');
     await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
@@ -442,7 +785,7 @@ describe('App', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Host actions for linux-host-02' }));
     const inUse = screen.getAllByRole('menuitem').map((item) => item.textContent);
-    expect(inUse).toEqual(['Drain']);
+    expect(inUse).toEqual(['Drain', 'Release', 'Return to the pool']);
     await userEvent.keyboard('{Escape}');
 
     await userEvent.click(screen.getByRole('button', { name: 'Host actions for linux-host-01' }));
@@ -465,12 +808,378 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: 'Sync power state' })).not.toBeInTheDocument();
   });
 
+  it('pages, filters and sorts the host list on the server', async () => {
+    renderApp('/vms');
+    await screen.findByRole('link', { name: 'linux-host-02' });
+    expect(requests).toContain('/api/ui/vms?page=1&per_page=50&status=all&sort=hostname&dir=asc');
+    expect(screen.getByText('Hosts 1–2 of 2')).toBeInTheDocument();
+
+    const chips = screen.getByRole('group', { name: 'Show hosts' });
+    expect(within(chips).getByRole('button', { name: /^Released/ })).toBeDisabled();
+    await userEvent.click(within(chips).getByRole('button', { name: /^In use/ }));
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'linux-host-01' })).not.toBeInTheDocument());
+    expect(requests).toContain('/api/ui/vms?page=1&per_page=50&status=in-use&sort=hostname&dir=asc');
+    expect(within(chips).getByRole('button', { name: /^In use/ })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Hostname' }));
+    await waitFor(() => expect(requests).toContain('/api/ui/vms?page=1&per_page=50&status=in-use&sort=hostname&dir=desc'));
+    expect(screen.getByRole('columnheader', { name: 'Hostname' })).toHaveAttribute('aria-sort', 'descending');
+  });
+
+  it('searches the host list once typing pauses', async () => {
+    renderApp('/vms');
+    await screen.findByRole('link', { name: 'linux-host-02' });
+
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Search hosts' }), 'host-02');
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'linux-host-01' })).not.toBeInTheDocument());
+    const searches = requests.filter((url) => url.includes('&q='));
+    expect(searches.length).toBeGreaterThan(0);
+    expect(searches.every((url) => url.endsWith('&q=host-02'))).toBe(true);
+  });
+
+  it('says when nothing matches and clears the filters', async () => {
+    renderApp('/vms?q=nothing');
+    expect(await screen.findByText('No host matches')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Show all hosts' }));
+    expect(await screen.findByRole('link', { name: 'linux-host-01' })).toBeInTheDocument();
+    expect(screen.getByRole('searchbox', { name: 'Search hosts' })).toHaveValue('');
+  });
+
+  it('shows the columns chosen and remembers them', async () => {
+    renderApp('/vms');
+    await screen.findByRole('link', { name: 'linux-host-02' });
+    expect(screen.getByRole('columnheader', { name: 'Agent' })).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'OS' })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByText('Columns'));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'OS' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Agent' }));
+
+    expect(await screen.findByRole('columnheader', { name: 'OS' })).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Agent' })).not.toBeInTheDocument();
+    expect(screen.getAllByText('Ubuntu 24.04')).toHaveLength(2);
+    expect(JSON.parse(window.localStorage.getItem('lb-host-columns') ?? '[]')).toEqual(['ip', 'os', 'heartbeat']);
+  });
+
+  it('drains the selected hosts together and reports each one', async () => {
+    renderApp('/vms');
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Select every host on this page' }));
+    const bar = screen.getByRole('region', { name: 'Selected hosts' });
+    expect(within(bar).getByText('2 selected')).toBeInTheDocument();
+
+    await userEvent.click(within(bar).getByRole('button', { name: 'Drain' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Users keep their sessions/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Drain 2 hosts' }));
+
+    await waitFor(() => expect(requests).toEqual(expect.arrayContaining(['/api/ui/vms/1/drain', '/api/ui/vms/2/drain'])));
+    expect(await screen.findByText('Drain: 2 done')).toBeInTheDocument();
+    expect(screen.getByText('Drained 2 hosts.')).toBeInTheDocument();
+    // The selection is cleared once the action has run.
+    expect(screen.queryByRole('region', { name: 'Selected hosts' })).not.toBeInTheDocument();
+  });
+
+  it('skips the selected hosts a bulk action does not apply to', async () => {
+    renderApp('/vms');
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Select linux-host-01' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select linux-host-02' }));
+    await userEvent.click(within(screen.getByRole('region', { name: 'Selected hosts' })).getByRole('button', { name: 'Stop' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/1 selected host is skipped: off, or in use/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Stop 1 host' }));
+
+    await waitFor(() => expect(requests).toContain('/api/ui/vms/1/stop'));
+    expect(requests).not.toContain('/api/ui/vms/2/stop');
+    expect(await screen.findByText('Skipped: linux-host-02.')).toBeInTheDocument();
+  });
+
+  it('deletes selected hosts only after the administrator types delete', async () => {
+    renderApp('/vms');
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Select linux-host-01' }));
+    await userEvent.click(within(screen.getByRole('region', { name: 'Selected hosts' })).getByRole('button', { name: 'Delete' }));
+
+    const dialog = await screen.findByRole('dialog');
+    const confirmDelete = within(dialog).getByRole('button', { name: 'Delete 1 host' });
+    expect(confirmDelete).toBeDisabled();
+    await userEvent.type(within(dialog).getByLabelText(/to confirm/), 'delete');
+    await userEvent.click(confirmDelete);
+    await waitFor(() => expect(requests).toContain('/api/ui/vms/1/delete'));
+  });
+
+  it('offers operators the bulk actions but not delete or maintenance', async () => {
+    session = { ...SESSION, roles: ['Operator'], permissions: { read: true, operate: true, admin: false } };
+    renderApp('/vms');
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Select linux-host-01' }));
+    const bar = screen.getByRole('region', { name: 'Selected hosts' });
+    expect(within(bar).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      'Clear', 'Drain', 'Return to service', 'Start', 'Stop', 'Apply settings', 'Send message',
+    ]);
+  });
+
+  it('messages the sessions on the selected hosts', async () => {
+    renderApp('/vms');
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Select linux-host-02' }));
+    await userEvent.click(within(screen.getByRole('region', { name: 'Selected hosts' })).getByRole('button', { name: 'Send message' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/every session on linux-host-02/)).toBeInTheDocument();
+    await userEvent.type(within(dialog).getByLabelText('Message'), 'Patching at 18:00');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Send to all' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/sessions/broadcast',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ message: 'Patching at 18:00', hostnames: ['linux-host-02'] });
+    });
+  });
+
+  it('starts maintenance with the selected hosts already chosen', async () => {
+    maintenance = maintenancePage(null);
+    renderApp('/vms');
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Select linux-host-01' }));
+    await userEvent.click(within(screen.getByRole('region', { name: 'Selected hosts' })).getByRole('button', { name: 'Start maintenance' }));
+
+    expect(await screen.findByRole('checkbox', { name: 'Include linux-host-01' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Include linux-host-02' })).not.toBeChecked();
+  });
+
+  it('keeps the rarer tools in a menu for administrators', async () => {
+    renderApp('/vms');
+    await userEvent.click(await screen.findByRole('button', { name: 'Tools' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Import from Azure', 'Add a host manually', 'Test brokering',
+    ]);
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Test brokering' }));
+    expect(await screen.findByRole('heading', { name: 'Test brokering', level: 1 })).toBeInTheDocument();
+  });
+
+  it('says when the portal pages the list for an older broker API', async () => {
+    legacyHostList = true;
+    renderApp('/vms');
+    expect(await screen.findByText(/The broker API is older than this portal/)).toBeInTheDocument();
+  });
+
+  it('imports the tagged hosts chosen and reports each one', async () => {
+    renderApp('/vms/import');
+    const importable = await screen.findByRole('checkbox', { name: 'Import linux-host-07' });
+    expect(screen.getByRole('checkbox', { name: 'Import linux-host-08' })).toBeDisabled();
+    expect(screen.getByText(/linux-host-08.contoso.local does not resolve/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
+
+    await userEvent.click(importable);
+    await userEvent.click(screen.getByRole('button', { name: 'Import 1 host' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url, init]) => String(url) === '/api/ui/vms/import' && init?.method === 'POST',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ hostnames: ['linux-host-07'] });
+    });
+    const results = await screen.findByRole('status', { name: 'Import results' });
+    expect(within(results).getByText('Imported')).toBeInTheDocument();
+    expect(within(results).getByText('linux-host-07')).toBeInTheDocument();
+  });
+
+  it('shows the Import tab only to administrators', async () => {
+    const { unmount } = renderApp('/vms');
+    const tabs = await screen.findByRole('navigation', { name: 'Hosts pages' });
+    expect(within(tabs).getByRole('link', { name: 'Import' })).toHaveAttribute('href', '/vms/import');
+    unmount();
+
+    session = { ...SESSION, roles: ['Operator'], permissions: { read: true, operate: true, admin: false } };
+    renderApp('/vms');
+    const operatorTabs = await screen.findByRole('navigation', { name: 'Hosts pages' });
+    expect(within(operatorTabs).queryByRole('link', { name: 'Import' })).not.toBeInTheDocument();
+  });
+  it('still leads to the scaling rules when the broker predates scaling schedules', async () => {
+    scalingPolicy = { Available: false };
+    const { unmount } = renderApp('/scaling');
+    expect(await screen.findByText('Scaling schedules need the upgraded broker API')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Scaling rules' })).toHaveAttribute('href', '/scaling/rules');
+    // The section's tabs stay, so the activity log and rule history are one click away too.
+    expect(within(screen.getByRole('navigation', { name: 'Scaling pages' })).getByRole('link', { name: 'Activity log' })).toBeInTheDocument();
+    unmount();
+
+    renderApp('/scaling/schedules/new');
+    expect(await screen.findByText('Scaling windows need the upgraded broker API')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Scaling rules' })).toHaveAttribute('href', '/scaling/rules');
+  });
+
   it('summarises fleet health on the dashboard when the broker reports it', async () => {
     dashboard = { ...DASHBOARD, fleetHealth: { ...FLEET_HEALTH.Summary, ExpectedAgentVersion: '1.0.0' } };
     renderApp('/');
 
     expect(await screen.findByText('1 of 2 powered-on hosts reporting')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '1 no heartbeat' })).toHaveAttribute('href', '/vms/health?show=no-heartbeat');
+  });
+
+  it('charts capacity and checkout health over a day or a week', async () => {
+    trends = 'on';
+    renderApp('/');
+
+    const chart = await screen.findByRole('img', { name: /^Capacity over the last 24 hours\./ });
+    expect(chart).toHaveAccessibleName(
+      'Capacity over the last 24 hours. At most 3 hosts were in use at once. About 4 hosts could take a user. The scaling maximum was 6. 2 checkouts found no host.',
+    );
+    const health = screen.getByRole('heading', { name: 'Checkout health' }).closest('.lb-glass') as HTMLElement;
+    expect(within(health).getByText('2.1 s')).toBeInTheDocument();
+    expect(within(health).getByText(/^5% of checkouts · last /)).toBeInTheDocument();
+    expect(within(health).getByText('Median of 3 starts · 95% within 3 min')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: '7 days' }));
+    expect(await screen.findByRole('img', { name: /^Capacity over the last 7 days\./ })).toBeInTheDocument();
+    expect(requests).toContain('/api/ui/metrics/utilization?hours=168');
+    expect(screen.getByRole('button', { name: '7 days' })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(screen.getByRole('button', { name: 'View as table' }));
+    const table = screen.getByRole('table', { name: 'Capacity over the last 7 days, by 60-minute interval' });
+    expect(within(table).getAllByRole('row')).toHaveLength(169);
+  });
+
+  it('puts what needs attention first on the dashboard', async () => {
+    attention = ATTENTION;
+    renderApp('/');
+
+    const panel = await screen.findByRole('region', { name: 'Needs attention now' });
+    expect(within(panel).getByText(/No host can take a new user/)).toBeInTheDocument();
+    expect(within(panel).getByRole('link', { name: 'Open host' })).toHaveAttribute('href', '/vms/2');
+    expect(within(panel).getByRole('link', { name: 'Fleet health' })).toHaveAttribute('href', '/vms/health?show=xrdp-down');
+  });
+
+  it('leaves the trends out when the broker predates them', async () => {
+    attention = { Available: false, Items: [], Summary: { Total: 0 }, Incomplete: true };
+    renderApp('/');
+
+    await screen.findByText('33% of the pool in use');
+    await waitFor(() => expect(requests).toContain('/api/ui/metrics/utilization?hours=24'));
+    expect(screen.queryByRole('heading', { name: 'Capacity' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Needs attention now' })).not.toBeInTheDocument();
+  });
+
+  it('reports utilization as the scaler sees it when the broker counts serviceable hosts', async () => {
+    dashboard = {
+      ...DASHBOARD,
+      stats: { ...DASHBOARD.stats, utilization: 75, utilization_basis: 'serviceable', serviceable: 4, in_use: 3 },
+    };
+    renderApp('/');
+
+    expect(await screen.findByText('75% of the hosts that can take a user are in use')).toBeInTheDocument();
+    expect(screen.getByText('3 of 4 in use')).toBeInTheDocument();
+  });
+
+  it('shows the active maintenance run and pauses it', async () => {
+    renderApp('/vms/maintenance');
+
+    const [activeLink] = await screen.findAllByRole('link', { name: 'October patching (run 7)' });
+    expect(activeLink).toHaveAttribute('href', '/vms/maintenance/7');
+    expect(screen.getByText(/taking linux-host-03 now would leave fewer than 2 ready/)).toBeInTheDocument();
+    expect(screen.getByText(/hosts ready for users now; the run keeps at/)).toHaveTextContent(
+      '2 hosts ready for users now; the run keeps at least 2 (the scaling minimum). Last advanced just now.',
+    );
+    expect(screen.getByRole('link', { name: 'Maintenance run 6' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'New run' })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    await waitFor(() => expect(requests).toContain('/api/ui/maintenance/runs/7/pause'));
+    expect(await screen.findByText('Done: pause run 7.')).toBeInTheDocument();
+  });
+
+  it('cancels a maintenance run only after confirming', async () => {
+    renderApp('/vms/maintenance');
+    await userEvent.click(await screen.findByRole('button', { name: 'Cancel run' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Cancel October patching (run 7)?' });
+    expect(requests).not.toContain('/api/ui/maintenance/runs/7/cancel');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel the run' }));
+    await waitFor(() => expect(requests).toContain('/api/ui/maintenance/runs/7/cancel'));
+  });
+
+  it('warns when a run is not being advanced', async () => {
+    maintenance = maintenancePage(maintenanceRun({ LastTickAgeSeconds: 900 }));
+    renderApp('/vms/maintenance');
+    expect(await screen.findByText(/has not been advanced for 15 min/)).toBeInTheDocument();
+  });
+
+  it('warns when a run was never advanced, as with a task function too old to advance it', async () => {
+    maintenance = maintenancePage(maintenanceRun({ LastTickAtUtc: null, LastTickAgeSeconds: null, CreatedAgeSeconds: 600 }));
+    const { unmount } = renderApp('/vms/maintenance');
+    expect(await screen.findByText(/This run was started 10 min ago and has not been advanced yet/)).toBeInTheDocument();
+    expect(screen.getByText(/Not advanced yet\./)).toBeInTheDocument();
+    unmount();
+
+    // A run created moments ago is not reported: the first advance comes within a minute.
+    maintenance = maintenancePage(maintenanceRun({ LastTickAtUtc: null, LastTickAgeSeconds: null, CreatedAgeSeconds: 30 }));
+    renderApp('/vms/maintenance');
+    expect(await screen.findByText(/Not advanced yet\./)).toBeInTheDocument();
+    expect(screen.queryByText(/has not been advanced/)).not.toBeInTheDocument();
+  });
+
+  it('shows each host of a maintenance run and what it is waiting for', async () => {
+    renderApp('/vms/maintenance/7');
+
+    const table = await screen.findByRole('table', { name: /Each host in October patching/ });
+    const rows = within(table).getAllByRole('row');
+    expect(rows[1]).toHaveTextContent('linux-host-01');
+    expect(rows[1]).toHaveTextContent('Done');
+    expect(rows[2]).toHaveTextContent('Waiting for alice to sign out.');
+    expect(within(rows[3]).getByText('Too old to patch')).toBeInTheDocument();
+    expect(screen.getByText(/linux-host-03 run a host agent older than 1.1.0 and will fail/)).toBeInTheDocument();
+    expect(screen.getByText('Warned, then signed out after 60 min')).toBeInTheDocument();
+  });
+
+  it('starts a maintenance run from the hosts chosen', async () => {
+    maintenance = maintenancePage(null);
+    renderApp('/vms/maintenance/new');
+
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Include linux-host-01' }));
+    expect(screen.getByText(/linux-host-01 run a host agent older than 1.1.0 and\s+cannot be patched/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('radio', { name: /Restart only/ }));
+    expect(screen.queryByText(/cannot be patched/)).not.toBeInTheDocument();
+
+    const batch = screen.getByLabelText('Hosts at a time');
+    await userEvent.clear(batch);
+    await userEvent.type(batch, '2');
+    await userEvent.click(screen.getByRole('switch', { name: /Sign users out after a deadline/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Start the run' }));
+
+    await waitFor(() => expect(requests).toContain('/api/ui/maintenance/runs/8'));
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([url, init]) => String(url) === '/api/ui/maintenance/runs' && init?.method === 'POST',
+    );
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      hostnames: ['linux-host-01'], patchMode: 'RebootOnly', batchSize: 2, minReady: null, signOutDeadlineMinutes: 60,
+      warningMinutes: 15, includePoweredOff: false, maxFailures: 1, canaryCount: 0,
+    });
+  });
+
+  it('asks for a host before starting a run', async () => {
+    maintenance = maintenancePage(null);
+    renderApp('/vms/maintenance/new');
+    await userEvent.click(await screen.findByRole('button', { name: 'Start the run' }));
+    expect(screen.getByText('Choose at least one host.')).toBeInTheDocument();
+    expect(requests).not.toContain('/api/ui/maintenance/runs/8');
+  });
+
+  it('allows one maintenance run at a time', async () => {
+    renderApp('/vms/maintenance/new');
+    expect(await screen.findByText('A run is already active')).toBeInTheDocument();
+  });
+
+  it('keeps maintenance read-only for readers', async () => {
+    session = { ...SESSION, roles: ['Reader'], permissions: { read: true, operate: false, admin: false } };
+    renderApp('/vms/maintenance');
+    await screen.findAllByRole('link', { name: 'October patching (run 7)' });
+    expect(screen.queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel run' })).not.toBeInTheDocument();
+  });
+
+  it('says when the broker has no rolling maintenance yet', async () => {
+    maintenance = { Available: false, Runs: [], Active: null };
+    renderApp('/vms/maintenance');
+    expect(await screen.findByText(/Rolling maintenance needs the broker API and database from this release/)).toBeInTheDocument();
   });
 
   it('filters fleet health by flag', async () => {
@@ -510,5 +1219,211 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Version history' })).toBeInTheDocument();
     expect(await screen.findByText('Saved by alice@contoso.com', { exact: false })).toBeInTheDocument();
     expect(screen.getByText('600 s (10 minutes)', { exact: false })).toBeInTheDocument();
+  });
+
+  it('lists sessions with what an operator needs to know', async () => {
+    renderApp('/sessions');
+
+    expect(await screen.findByRole('link', { name: 'alice' })).toHaveAttribute('href', '/users/alice');
+    expect(screen.getByText('In use, idle 12 min')).toBeInTheDocument();
+    expect(screen.getByText('Grace ends in 10 min')).toBeInTheDocument();
+    expect(screen.getByText('Checked out 1 h 30 min ago; no session since')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /Never connected/ }));
+    expect(screen.getByRole('button', { name: /Never connected/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('link', { name: 'alice' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'carol' })).toBeInTheDocument();
+  });
+
+  it('finds a user who may not have a session', async () => {
+    renderApp('/sessions');
+    await userEvent.type(await screen.findByLabelText('Find a user'), 'al');
+
+    const result = await screen.findByText('On linux-host-02');
+    expect(within(result.closest('li') as HTMLElement).getByRole('link', { name: 'alice' })).toHaveAttribute('href', '/users/alice');
+    expect(requests.some((url) => url.startsWith('/api/ui/users?q=al'))).toBe(true);
+  });
+
+  it('messages a user from the sessions page', async () => {
+    renderApp('/sessions');
+    await userEvent.click(await screen.findByRole('button', { name: 'Session actions for alice on linux-host-02' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Send message' }));
+
+    const dialog = await screen.findByRole('dialog');
+    const send = within(dialog).getByRole('button', { name: 'Send message' });
+    expect(send).toBeDisabled();
+    await userEvent.type(within(dialog).getByLabelText('Message'), 'Please save your work');
+    await userEvent.click(send);
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/sessions/linux-host-02/alice/message',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ message: 'Please save your work' });
+    });
+    expect(await screen.findByText('Sent to alice on linux-host-02.')).toBeInTheDocument();
+  });
+
+  it('signs a user out only after confirming', async () => {
+    renderApp('/sessions');
+    await userEvent.click(await screen.findByRole('button', { name: 'Session actions for alice on linux-host-02' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Send message', 'Sign out', 'Sign out and return host',
+    ]);
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Sign out and return host' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/The assignment ends now/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Sign out and return' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/sessions/linux-host-02/alice/signout',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ returnHost: true });
+    });
+  });
+
+  it('gives readers no session actions', async () => {
+    session = { ...SESSION, roles: ['Reader'], permissions: { read: true, operate: false, admin: false } };
+    renderApp('/sessions');
+    await screen.findByRole('link', { name: 'alice' });
+    expect(screen.queryByRole('button', { name: /Session actions for/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Message everyone' })).not.toBeInTheDocument();
+  });
+
+  it('messages everyone on the hosts in use', async () => {
+    renderApp('/sessions');
+    await userEvent.click(await screen.findByRole('button', { name: 'Message everyone' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/every session on the 3 hosts in use/)).toBeInTheDocument();
+    await userEvent.type(within(dialog).getByLabelText('Message'), 'Hosts restart at 18:00');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Send to all' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/sessions/broadcast',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ message: 'Hosts restart at 18:00' });
+    });
+    expect(await screen.findByText('Shown in 2 session(s) on 2 of 2 host(s).')).toBeInTheDocument();
+  });
+
+  it('resets a profile only after the administrator types the username', async () => {
+    renderApp('/users/alice');
+
+    expect(await screen.findByRole('heading', { name: 'alice', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText('Linux user ID 2001')).toBeInTheDocument();
+    expect(screen.getByText('session.message')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Reset profile' }));
+
+    const dialog = await screen.findByRole('dialog');
+    const reset = within(dialog).getByRole('button', { name: 'Reset profile' });
+    expect(reset).toBeDisabled();
+    await userEvent.type(within(dialog).getByLabelText(/to confirm/), 'alice');
+    await userEvent.click(reset);
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/users/alice/reset-profile',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ confirm: 'alice' });
+    });
+  });
+
+  it('shows a pending profile reset and lets an administrator cancel it', async () => {
+    userDetails = { ...freshUserDetails(), ProfileReset: { RequestedAtUtc: '2026-09-24T10:00:00Z', RequestedBy: 'admin@contoso.com' } };
+    renderApp('/users/alice');
+
+    expect(await screen.findByText(/admin@contoso.com asked for a fresh profile/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel profile reset' }));
+    await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel the reset' }));
+    await waitFor(() => expect(requests).toContain('/api/ui/users/alice/reset-profile/cancel'));
+  });
+
+  it('hides profile resets from operators', async () => {
+    session = { ...SESSION, roles: ['Operator'], permissions: { read: true, operate: true, admin: false } };
+    renderApp('/users/alice');
+    await screen.findByRole('heading', { name: 'alice', level: 1 });
+    expect(screen.queryByRole('button', { name: 'Reset profile' })).not.toBeInTheDocument();
+  });
+
+  it('shows what is in force, what happens next and the week', async () => {
+    renderApp('/scaling');
+
+    expect(await screen.findByText('Start 2 hosts (linux-host-05, linux-host-06).')).toBeInTheDocument();
+    expect(screen.getAllByText('Business hours').length).toBeGreaterThan(0);
+    expect(screen.getByText(/takes over on Thursday 18:00, in 7 h 45 min/)).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: /Business hours: Mon\u2013Fri 08:00 to 18:00\. The default rule applies at all other times/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit Business hours' })).toBeInTheDocument();
+  });
+
+  it('keeps the scaling policy read-only for operators', async () => {
+    session = { ...SESSION, roles: ['Operator'], permissions: { read: true, operate: true, admin: false } };
+    renderApp('/scaling');
+    await screen.findByText('Start 2 hosts (linux-host-05, linux-host-06).');
+    expect(screen.queryByRole('link', { name: 'Add a window' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit Business hours' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Time zone')).not.toBeInTheDocument();
+  });
+
+  it('changes the policy time zone', async () => {
+    renderApp('/scaling');
+    const zone = await screen.findByLabelText('Time zone');
+    await waitFor(() => expect(within(zone).getAllByRole('option')).toHaveLength(2));
+    await userEvent.selectOptions(zone, 'Eastern Standard Time');
+    await userEvent.click(screen.getByRole('button', { name: 'Use this time zone' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url, init]) => String(url) === '/api/ui/scaling/policy' && init?.method === 'POST',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ timezone: 'Eastern Standard Time' });
+    });
+  });
+
+  it('refuses a window that overlaps another before saving', async () => {
+    renderApp('/scaling/schedules/new');
+    const name = await screen.findByLabelText('Name');
+    await userEvent.type(name, 'Lunch peak');
+    const starts = screen.getByLabelText('Starts');
+    const ends = screen.getByLabelText('Ends');
+    await userEvent.clear(starts);
+    await userEvent.type(starts, '11:00');
+    await userEvent.clear(ends);
+    await userEvent.type(ends, '14:00');
+
+    expect(await screen.findByText(/This window overlaps Business hours \(Mon\u2013Fri 08:00\u201318:00\)/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add window' })).toBeDisabled();
+
+    // Moving it into the evening clears the clash, and it saves with the default rule's values.
+    await userEvent.clear(starts);
+    await userEvent.type(starts, '18:00');
+    await userEvent.clear(ends);
+    await userEvent.type(ends, '22:00');
+    await userEvent.click(screen.getByRole('button', { name: 'Add window' }));
+
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url]) => String(url) === '/api/ui/scaling/schedules',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+        name: 'Lunch peak', days: ['mon', 'tue', 'wed', 'thu', 'fri'], start: '18:00', end: '22:00', enabled: true,
+        minvms: '2', maxvms: '20', scaleupratio: '80', scaleupincrement: '2', scaledownratio: '30', scaledownincrement: '1',
+      });
+    });
+  });
+
+  it('previews proposed window values without saving them', async () => {
+    renderApp('/scaling/schedules/1');
+    await userEvent.click(await screen.findByRole('button', { name: 'Preview with these values' }));
+
+    expect(await screen.findByText('No scaling threshold was crossed.')).toBeInTheDocument();
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([url, init]) => String(url) === '/api/ui/scaling/preview' && init?.method === 'POST',
+    );
+    expect(JSON.parse(String(call?.[1]?.body)).rule).toMatchObject({ minvms: '4', name: 'Business hours' });
+    expect(requests.some((url) => url.startsWith('/api/ui/scaling/schedules'))).toBe(false);
   });
 });

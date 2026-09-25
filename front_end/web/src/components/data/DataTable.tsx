@@ -2,6 +2,7 @@ import { useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { classNames } from '../../lib/format';
+import { brokerTimeSortValue } from '../../lib/time';
 import { Icon } from '../Icon';
 import { GlassCard } from '../ui/GlassCard';
 
@@ -47,13 +48,10 @@ function compare<T>(column: Column<T>, a: T, b: T): number {
   }
 
   if (column.sort === 'date') {
-    // Broker timestamps are 'YYYY-MM-DD HH:MM:SS'; the space needs replacing for
-    // Date.parse to accept them consistently across engines.
-    const dl = Date.parse(left.replace(' ', 'T'));
-    const dr = Date.parse(right.replace(' ', 'T'));
-    const safeLeft = Number.isNaN(dl) ? Number.NEGATIVE_INFINITY : dl;
-    const safeRight = Number.isNaN(dr) ? Number.NEGATIVE_INFINITY : dr;
-    return safeLeft - safeRight;
+    // ISO, RFC 1123 and legacy 'YYYY-MM-DD HH:MM:SS' values all sort by the time they name.
+    const dl = brokerTimeSortValue(left);
+    const dr = brokerTimeSortValue(right);
+    return dl === dr ? 0 : dl < dr ? -1 : 1;
   }
 
   return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });

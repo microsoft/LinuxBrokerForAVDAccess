@@ -80,6 +80,20 @@ AUDIT_ENTRY = {
     "TargetId": "linux-host-01", "Outcome": "success", "Detail": {"status": 202}, "CorrelationId": "abc",
 }
 
+SESSION_ENTRY = {
+    "Hostname": "linux-host-02", "VMID": 2, "Username": "alice", "AvdHost": "avd-01", "State": "active",
+    "VmStatus": "CheckedOut", "PowerState": "On", "NetworkStatus": "Reachable", "DrainRequested": False,
+    "HasAssignment": True, "CleanupPending": False, "ReportedState": "active", "SessionStartUtc": None,
+    "DisconnectedForSeconds": None, "IdleSeconds": 30, "AssignedForSeconds": 600, "LastCheckoutAgeSeconds": 600,
+    "GraceRemainingSeconds": None, "GracePeriodSeconds": 1200, "HeartbeatAgeSeconds": 20, "HeartbeatFresh": True,
+}
+
+USER_DETAILS = {
+    "Username": "alice", "Uid": 2001, "FirstProvisionedDate": None, "ProfileReset": None,
+    "Assignments": [{"VMID": 2, "Hostname": "linux-host-02", "VmStatus": "CheckedOut"}],
+    "Sessions": [SESSION_ENTRY], "HostHistory": [], "RecentActivity": [],
+}
+
 # The three history endpoints behave identically apart from the broker path they
 # read from, so they are parametrised together throughout the suite.
 HISTORY_PATHS = [f"{API}/vms/history", f"{API}/scaling/log", f"{API}/scaling/rules/history"]
@@ -133,6 +147,8 @@ class FakeBrokerApi:
         self.raise_post_paths = set()
         # Status and body to answer a POST whose path ends with the key, instead of the default.
         self.post_replies = {}
+        # The same for a GET.
+        self.get_replies = {}
 
         # Mirrors GetVmSummary for the four seeded VMs in VMS: one Available (on,
         # reachable -> ready), one CheckedOut, one Maintenance (off, unreachable),
@@ -153,12 +169,20 @@ class FakeBrokerApi:
         self.settings_history = [dict(HOST_SETTINGS, UpdatedBy="op@contoso.com", IsCurrent=True,
                                       ValidFromUtc="2026-08-01T10:00:00Z", ValidToUtc=None)]
         self.audit_items = [dict(AUDIT_ENTRY, AuditId=i) for i in range(1, 4)]
+        self.sessions = {"Sessions": [dict(SESSION_ENTRY)], "Summary": {"Total": 1, "active": 1}}
+        self.users = {"Users": [{"Username": "alice", "Uid": 2001, "ProfileResetPending": False,
+                                 "CurrentHostname": "linux-host-02", "CurrentVMID": 2, "CurrentVmStatus": "CheckedOut"}],
+                      "Query": "alice"}
+        self.user_details = dict(USER_DETAILS)
 
     def get(self, url, **kwargs):
         import requests
         self.gets.append({"url": url, "params": kwargs.get("params"), "timeout": kwargs.get("timeout")})
         if any(url.endswith(path) for path in self.raise_get_paths):
             raise requests.exceptions.RequestException("broker unavailable")
+        for path, (status, body) in self.get_replies.items():
+            if url.endswith(path):
+                return FakeResponse(body, status_code=status)
         if url.endswith("/me"):
             return FakeResponse({"roles": ["FullAccess"], "permissions": {"read": True, "operate": True, "admin": True}, "legacyScopeAccess": False})
         if url.endswith("/vms/summary"):
@@ -173,6 +197,12 @@ class FakeBrokerApi:
             return FakeResponse(self.host_health)
         if url.endswith("/audit"):
             return self._history(self.audit_items, kwargs.get("params") or {})
+        if url.endswith("/sessions"):
+            return FakeResponse(self.sessions)
+        if re.search(r"/users/[A-Za-z0-9_]+$", url):
+            return FakeResponse(self.user_details)
+        if url.endswith("/users"):
+            return FakeResponse(self.users)
         if re.search(r"/vms/\d+$", url):
             vmid = int(url.rsplit("/", 1)[1])
             return FakeResponse(next((vm for vm in VMS if vm["VMID"] == vmid), VMS[0]))

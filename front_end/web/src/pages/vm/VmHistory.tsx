@@ -4,6 +4,7 @@ import type { Column } from '../../components/data/DataTable';
 import { NetworkBadge, PowerBadge, VmStatusBadge } from '../../components/ui/Badge';
 import { ButtonLink } from '../../components/ui/Button';
 import { PageHeader } from '../../components/ui/Feedback';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useVmHistory } from '../../hooks/useBroker';
 import { useHistoryQuery } from '../../hooks/useHistoryQuery';
 import { errorMessage } from '../../lib/api';
@@ -17,14 +18,7 @@ export function VmHistory() {
   const { data, isPending, isFetching, error } = useVmHistory(query.search);
 
   const columns: Array<Column<Vm>> = [
-    {
-      key: 'vmid',
-      header: 'VMID',
-      sort: 'number',
-      value: (row) => row.VMID,
-      className: 'font-mono text-xs',
-      render: (row) => row.VMID,
-    },
+
     {
       key: 'hostname',
       header: 'Hostname',
@@ -75,7 +69,7 @@ export function VmHistory() {
       sort: 'date',
       value: (row) => row.CreateDate,
       className: MONO,
-      render: (row) => valueOrDash(row.CreateDate),
+      render: (row) => <RelativeTime value={row.CreateDate} showAbsolute />,
     },
     {
       key: 'updated',
@@ -83,7 +77,7 @@ export function VmHistory() {
       sort: 'date',
       value: (row) => row.LastUpdateDate,
       className: MONO,
-      render: (row) => valueOrDash(row.LastUpdateDate),
+      render: (row) => <RelativeTime value={row.LastUpdateDate} showAbsolute />,
     },
     {
       key: 'from',
@@ -91,7 +85,7 @@ export function VmHistory() {
       sort: 'date',
       value: (row) => row.SysStartTime,
       className: MONO,
-      render: (row) => valueOrDash(row.SysStartTime),
+      render: (row) => <RelativeTime value={row.SysStartTime} showAbsolute />,
     },
     {
       key: 'to',
@@ -99,13 +93,20 @@ export function VmHistory() {
       sort: 'date',
       value: (row) => row.SysEndTime,
       className: MONO,
-      render: (row) => valueOrDash(row.SysEndTime),
+      render: (row) => <RelativeTime value={row.SysEndTime} showAbsolute />,
     },
-  ];
+    {
+      key: 'vmid',
+      header: 'VMID',
+      sort: 'number',
+      value: (row) => row.VMID,
+      className: 'font-mono text-xs text-muted',
+      render: (row) => row.VMID,
+    },  ];
 
   return (
     <>
-      <Breadcrumbs items={[{ label: 'Virtual machines', to: '/vms' }, { label: 'History' }]} />
+      <Breadcrumbs items={[{ label: 'Hosts', to: '/vms' }, { label: 'History' }]} />
 
       <PageHeader
         title="Virtual machine history"

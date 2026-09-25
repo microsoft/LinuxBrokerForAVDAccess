@@ -62,6 +62,96 @@ export interface Vm {
   DrainRequestedDate?: string | null;
 }
 
+export type VmListStatus =
+  | 'all'
+  | 'ready'
+  | 'in-use'
+  | 'released'
+  | 'maintenance'
+  | 'draining'
+  | 'unreachable'
+  | 'off'
+  | 'cleanup';
+
+export type VmListSort =
+  | 'hostname'
+  | 'status'
+  | 'power'
+  | 'network'
+  | 'user'
+  | 'ip'
+  | 'os'
+  | 'agent'
+  | 'heartbeat'
+  | 'sessions'
+  | 'vmid'
+  | 'updated';
+
+/** One host of the paged list: the VM row with its latest heartbeat. */
+export interface VmListItem extends Vm {
+  Ready: boolean;
+  OsName?: string | null;
+  OsVersion?: string | null;
+  AgentVersion?: string | null;
+  XrdpActive?: boolean | null;
+  SessionCount?: number | null;
+  LastHeartbeatUtc?: string | null;
+  HeartbeatAgeSeconds?: number | null;
+  HeartbeatFresh?: boolean;
+  /** The assigned user's session as the current heartbeat reports it; null when unknown. */
+  SessionState?: 'active' | 'disconnected' | 'unknown' | 'none' | null;
+  SettingsCurrent?: boolean | null;
+  AgentOutdated?: boolean | null;
+  CurrentSettingsVersion?: number | null;
+}
+
+export interface VmPage {
+  items: VmListItem[];
+  page: number;
+  per_page: number;
+  total: number;
+  total_pages: number;
+  counts: Record<VmListStatus, number>;
+  q: string | null;
+  status: VmListStatus;
+  sort: VmListSort;
+  dir: 'asc' | 'desc';
+  /** Paged by the portal because the broker API predates server-side paging. */
+  legacy?: boolean;
+}
+
+export interface ImportCandidate {
+  Hostname: string;
+  Fqdn: string;
+  IPAddress: string | null;
+  PowerState: 'On' | 'Off' | null;
+  Importable: boolean;
+  Problem: string | null;
+}
+
+export interface ImportCandidates {
+  Candidates: ImportCandidate[];
+  TaggedCount: number;
+  RegisteredCount: number;
+  Tag: string;
+  ResourceGroup: string | null;
+  DomainName: string | null;
+}
+
+export interface ImportResult {
+  Results: Array<{
+    Hostname: string;
+    Result: 'Imported' | 'Exists' | 'NotTagged' | 'Unresolved';
+    VMID?: number | null;
+    IPAddress?: string | null;
+    PowerState?: string | null;
+    Problem?: string | null;
+    message: string;
+  }>;
+  Imported: number;
+  message: string;
+}
+
 /** What a start, stop or restart request returned. The Azure operation runs on. */
 export interface PowerActionResult {
   VMID: number;
@@ -192,6 +282,134 @@ export interface AuditFilterValues {
   outcome: '' | AuditOutcome;
 }
 
+/*
+ * Sessions and users. A session's State is derived by the broker from its assignment and
+ * the host's latest heartbeat.
+ */
+export type SessionState =
+  | 'active'
+  | 'disconnected'
+  | 'released'
+  | 'connecting'
+  | 'not-connected'
+  | 'cleanup-pending'
+  | 'unmanaged'
+  | 'unknown';
+
+export interface BrokerSession {
+  Hostname: string;
+  VMID: number | null;
+  Username: string;
+  AvdHost: string | null;
+  State: SessionState;
+  VmStatus: string | null;
+  PowerState: string | null;
+  NetworkStatus: string | null;
+  DrainRequested: boolean;
+  HasAssignment: boolean;
+  CleanupPending: boolean;
+  ReportedState: 'active' | 'disconnected' | 'unknown' | null;
+  SessionStartUtc: string | null;
+  DisconnectedForSeconds: number | null;
+  IdleSeconds: number | null;
+  AssignedForSeconds: number | null;
+  LastCheckoutAgeSeconds: number | null;
+  GraceRemainingSeconds: number | null;
+  GracePeriodSeconds: number | null;
+  HeartbeatAgeSeconds: number | null;
+  HeartbeatFresh: boolean;
+}
+
+export type SessionSummary = Record<SessionState, number> & { Total: number };
+
+export interface SessionsPage {
+  Sessions: BrokerSession[];
+  Summary: SessionSummary;
+}
+
+export interface BrokerUserMatch {
+  Username: string;
+  Uid: number | null;
+  ProfileResetPending: boolean;
+  CurrentVMID: number | null;
+  CurrentHostname: string | null;
+  CurrentVmStatus: string | null;
+}
+
+export interface UserSearchResult {
+  Users: BrokerUserMatch[];
+  Query: string | null;
+}
+
+export interface UserAssignment {
+  VMID: number;
+  Hostname: string;
+  VmStatus: string | null;
+  PowerState: string | null;
+  NetworkStatus: string | null;
+  AvdHost: string | null;
+  DrainRequested: boolean;
+  CleanupPending: boolean;
+  AssignedForSeconds: number | null;
+  LastCheckoutAgeSeconds: number | null;
+  ReleasedForSeconds: number | null;
+}
+
+export interface UserHostHistoryEntry {
+  VMID: number;
+  Hostname: string;
+  FirstSeenUtc: string;
+  LastSeenUtc: string;
+  Assignments: number;
+  IsCurrent: boolean;
+}
+
+export interface BrokerUserDetails {
+  Username: string;
+  Uid: number | null;
+  FirstProvisionedDate: string | null;
+  ProfileReset: { RequestedAtUtc: string; RequestedBy: string | null } | null;
+  Assignments: UserAssignment[];
+  Sessions: BrokerSession[];
+  HostHistory: UserHostHistoryEntry[];
+  RecentActivity: AuditEntry[];
+}
+
+export interface SignOutResult {
+  Hostname: string;
+  Username: string;
+  Result: 'SignedOut' | 'NoSession';
+  Released: boolean;
+  Returned: boolean;
+  CleanupResult: string | null;
+  message: string;
+}
+
+export interface MessageResult {
+  Hostname: string;
+  Username: string;
+  Sessions: number;
+  Delivered: number;
+  message: string;
+}
+
+export interface ProfileResetResult {
+  Username: string;
+  message: string;
+  CurrentlyAssigned?: boolean;
+  Result?: string;
+}
+
+export interface BroadcastResult {
+  TargetCount: number;
+  Delivered: number;
+  Results: Array<{ Hostname: string; Result: 'Delivered' | 'NoSession' | 'AgentOutdated' | 'Failed'; Sessions: number; Delivered: number }>;
+  NotAttempted: string[];
+  UnknownHostnames: string[];
+  SkippedHostnames: string[];
+  message: string;
+}
+
 /** One saved version of the host settings profile. */
 export interface HostSettingsVersion extends HostSettings {
   UpdatedBy: string | null;
@@ -288,7 +506,13 @@ export interface DashboardStats {
   /** Absent from BFF builds that predate drain. */
   draining?: number;
   attention: number;
+  /** In use out of serviceable when `utilization_basis` is 'serviceable'. */
   utilization: number;
+  /** The scaler's counts. Null or absent from a broker API that predates them. */
+  serviceable?: number | null;
+  in_use?: number | null;
+  /** 'serviceable' is the scaler's figure; 'total' the older checked-out share of every host. */
+  utilization_basis?: 'serviceable' | 'total';
   pct: PoolComposition;
 }
 
@@ -298,6 +522,210 @@ export interface Dashboard {
   /** Null when the broker API predates host heartbeats or could not report them. */
   fleetHealth?: (FleetHealthSummary & { ExpectedAgentVersion?: string | null }) | null;
   apiError: boolean;
+}
+
+/** One bucket of the capacity chart. Averages over the scaling runs in it; null with none. */
+export interface UtilizationPoint {
+  BucketStartUtc: string;
+  Runs: number;
+  PoweredOn: number | null;
+  InUse: number | null;
+  Serviceable: number | null;
+  PeakInUse: number | null;
+  MinVMs: number | null;
+  MaxVMs: number | null;
+  Checkouts: number;
+  Denied: number;
+  Failed: number;
+}
+
+export interface CheckoutStats {
+  Total: number;
+  Assigned: number;
+  Reused: number;
+  NoneAvailable: number;
+  ProvisionFailed: number;
+  Errors: number;
+  P50Ms: number | null;
+  P95Ms: number | null;
+  DeniedLastHour: number;
+  DeniedPercent: number | null;
+  LastDeniedUtc: string | null;
+  HostStarts: number;
+  StartP50Seconds: number | null;
+  StartP95Seconds: number | null;
+}
+
+export type UtilizationHours = 24 | 168;
+
+/** Available is false while the broker or its database predates the trends. */
+export interface UtilizationMetrics {
+  Available: boolean;
+  Hours: UtilizationHours;
+  BucketMinutes?: number;
+  FromUtc?: string;
+  ToUtc?: string;
+  Series?: UtilizationPoint[];
+  Checkouts?: CheckoutStats;
+}
+
+export type AttentionSeverity = 'critical' | 'warning' | 'info';
+
+export type AttentionKind =
+  | 'no-ready-hosts'
+  | 'denied-checkouts'
+  | 'unreachable'
+  | 'cleanup-stuck'
+  | 'never-connected'
+  | 'maintenance-failed'
+  | 'health';
+
+export interface AttentionItem {
+  Kind: AttentionKind;
+  Severity: AttentionSeverity;
+  VMID?: number | null;
+  Hostname?: string | null;
+  Username?: string | null;
+  AgeSeconds?: number | null;
+  Count?: number | null;
+  /** For a health item: the flag, and the first hosts that have it. */
+  Flag?: HealthFlag;
+  Hostnames?: string[];
+  /** For a failed maintenance host: its run and why it failed. */
+  RunID?: number | null;
+  Detail?: string | null;
+}
+
+export interface AttentionItems {
+  Available: boolean;
+  Items: AttentionItem[];
+  Summary: { Total: number; Critical?: number; Warning?: number; Info?: number };
+  /** True while the database cannot report the broker's own conditions yet. */
+  Incomplete: boolean;
+}
+
+export type MaintenanceRunStatus = 'Active' | 'Paused' | 'Stopping' | 'Completed' | 'Cancelled' | 'Failed';
+export type MaintenancePatchMode = 'Security' | 'All' | 'RebootOnly';
+export type MaintenanceHostState =
+  | 'Pending'
+  | 'Draining'
+  | 'Starting'
+  | 'Patching'
+  | 'Restarting'
+  | 'Verifying'
+  | 'Succeeded'
+  | 'Failed'
+  | 'Skipped'
+  | 'Cancelled';
+
+export interface MaintenanceCounts {
+  Total: number;
+  Pending: number;
+  InProgress: number;
+  Succeeded: number;
+  Failed: number;
+  Skipped: number;
+  Cancelled: number;
+}
+
+export interface MaintenanceRun {
+  RunID: number;
+  Name: string | null;
+  Status: MaintenanceRunStatus;
+  EndStatus: MaintenanceRunStatus | null;
+  PatchMode: MaintenancePatchMode;
+  BatchSize: number;
+  MinReadyOverride: number | null;
+  SignOutDeadlineMinutes: number | null;
+  WarningMinutes: number;
+  WarningMessage: string | null;
+  IncludePoweredOff: boolean;
+  MaxFailures: number;
+  CanaryCount: number;
+  CanaryReached: boolean;
+  /** Scaling keeps one more host on while a ready host waits for a spare. */
+  SurgeRequested: boolean;
+  WaitReason: string | null;
+  StatusReason: string | null;
+  CreatedBy: string | null;
+  UpdatedBy: string | null;
+  CreatedAtUtc: string | null;
+  UpdatedAtUtc: string | null;
+  EndedAtUtc: string | null;
+  LastTickAtUtc: string | null;
+  LastTickAgeSeconds: number | null;
+  /** Seconds since the run was created, on the database's clock. Absent from an older API. */
+  CreatedAgeSeconds?: number | null;
+  Counts: MaintenanceCounts;
+  /** Only for a single run: what admission works from now. */
+  MinReadyInForce?: number | null;
+  PhaseMinVMs?: number | null;
+  ReadyNow?: number | null;
+}
+
+export interface MaintenanceRunsPage {
+  /** False while the broker predates rolling maintenance. */
+  Available: boolean;
+  Runs: MaintenanceRun[];
+  Active: MaintenanceRun | null;
+}
+
+export interface MaintenanceHost {
+  RunHostID: number;
+  VMID: number;
+  Hostname: string;
+  Position: number;
+  State: MaintenanceHostState;
+  Attempts: number;
+  Detail: string | null;
+  RebootRequired: 'yes' | 'no' | 'unknown' | null;
+  AdmittedAtUtc: string | null;
+  WarningSentAtUtc: string | null;
+  SignOutRequestedAtUtc: string | null;
+  PatchStartedAtUtc: string | null;
+  PatchFinishedAtUtc: string | null;
+  RestartRequestedAtUtc: string | null;
+  VerifiedAtUtc: string | null;
+  CompletedAtUtc: string | null;
+  StepAgeSeconds: number | null;
+  PowerState: PowerState | null;
+  NetworkStatus: NetworkStatus | null;
+  VmStatus: VmStatus | null;
+  Username: string | null;
+  AgentVersion: string | null;
+  HeartbeatAgeSeconds: number | null;
+  WasDrained: boolean;
+  WasMaintenance: boolean;
+  WasPoweredOff: boolean;
+  Registered: boolean;
+  DrainRequested: boolean;
+  XrdpActive: boolean | null;
+  AgentCanPatch: boolean;
+}
+
+export interface MaintenanceRunDetails {
+  Run: MaintenanceRun;
+  Hosts: MaintenanceHost[];
+}
+
+export interface MaintenanceRunInput {
+  name?: string;
+  hostnames: string[];
+  patchMode: MaintenancePatchMode;
+  batchSize: number;
+  minReady: number | null;
+  signOutDeadlineMinutes: number | null;
+  warningMinutes: number;
+  warningMessage?: string;
+  includePoweredOff: boolean;
+  maxFailures: number;
+  canaryCount: number;
+}
+
+export interface MaintenanceRunChange {
+  Run: MaintenanceRun | null;
+  Result: string;
+  message: string;
 }
 
 export interface Paged<T> {
@@ -342,4 +770,89 @@ export interface ScalingRuleInput {
   scaledownratio: string;
   scaledownincrement: string;
   stopmode: 'PowerOff' | 'Deallocate';
+}
+
+export type ScheduleDay = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+
+/** A window that overrides the default scaling rule on some days and times. */
+export interface ScalingSchedule {
+  ScheduleID: number;
+  Name: string;
+  Enabled: boolean;
+  Days: ScheduleDay[];
+  DaysOfWeek: number;
+  StartTime: string;
+  EndTime: string;
+  CrossesMidnight: boolean;
+  MinVMs: number;
+  MaxVMs: number;
+  ScaleUpRatio: number;
+  ScaleUpIncrement: number;
+  ScaleDownRatio: number;
+  ScaleDownIncrement: number;
+  StopMode: 'PowerOff' | 'Deallocate' | null;
+  UpdatedBy: string | null;
+  UpdatedAtUtc: string | null;
+}
+
+export interface ScalingPhase {
+  Source: 'Schedule' | 'Rule' | 'Proposed' | null;
+  ScheduleID: number | null;
+  Name: string | null;
+  MinVMs: number | null;
+  MaxVMs: number | null;
+  ScaleUpRatio: number | null;
+  ScaleUpIncrement: number | null;
+  ScaleDownRatio: number | null;
+  ScaleDownIncrement: number | null;
+  StopMode: 'PowerOff' | 'Deallocate' | null;
+}
+
+export interface ScalingPolicy {
+  TimeZone: string;
+  UpdatedBy: string | null;
+  UpdatedAtUtc: string | null;
+  NowUtc: string | null;
+  LocalTime: string | null;
+  ActivePhase: ScalingPhase | null;
+  DefaultRule: ScalingRule | null;
+  Schedules: ScalingSchedule[];
+  NextChange: { InMinutes: number; AtLocal: string; PhaseName: string; ScheduleID: number | null } | null;
+  LastRun: ActivityLogEntry | null;
+  Available?: true;
+}
+
+/** What the portal gets for the policy: the policy, or word that the broker predates it. */
+export type ScalingPolicyResponse = ScalingPolicy | { Available: false };
+
+export interface ScalingPreview {
+  Action: 'PowerOn' | 'PowerOff' | 'None';
+  Summary: string;
+  Reason: string | null;
+  RequestCount: number | null;
+  Candidates: string[];
+  Phase: ScalingPhase & {
+    /** A maintenance run waiting for a spare ready host has raised MinVMs by one. */
+    MaintenanceSurge?: boolean;
+  };
+  Counts: { PoweredOn: number; Serviceable: number; InUse: number; Draining: number; Utilization: number | null };
+  TimeZone: string | null;
+  LocalTime: string | null;
+  AtUtc: string | null;
+}
+
+export interface TimeZoneOption {
+  Name: string;
+  CurrentUtcOffset: string;
+  IsCurrentlyDst: boolean;
+}
+
+export interface ScheduleInput extends Omit<ScalingRuleInput, 'stopmode'> {
+  name: string;
+  days: ScheduleDay[];
+  start: string;
+  end: string;
+  enabled: boolean;
+  /** Empty uses the default rule's. */
+  stopmode: 'PowerOff' | 'Deallocate' | '';
 }

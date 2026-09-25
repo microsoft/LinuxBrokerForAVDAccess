@@ -4,14 +4,14 @@ import { useSearchParams } from 'react-router-dom';
 import { DataTable } from '../../components/data/DataTable';
 import type { Column } from '../../components/data/DataTable';
 import { Pagination, PerPageSelect } from '../../components/data/Pagination';
-import { Badge, EmptyValue } from '../../components/ui/Badge';
+import { AuditOutcomeBadge, EmptyValue } from '../../components/ui/Badge';
 import { Button, ButtonAnchor } from '../../components/ui/Button';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, Spinner } from '../../components/ui/Feedback';
 import { SelectField, TextField } from '../../components/ui/Field';
 import { GlassCard } from '../../components/ui/GlassCard';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useAuditLog } from '../../hooks/useBroker';
 import { errorMessage, queryString } from '../../lib/api';
-import { formatUtc } from '../../lib/format';
 import type { AuditEntry, AuditFilterValues } from '../../types/broker';
 
 const FILTER_KEYS: Array<keyof AuditFilterValues> = ['from', 'to', 'actor', 'action', 'target', 'outcome'];
@@ -31,6 +31,8 @@ const ACTION_SUGGESTIONS = [
   'vm.power_corrected', 'vm.release_expired', 'vm.cleanup_completed', 'vm.drain_completed',
   'scaling.', 'scaling.power_on', 'scaling.power_off', 'scaling.deallocate', 'scaling.rule_update',
   'settings.', 'settings.update', 'settings.apply', 'audit.purge', 'host.heartbeat',
+  'session.', 'session.signout', 'session.message', 'user.', 'user.reset_profile_requested',
+  'user.reset_profile_applied', 'user.reset_profile_cancelled',
 ];
 
 function readInt(value: string | null, fallback: number, max: number) {
@@ -93,22 +95,14 @@ const ACTOR_TYPE_LABEL: Record<AuditEntry['ActorType'], string> = {
   system: 'Broker',
 };
 
-function OutcomeBadge({ outcome }: { outcome: AuditEntry['Outcome'] }) {
-  if (outcome === 'success') {
-    return <Badge tone="ok" icon="check-circle">Succeeded</Badge>;
-  }
-  if (outcome === 'denied') {
-    return <Badge tone="warn" icon="shield">Denied</Badge>;
-  }
-  return <Badge tone="danger" icon="x-circle">Failed</Badge>;
-}
+const OutcomeBadge = AuditOutcomeBadge;
 
 const COLUMNS: Array<Column<AuditEntry>> = [
   {
     key: 'when',
     header: 'When (UTC)',
     className: 'font-mono text-xs whitespace-nowrap',
-    render: (entry) => formatUtc(entry.OccurredAtUtc).replace(' UTC', ''),
+    render: (entry) => <RelativeTime value={entry.OccurredAtUtc} showAbsolute />,
   },
   {
     key: 'actor',

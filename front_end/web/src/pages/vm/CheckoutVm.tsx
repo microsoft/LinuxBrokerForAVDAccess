@@ -40,20 +40,20 @@ export function CheckoutVm() {
 
     try {
       const vm = await checkout.mutateAsync({ username: username.trim(), avdhost: avdhost.trim() });
-      showToast('Successfully checked out VM.', 'success');
+      showToast(`Assigned ${vm.Hostname} to ${username.trim()}.`, 'success');
       navigate(`/vms/${vm.VMID}`);
     } catch (cause) {
-      showToast(errorMessage(cause, 'Unable to check out a VM.'), 'danger');
+      showToast(errorMessage(cause, 'The broker could not assign a host.'), 'danger');
     }
   }
 
   return (
     <>
-      <Breadcrumbs items={[{ label: 'Virtual machines', to: '/vms' }, { label: 'Checkout' }]} />
+      <Breadcrumbs items={[{ label: 'Hosts', to: '/vms' }, { label: 'Test brokering' }]} />
 
       <PageHeader
-        title="Checkout a virtual machine"
-        subtitle="The broker assigns the next available Linux host to the user below."
+        title="Test brokering"
+        subtitle="Ask the broker for a host the way Azure Virtual Desktop does, to check that brokering works end to end."
         icon="person"
       />
 
@@ -80,13 +80,15 @@ export function CheckoutVm() {
             onChange={(event) => setAvdhost(event.target.value)}
           />
 
-          <Notice tone="info">
-            Only hosts that are powered on, reachable and unassigned can be checked out.
+          <Notice tone="warning">
+            This really assigns a host: it stays the user's until it is released, so release it from its page when the
+            test is done. Only ready hosts (on, reachable and unassigned) can be assigned. The host's password is never
+            shown.
           </Notice>
 
           <div className="flex flex-wrap gap-2">
             <Button type="submit" variant="primary" icon="person" disabled={checkout.isPending}>
-              {checkout.isPending ? 'Checking out…' : 'Checkout VM'}
+              {checkout.isPending ? 'Assigning…' : 'Assign a host'}
             </Button>
             <ButtonLink to="/vms">Cancel</ButtonLink>
           </div>

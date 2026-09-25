@@ -3,6 +3,7 @@ import type { Column } from '../../components/data/DataTable';
 import { ActionBadge } from '../../components/ui/Badge';
 import { ButtonLink } from '../../components/ui/Button';
 import { PageHeader } from '../../components/ui/Feedback';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useActivityLog } from '../../hooks/useBroker';
 import { useHistoryQuery } from '../../hooks/useHistoryQuery';
 import { errorMessage } from '../../lib/api';
@@ -28,7 +29,7 @@ export function ActivityLog() {
       sort: 'date',
       value: (row) => row.CheckTimestamp,
       className: 'font-mono text-xs whitespace-nowrap',
-      render: (row) => valueOrDash(row.CheckTimestamp),
+      render: (row) => <RelativeTime value={row.CheckTimestamp} showAbsolute />,
     },
     {
       key: 'running',
@@ -102,8 +103,8 @@ export function ActivityLog() {
         subtitle="Every evaluation the scaling task has performed."
         icon="activity"
         actions={
-          <ButtonLink to="/scaling/rules" size="sm" icon="chevron-left">
-            Back to rules
+          <ButtonLink to="/scaling" size="sm" icon="chevron-left">
+            Back to the policy
           </ButtonLink>
         }
       />

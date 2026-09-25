@@ -1,26 +1,47 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { apiGet, apiPost } from '../lib/api';
 import { queryKeys } from '../lib/queryClient';
 import type {
   ActivityLogEntry,
   ApplySettingsResult,
+  AttentionItems,
   AuditEntry,
+  BroadcastResult,
+  BrokerUserDetails,
   Dashboard,
   DrainResult,
   FleetHealth,
   HostSettings,
   HostSettingsPage,
   HostSettingsVersion,
+  ImportCandidates,
+  ImportResult,
+  MaintenanceRunChange,
+  MaintenanceRunDetails,
+  MaintenanceRunInput,
+  MaintenanceRunsPage,
+  MessageResult,
   Paged,
   PowerActionResult,
   PowerSyncResult,
+  ProfileResetResult,
   SaveSettingsResult,
+  ScalingPolicyResponse,
+  ScalingPreview,
   ScalingRule,
   ScalingRuleInput,
+  ScheduleInput,
+  SessionsPage,
+  SignOutResult,
+  TimeZoneOption,
+  UserSearchResult,
+  UtilizationHours,
+  UtilizationMetrics,
   Vm,
   VmAttributesInput,
   VmInput,
+  VmPage,
 } from '../types/broker';
 
 /* -------------------------------------------------------------- dashboard */
@@ -33,12 +54,57 @@ export function useDashboard(refreshMs: number | false) {
   });
 }
 
+/**
+ * Capacity over the last day or week. The series only moves when the scaler runs, so it
+ * refreshes at most every two minutes; switching windows keeps the previous chart until the
+ * new one arrives.
+ */
+export function useUtilization(hours: UtilizationHours, refreshMs: number | false) {
+  return useQuery({
+    queryKey: queryKeys.utilization(hours),
+    queryFn: ({ signal }) => apiGet<UtilizationMetrics>(`/metrics/utilization?hours=${hours}`, signal),
+    refetchInterval: refreshMs === false ? false : Math.max(refreshMs, 120_000),
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useAttention(refreshMs: number | false) {
+  return useQuery({
+    queryKey: queryKeys.attention,
+    queryFn: ({ signal }) => apiGet<AttentionItems>('/metrics/attention', signal),
+    refetchInterval: refreshMs,
+  });
+}
+
 /* -------------------------------------------------------------------- VMs */
 
-export function useVms() {
+/** One page of the host list, filtered and sorted on the server. */
+export function useVmPage(search: string, refreshMs: number | false = false) {
   return useQuery({
-    queryKey: queryKeys.vms,
-    queryFn: ({ signal }) => apiGet<Vm[]>('/vms', signal),
+    queryKey: queryKeys.vmPage(search),
+    queryFn: ({ signal }) => apiGet<VmPage>(`/vms${search}`, signal),
+    placeholderData: keepPreviousData,
+    refetchInterval: refreshMs,
+  });
+}
+
+export function useImportCandidates() {
+  return useQuery({
+    queryKey: queryKeys.importCandidates,
+    queryFn: ({ signal }) => apiGet<ImportCandidates>('/vms/import/candidates', signal),
+    staleTime: 0,
+  });
+}
+
+export function useImportVms() {
+  const queryClient = useQueryClient();
+  const invalidateVms = useVmInvalidation();
+  return useMutation({
+    mutationFn: (hostnames: string[]) => apiPost<ImportResult>('/vms/import', { hostnames }),
+    onSuccess: () => {
+      invalidateVms();
+      void queryClient.invalidateQueries({ queryKey: queryKeys.importCandidates });
+    },
   });
 }
 
@@ -63,10 +129,10 @@ export function useVmHistory(search: string) {
 /**
  * Invalidate everything derived from the VM list.
  *
- * Any VM mutation can change the dashboard counters, the host settings drift table and
- * fleet health as well as the list itself, so they are refreshed together.
+ * Any VM mutation can change the dashboard counters, the host settings drift table, fleet
+ * health and what needs attention as well as the list itself, so they are refreshed together.
  */
-function useVmInvalidation() {
+export function useVmInvalidation() {
   const queryClient = useQueryClient();
 
   return () => {
@@ -74,6 +140,8 @@ function useVmInvalidation() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard });
     void queryClient.invalidateQueries({ queryKey: queryKeys.hostSettings });
     void queryClient.invalidateQueries({ queryKey: queryKeys.fleetHealth });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.attention });
   };
 }
 
@@ -227,6 +295,150 @@ export function useAuditLog(search: string) {
   });
 }
 
+/* ------------------------------------------------------ sessions and users */
+
+export function useSessions(refreshMs: number | false = false) {
+  return useQuery({
+    queryKey: queryKeys.sessions,
+    queryFn: ({ signal }) => apiGet<SessionsPage>('/sessions', signal),
+    refetchInterval: refreshMs,
+  });
+}
+
+/** Broker users whose name contains the query. Waits for two characters. */
+export function useUserSearch(query: string) {
+  const trimmed = query.trim();
+  return useQuery({
+    queryKey: queryKeys.userSearch(trimmed),
+    queryFn: ({ signal }) =>
+      apiGet<UserSearchResult>(`/users?q=${encodeURIComponent(trimmed)}&limit=8`, signal),
+    enabled: trimmed.length >= 2,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useUserDetails(username: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.user(username ?? ''),
+    queryFn: ({ signal }) => apiGet<BrokerUserDetails>(`/users/${encodeURIComponent(username ?? '')}`, signal),
+    enabled: Boolean(username),
+  });
+}
+
+/** A session action changes the sessions, the user, and everything derived from the VM list. */
+function useSessionInvalidation() {
+  const queryClient = useQueryClient();
+  const invalidateVms = useVmInvalidation();
+
+  return () => {
+    invalidateVms();
+    void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.users });
+  };
+}
+
+export interface SessionTarget {
+  hostname: string;
+  username: string;
+}
+
+export function useSignOutSession() {
+  const invalidate = useSessionInvalidation();
+
+  return useMutation({
+    mutationFn: ({ hostname, username, returnHost }: SessionTarget & { returnHost?: boolean }) =>
+      apiPost<SignOutResult>(
+        `/sessions/${encodeURIComponent(hostname)}/${encodeURIComponent(username)}/signout`,
+        returnHost ? { returnHost: true } : {},
+      ),
+    onSuccess: invalidate,
+  });
+}
+
+export function useMessageSession() {
+  const invalidate = useSessionInvalidation();
+
+  return useMutation({
+    mutationFn: ({ hostname, username, message }: SessionTarget & { message: string }) =>
+      apiPost<MessageResult>(
+        `/sessions/${encodeURIComponent(hostname)}/${encodeURIComponent(username)}/message`,
+        { message },
+      ),
+    onSuccess: invalidate,
+  });
+}
+
+export function useProfileReset() {
+  const invalidate = useSessionInvalidation();
+
+  return useMutation({
+    mutationFn: ({ username, cancel }: { username: string; cancel?: boolean }) =>
+      apiPost<ProfileResetResult>(
+        `/users/${encodeURIComponent(username)}/reset-profile${cancel ? '/cancel' : ''}`,
+        cancel ? undefined : { confirm: username },
+      ),
+    onSuccess: invalidate,
+  });
+}
+
+/** A message for every session, or for every session on the named hosts. */
+export function useBroadcast() {
+  return useMutation({
+    mutationFn: ({ message, hostnames }: { message: string; hostnames?: string[] }) =>
+      apiPost<BroadcastResult>('/sessions/broadcast', hostnames ? { message, hostnames } : { message }),
+  });
+}
+
+/* ------------------------------------------------------------ maintenance */
+
+export function useMaintenanceRuns(refreshMs: number | false = false) {
+  return useQuery({
+    queryKey: queryKeys.maintenance,
+    queryFn: ({ signal }) => apiGet<MaintenanceRunsPage>('/maintenance/runs', signal),
+    refetchInterval: refreshMs,
+  });
+}
+
+/** A run and its hosts, refreshed every ten seconds while the run is live. */
+export function useMaintenanceRun(runId: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.maintenanceRun(runId ?? ''),
+    queryFn: ({ signal }) => apiGet<MaintenanceRunDetails>(`/maintenance/runs/${runId}`, signal),
+    enabled: Boolean(runId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.Run.Status;
+      return status && !['Active', 'Paused', 'Stopping'].includes(status) ? false : 10_000;
+    },
+  });
+}
+
+function useMaintenanceInvalidation() {
+  const queryClient = useQueryClient();
+  const invalidateVms = useVmInvalidation();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.maintenance });
+    invalidateVms();
+  };
+}
+
+export function useCreateMaintenanceRun() {
+  const invalidate = useMaintenanceInvalidation();
+  return useMutation({
+    mutationFn: (input: MaintenanceRunInput) =>
+      apiPost<{ RunID: number; HostCount: number; message: string }>('/maintenance/runs', input),
+    onSuccess: invalidate,
+  });
+}
+
+export function useMaintenanceRunAction() {
+  const invalidate = useMaintenanceInvalidation();
+  return useMutation({
+    mutationFn: ({ runId, action, reason }: { runId: number; action: 'pause' | 'resume' | 'cancel'; reason?: string }) =>
+      apiPost<MaintenanceRunChange>(`/maintenance/runs/${runId}/${action}`, reason ? { reason } : {}),
+    onSuccess: invalidate,
+  });
+}
+
 /* ---------------------------------------------------------------- scaling */
 
 export function useScalingRules() {
@@ -264,7 +476,76 @@ function useRuleInvalidation() {
   const queryClient = useQueryClient();
   return () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.rules });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.scalingPolicy });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.scalingPreview });
   };
+}
+
+/* --------------------------------------------------------- scaling policy */
+
+export function useScalingPolicy() {
+  return useQuery({
+    queryKey: queryKeys.scalingPolicy,
+    queryFn: ({ signal }) => apiGet<ScalingPolicyResponse>('/scaling/policy', signal),
+  });
+}
+
+/** What the next scaling run would do now. Refreshed every minute while shown. */
+export function useScalingPreview() {
+  return useQuery({
+    queryKey: queryKeys.scalingPreview,
+    queryFn: ({ signal }) => apiGet<ScalingPreview>('/scaling/preview', signal),
+    refetchInterval: 60_000,
+  });
+}
+
+/** A dry run with proposed values, for the schedule editor. Changes nothing. */
+export function usePreviewProposed() {
+  return useMutation({
+    mutationFn: (input: { rule: Record<string, string>; at?: string }) =>
+      apiPost<ScalingPreview>('/scaling/preview', input),
+  });
+}
+
+export function useTimeZones() {
+  return useQuery({
+    queryKey: queryKeys.timeZones,
+    queryFn: ({ signal }) => apiGet<TimeZoneOption[]>('/scaling/timezones', signal),
+    staleTime: 60 * 60_000,
+  });
+}
+
+export function useSetPolicyTimeZone() {
+  const invalidate = useRuleInvalidation();
+  return useMutation({
+    mutationFn: (timezone: string) => apiPost<{ message: string; TimeZone: string }>('/scaling/policy', { timezone }),
+    onSuccess: invalidate,
+  });
+}
+
+function schedulePayload(input: ScheduleInput) {
+  const { stopmode, ...rest } = input;
+  return stopmode ? { ...rest, stopmode } : rest;
+}
+
+export function useSaveSchedule(scheduleId?: number | string) {
+  const invalidate = useRuleInvalidation();
+  return useMutation({
+    mutationFn: (input: ScheduleInput) =>
+      apiPost<{ ScheduleID: number; message: string }>(
+        scheduleId ? `/scaling/schedules/${scheduleId}/update` : '/scaling/schedules',
+        schedulePayload(input),
+      ),
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteSchedule() {
+  const invalidate = useRuleInvalidation();
+  return useMutation({
+    mutationFn: (scheduleId: number) => apiPost<{ message: string }>(`/scaling/schedules/${scheduleId}/delete`),
+    onSuccess: invalidate,
+  });
 }
 
 export function useCreateScalingRule() {

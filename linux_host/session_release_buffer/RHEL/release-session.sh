@@ -6,7 +6,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # The Linux Broker host agent version. Every script in linux_host/ declares the same value
 # and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
-LINUXBROKER_AGENT_VERSION="1.0.0"
+LINUXBROKER_AGENT_VERSION="1.1.0"
 
 LOG_FILE="/var/log/release-session.log"
 LOCATION_PATH="/usr/local/bin"
@@ -709,7 +709,7 @@ check_unmount_user_homes() {
 # reconciliation must never depend on it.
 # ---------------------------------------------------------------------------
 
-HEARTBEAT_SCRIPTS=(release-session.sh logind-session-watcher.sh xrdp-who-xorg.sh create-user.sh manage-lease.sh apply-host-settings.sh)
+HEARTBEAT_SCRIPTS=(release-session.sh logind-session-watcher.sh xrdp-who-xorg.sh create-user.sh manage-lease.sh apply-host-settings.sh session-control.sh patch-host.sh)
 HEARTBEAT_BACKOFF_SECONDS=900
 
 # The version an installed script declares, so a host that was only partly migrated shows up.

@@ -89,32 +89,43 @@ function Invoke-RunCommandWithRetry {
 
     $lastError = ''
 
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        $message = az vm run-command invoke `
-            --resource-group $ResourceGroupName `
-            --name $VmName `
-            --command-id RunShellScript `
-            --scripts $Script `
-            --query 'value[0].message' `
-            --output tsv `
-            --only-show-errors 2>&1 | Out-String
+    # The script reaches az as @file. Passed inline, on Windows it goes through az.cmd, where
+    # cmd.exe ends the command at the first newline: the host runs only the first line and the
+    # call still succeeds. Bash also needs LF line endings, which a Windows checkout lacks.
+    $scriptFile = Join-Path ([System.IO.Path]::GetTempPath()) ('linuxbroker-migrate-{0}.sh' -f [guid]::NewGuid().ToString('N'))
+    [System.IO.File]::WriteAllText($scriptFile, $Script.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
 
-        if ($LASTEXITCODE -eq 0) {
-            return $message.Trim()
+    try {
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            $message = az vm run-command invoke `
+                --resource-group $ResourceGroupName `
+                --name $VmName `
+                --command-id RunShellScript `
+                --scripts "@$scriptFile" `
+                --query 'value[0].message' `
+                --output tsv `
+                --only-show-errors 2>&1 | Out-String
+
+            if ($LASTEXITCODE -eq 0) {
+                return $message.Trim()
+            }
+
+            $lastError = $message.Trim()
+            if ($attempt -ge $MaxAttempts) {
+                break
+            }
+
+            $delaySeconds = [Math]::Min($InitialDelaySeconds * [Math]::Pow(2, $attempt - 1), 30)
+            Write-Warning "Linux host migration failed on '$VmName' attempt $attempt of $MaxAttempts. Retrying in $([int]$delaySeconds) seconds."
+            if (-not [string]::IsNullOrWhiteSpace($lastError)) {
+                Write-Warning $lastError
+            }
+
+            Start-Sleep -Seconds ([int]$delaySeconds)
         }
-
-        $lastError = $message.Trim()
-        if ($attempt -ge $MaxAttempts) {
-            break
-        }
-
-        $delaySeconds = [Math]::Min($InitialDelaySeconds * [Math]::Pow(2, $attempt - 1), 30)
-        Write-Warning "Linux host migration failed on '$VmName' attempt $attempt of $MaxAttempts. Retrying in $([int]$delaySeconds) seconds."
-        if (-not [string]::IsNullOrWhiteSpace($lastError)) {
-            Write-Warning $lastError
-        }
-
-        Start-Sleep -Seconds ([int]$delaySeconds)
+    }
+    finally {
+        Remove-Item -LiteralPath $scriptFile -Force -ErrorAction SilentlyContinue
     }
 
     if ([string]::IsNullOrWhiteSpace($lastError)) {
@@ -202,6 +213,8 @@ xorg_script="$output_directory/xrdp-who-xorg.sh"
 create_user_script="$output_directory/create-user.sh"
 manage_lease_script="$output_directory/manage-lease.sh"
 apply_settings_script="$output_directory/apply-host-settings.sh"
+session_control_script="$output_directory/session-control.sh"
+patch_host_script="$output_directory/patch-host.sh"
 release_service_name='linuxbroker-release-session.service'
 release_timer_name='linuxbroker-release-session.timer'
 watcher_service_name='linuxbroker-release-session-watcher.service'
@@ -298,6 +311,8 @@ watcher_script_url="$script_source_root/linux_host/session_release_buffer/logind
 create_user_script_url="$script_source_root/linux_host/create-user.sh"
 manage_lease_script_url="$script_source_root/linux_host/manage-lease.sh"
 apply_settings_script_url="$script_source_root/linux_host/apply-host-settings.sh"
+session_control_script_url="$script_source_root/linux_host/session-control.sh"
+patch_host_script_url="$script_source_root/linux_host/patch-host.sh"
 
 mkdir -p "$output_directory" "$state_directory" "$state_directory/leases"
 
@@ -307,8 +322,10 @@ download_file "$watcher_script_url" "$watcher_script"
 download_file "$create_user_script_url" "$create_user_script"
 download_file "$manage_lease_script_url" "$manage_lease_script"
 download_file "$apply_settings_script_url" "$apply_settings_script"
+download_file "$session_control_script_url" "$session_control_script"
+download_file "$patch_host_script_url" "$patch_host_script"
 
-chmod +x "$release_script" "$xorg_script" "$watcher_script" "$create_user_script" "$manage_lease_script" "$apply_settings_script"
+chmod +x "$release_script" "$xorg_script" "$watcher_script" "$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script" "$patch_host_script"
 
 sed -i "s|YOUR_LINUX_BROKER_API_CLIENT_ID|$api_client_id|g" "$release_script"
 sed -i "s|YOUR_LINUX_BROKER_API_BASE_URL|$api_base_url|g" "$release_script"
@@ -331,7 +348,7 @@ for command_name in userdel groupadd usermod chpasswd; do
         sudoers_commands+=("$resolved_command")
     fi
 done
-sudoers_commands+=("$create_user_script" "$manage_lease_script" "$apply_settings_script")
+sudoers_commands+=("$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script" "$patch_host_script")
 
 sudoers_tmp="${sudoers_path}.tmp"
 (
@@ -453,10 +470,42 @@ $remoteScript = $remoteScript.Replace('__SCRIPT_SOURCE_ROOT__', (ConvertTo-BashS
 $remoteScript = $remoteScript.Replace('__WATCHER_DEBOUNCE__', $WatcherDebounceSeconds.ToString())
 $remoteScript = $remoteScript.Replace('__WATCHER_SETTLE__', $WatcherSettleSeconds.ToString())
 
+# One host that is off or failing must not leave the rest of the fleet on the old agent, so
+# every host is attempted and the failures are reported together at the end.
+$failures = [System.Collections.Generic.List[string]]::new()
+$skipped = [System.Collections.Generic.List[string]]::new()
+
 foreach ($linuxHost in $linuxHosts) {
-    Write-Host "Migrating Linux host '$($linuxHost.name)'..."
-    $message = Invoke-RunCommandWithRetry -VmName $linuxHost.name -Script $remoteScript
-    if (-not [string]::IsNullOrWhiteSpace($message)) {
-        Write-Host $message
+    $powerProperty = $linuxHost.PSObject.Properties['powerState']
+    $powerState = if ($powerProperty) { [string]$powerProperty.Value } else { '' }
+    if (-not [string]::IsNullOrWhiteSpace($powerState) -and $powerState -notmatch 'running') {
+        Write-Warning "Skipping Linux host '$($linuxHost.name)' because it is not running ($powerState). Start it and run this script again with -LinuxHostNames $($linuxHost.name)."
+        $skipped.Add($linuxHost.name)
+        continue
     }
+
+    Write-Host "Migrating Linux host '$($linuxHost.name)'..."
+    try {
+        $message = Invoke-RunCommandWithRetry -VmName $linuxHost.name -Script $remoteScript
+        if (-not [string]::IsNullOrWhiteSpace($message)) {
+            Write-Host $message
+        }
+        # Run Command reports success whatever the script did, so the script's own closing line
+        # is the only evidence that it ran to the end.
+        if ($message -notmatch 'Migrated release agent on') {
+            throw "The migration script did not run to completion on '$($linuxHost.name)'."
+        }
+    }
+    catch {
+        Write-Warning $_.Exception.Message
+        $failures.Add($linuxHost.name)
+    }
+}
+
+if ($skipped.Count -gt 0) {
+    Write-Warning "Not migrated because they are not running: $($skipped -join ', ')."
+}
+
+if ($failures.Count -gt 0) {
+    throw "Linux host migration failed on: $($failures -join ', '). Rerun with -LinuxHostNames to retry them."
 }

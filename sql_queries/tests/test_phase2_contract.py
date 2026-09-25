@@ -495,8 +495,27 @@ def test_phase2_procedures_exist(conn):
     expected = {
         "WriteAuditEntry", "GetAuditLogPaged", "PurgeAuditLog", "GetLinuxHostSettingsHistory",
         "SetVmDrain", "FinalizeVmDrains", "BeginVmPowerAction", "RevertVmPowerAction", "RecordHostHeartbeat", "GetHostHealth",
+        # 2.3 sessions and users
+        "GetSessions", "SearchUsers", "GetUserDetails", "GetUserHostHistory", "GetVmByHostname",
+        "RequestProfileReset", "CancelProfileReset", "BeginProfileReset", "CompleteProfileReset",
+        # 2.5 scaling policy and schedules
+        "GetScalingPolicy", "GetScalingSchedules", "SaveScalingSchedule", "DeleteScalingSchedule",
+        "SetScalingPolicyTimeZone", "GetTimeZones",
+        # 2.6 trends and unmet demand
+        "RecordCheckoutEvent", "GetUtilizationSeries", "GetCheckoutStats", "GetAttentionItems", "PurgeCheckoutEvents",
+        # 2.9 rolling maintenance
+        "CreateMaintenanceRun", "GetMaintenanceRuns", "GetMaintenanceRun", "GetMaintenanceRunHosts",
+        "BeginMaintenanceTick", "EndMaintenanceTick", "ClaimMaintenanceAdmissions", "SetMaintenanceHostState",
+        "SetMaintenanceRunStatus", "ReturnMaintenanceHost", "GetMaintenanceAttention",
+        # 2.7 host list
+        "GetVmsPaged", "GetVmStatusCounts", "ImportLinuxHostVm",
     }
     present = {r["name"] for r in rows(conn, "SELECT name FROM sys.procedures")}
     assert expected <= present
     tables = {r["name"] for r in rows(conn, "SELECT name FROM sys.tables")}
-    assert {"AuditLog", "HostHeartbeats"} <= tables
+    assert {
+        "AuditLog", "HostHeartbeats", "ScalingPolicy", "ScalingSchedules", "CheckoutEvents", "HostStartEvents",
+        "MaintenanceRuns", "MaintenanceRunHosts",
+    } <= tables
+    functions = {r["name"] for r in rows(conn, "SELECT name FROM sys.objects WHERE type IN ('FN', 'IF', 'TF')")}
+    assert {"fnScheduleWeekIntervals", "fnActiveScalingPhase", "fnMaintenanceRunSummary"} <= functions

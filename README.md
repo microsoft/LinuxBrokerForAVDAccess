@@ -28,10 +28,14 @@ The solution consists of the following components:
   - `vm_scaling_rules`: Stores scaling rules for the Linux host cluster.
   - `vm_scaling_activity`: Logs scaling activities such as VMs being turned on or off.
   - `LinuxHostSettings`: Stores the fleet-wide Linux host settings profile that administrators manage from the portal.
+  - `ScalingPolicy` and `ScalingSchedules`: The scaling policy's time zone and the time windows that override the default scaling rule.
+  - `CheckoutEvents` and `HostStartEvents`: Each checkout's outcome and each host start's time to ready, for the dashboard's trends.
+  - `MaintenanceRuns` and `MaintenanceRunHosts`: Rolling maintenance runs and each host's progress through them.
+  - `AuditLog` and `HostHeartbeats`: Who did what, and each host agent's latest report.
 
-- **Azure Function for Scaling Tasks**: An Azure Function that runs on a schedule to manage scaling of Linux hosts based on the scaling rules. It updates VM network statuses, turns VMs on or off, and performs health checks on the Linux hosts.
+- **Azure Function for Scaling Tasks**: An Azure Function that runs on a schedule to manage scaling of Linux hosts based on the scaling rules. It updates VM network statuses, turns VMs on or off, performs health checks on the Linux hosts, returns released hosts, advances rolling maintenance runs, and purges old audit entries and checkout events.
 
-- **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as adding/deleting VMs, checking out VMs, releasing/returning VMs, modifying VM statuses, and viewing logs. It is a React 18 and TypeScript single-page app built with Vite and Tailwind CSS, served by a Flask backend-for-frontend that holds the Entra ID token server-side and calls the Broker API on the administrator's behalf.
+- **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as finding and acting on hosts in bulk, importing hosts from Azure, helping users with their sessions, scheduling scaling, patching hosts in rolling maintenance runs, charting capacity and unmet demand, and viewing logs. It is a React 18 and TypeScript single-page app built with Vite and Tailwind CSS, served by a Flask backend-for-frontend that holds the Entra ID token server-side and calls the Broker API on the administrator's behalf.
 
 - **Azure Key Vault**: Stores sensitive information such as SSH keys and database passwords, accessed securely by the Broker API using managed identity.
 
@@ -76,22 +80,33 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 What an administrator can do depends on their role (see [RBAC Permissions](#rbac-permissions)).
 
 1. **Access Service Management Portal**: Admins log into the front-end portal.
-2. **Manage VMs**:
-   - **Add VMs**: Register new Linux VMs into the system.
+2. **Manage hosts**:
+   - **Find hosts**: The host list pages, searches, filters by status (ready, in use, released, maintenance, draining, unreachable, off, cleanup pending) and sorts on the server, with optional columns for OS, agent, settings, last heartbeat and sessions.
+   - **Act on many hosts at once**: Select hosts to drain, return to service, start, stop, apply settings, send a message, start maintenance or delete them. Hosts an action does not apply to are skipped and named, and each host's outcome is reported.
+   - **Import from Azure**: Register the Linux VMs tagged `broker-role=linux-host` that the broker does not know yet, with the address DNS gives them. **Add a host manually** stays as the fallback.
    - **Delete VMs**: Remove VMs from the system.
-   - **Start, stop and restart**: Power a host on or off in Azure from its row's **Host** menu or its page. Stopping or restarting a host a user is signed in to needs `FullAccess` and the hostname typed to confirm, and stopping it ends the user's assignment.
+   - **Start, stop and restart**: Power a host on or off in Azure from its row's **Actions** menu or its page. Stopping or restarting a host a user is signed in to needs `FullAccess` and the hostname typed to confirm, and stopping it ends the user's assignment.
    - **Drain and return to service**: Take a host out of rotation without disturbing its current user. A draining host takes no new users and moves to maintenance when its assignment ends; an idle host moves to maintenance at once.
    - **Release and return**: End a user's assignment early. A returned host stays **Cleanup pending** until the user's account has been removed from it; cleanup is retried automatically, or on demand with **Retry cleanup**.
    - **Sync power state**: Correct every host's recorded power state from Azure now.
    - **Repair VM records**: **Update attributes** edits what the broker has recorded for a host (FullAccess only). It does not start or stop the VM.
-3. **Manage Scaling**:
-   - **Edit the scaling rule**: Set the minimum and maximum number of running VMs, the scale-up and scale-down thresholds and increments, and whether scale-down powers VMs off or deallocates them.
-4. **Manage Linux Host Settings**:
+   - **Rolling maintenance**: Patch (security updates or everything) or restart a set of hosts a batch at a time while users keep working. Each host is drained, patched over SSH, restarted, verified and put back the way it was found, and enough hosts stay ready throughout. An optional deadline warns users and then signs them out.
+   - **Test brokering**: Ask the broker for a host the way AVD does, from the host list's **Tools** menu (FullAccess only).
+3. **Help users**:
+   - **Sessions**: See who is on which host and why someone cannot connect: active, disconnected, in their grace period, still connecting, never connected, waiting for cleanup.
+   - **Find a user**: See where they are now, the hosts they had and the recent actions on them.
+   - **Sign out and message**: Sign a user out (optionally returning the host), send a message to their session, or send one message to every session or to the sessions on chosen hosts, for example before a restart.
+   - **Reset a profile**: Give a user a fresh profile at their next new assignment (FullAccess only). The old profile is kept, renamed.
+4. **Manage Scaling**:
+   - **Edit the default rule**: Set the minimum and maximum number of running VMs, the scale-up and scale-down thresholds and increments, and whether scale-down powers VMs off or deallocates them.
+   - **Add schedule windows**: Override the default rule on chosen days and times in one time zone, for example business hours, and see what the next run would do before saving.
+5. **Manage Linux Host Settings**:
    - **Edit the fleet-wide profile**: Change the reconnect grace period, whether disconnected sessions are kept alive, the reconcile interval, watcher timings, idle session timeout, and screen lock policy without editing or redeploying any script.
    - **Apply Now**: Optionally push the profile to hosts immediately instead of waiting for them to pick it up.
    - **Review drift**: See which hosts have applied the current settings version.
    - **Version history**: See what changed in each saved version of the profile, and who saved it.
-5. **Monitor System**:
+6. **Monitor System**:
+   - **Overview**: Capacity and checkout health over a day or a week, including checkouts that found no host, and an **Attention** panel for what needs an operator now.
    - **View VM Details**: Access detailed information about VMs, including what the host's agent last reported.
    - **Fleet health**: See each host's last heartbeat, agent version, OS, desktop, xrdp and NFS state, load, memory, disk and sessions, and which hosts need attention, without SSH.
    - **Audit log**: See who did what: every portal action, every denied attempt, and the changes the broker makes on its own, with CSV export.
@@ -107,8 +122,8 @@ The solution uses Role-Based Access Control (RBAC) to secure access. Every Broke
   | Role | Allows |
   | --- | --- |
   | `Reader` | Viewing everything in the portal, including fleet health and the audit log. |
-  | `Operator` | Everything `Reader` can do, plus releasing and returning hosts, retrying cleanup, draining hosts and returning them to service, starting hosts, stopping and restarting hosts no one is using, syncing power states, and pushing host settings with **Apply Now**. |
-  | `FullAccess` | Everything `Operator` can do, plus stopping and restarting hosts in use, adding and deleting VMs, repairing VM records, checking out a VM for testing, and editing the scaling rule and host settings. |
+  | `Operator` | Everything `Reader` can do, plus releasing and returning hosts, retrying cleanup, draining hosts and returning them to service, starting hosts, stopping and restarting hosts no one is using, syncing power states, pushing host settings with **Apply Now**, and signing users out and messaging their sessions. |
+  | `FullAccess` | Everything `Operator` can do, plus stopping and restarting hosts in use, adding, importing and deleting VMs, repairing VM records, testing brokering, running maintenance, resetting profiles, and editing the scaling rule, schedules and host settings. |
 
   The portal signs users in with the delegated `access_as_user` scope, but the scope alone no longer grants anything: a signed-in user without one of these roles sees a **No access** page. The deployment assigns `FullAccess` to the user who runs it. When upgrading, see [Upgrading an existing deployment](#upgrading-an-existing-deployment).
 - **Broker Agent (AVD Hosts)**:
@@ -121,7 +136,7 @@ The solution uses Role-Based Access Control (RBAC) to secure access. Every Broke
   - **Requirements**: Managed identity and membership in `LinuxBroker-LinuxHost-VMs` security group.
 - **Azure Function (Scaling Tasks)**:
   - **Role**: `ScheduledTask` on the Broker API.
-  - **Permissions**: Access to APIs for listing VMs, recording network status, returning released VMs, and triggering scaling.
+  - **Permissions**: Access to APIs for listing VMs, recording network status, returning released VMs, triggering scaling, advancing maintenance runs, and purging old audit entries and checkout events.
 - **Broker API**:
   - **Permissions**: Has API permissions to Microsoft Graph for directory and group read access to validate managed identities and security group memberships.
 - **Managed Identities**:
@@ -159,14 +174,16 @@ These scripts:
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the timer-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.
 - **Install the Host Settings Agent**: Installs `apply-host-settings.sh` and seeds the settings profile, so screen lock policy and session timings are applied consistently on every supported distribution rather than only on RHEL 8. `LINUXBROKER_DISABLE_SCREEN_LOCK` still chooses the screen lock posture that is seeded; from then on the values are managed from the portal.
+- **Install the session and patch helpers**: `session-control.sh` lets the broker sign users out, show them messages and reset their profiles, and `patch-host.sh` runs the package upgrade for a rolling maintenance run. Both are allowlisted for the broker's SSH account and validate their input, and `session-control.sh` acts only on accounts the broker created.
 
 ## Additional Details
 
 ### Scaling Rules
 
-- **One rule applies**: the rule with the lowest ID. Creating a second rule is refused; edit the existing one.
+- **One default rule**: the rule with the lowest ID. Creating a second rule is refused; edit the existing one.
+- **Schedule windows**: Optional windows override the default rule on chosen days and times, read in one policy time zone, for example Monday to Friday 08:00–18:00 with a higher minimum. A window can run past midnight, enabled windows cannot overlap, and outside every window the default rule applies. A window takes effect at the next scaling run, about every five minutes.
 - **Minimum VMs Running**: At least 1. Whenever fewer serviceable hosts are running (powered on, not in maintenance, and reachable or still booting), hosts are started to reach it.
-- **Maximum VMs Running**: The maximum number of Linux VMs allowed to be powered on, including hosts in maintenance.
+- **Maximum VMs Running**: The maximum number of Linux VMs allowed to be powered on, including hosts in maintenance. When the two conflict, the minimum wins: a scale-down never leaves fewer serviceable hosts than the minimum.
 - **Scale-Up Ratio**: The utilization at which more VMs are started (e.g., 80%). Utilization is hosts in use (checked out, released within their grace period, or pending cleanup) divided by serviceable hosts.
 - **Scale-Up Increment**: The number of VMs to start when scaling up.
 - **Scale-Down Ratio**: The utilization at or below which VMs are stopped (e.g., 30%).
@@ -300,9 +317,11 @@ Upgrading from a release before role-based access changes behavior you should pl
 
 The admin console foundations (audit log, host actions and drain, fleet health) need no new Azure resources or roles. See [Upgrading To The Admin Console Foundations](deploy/DEPLOYMENT.md#upgrading-to-the-admin-console-foundations).
 
+The rest of the admin console (sessions, broadcast messages, scaling schedules, trends, rolling maintenance and the new host list) needs no new Azure resources or roles either, but the Linux hosts need agent 1.1.0 for sign-out, messages, profile resets and patching. See [Upgrading To The Complete Admin Console](deploy/DEPLOYMENT.md#upgrading-to-the-complete-admin-console).
+
 ## Roadmap
 
-Planned work beyond this release, including a sessions view, scaling schedules, usage trends, rolling maintenance, Ubuntu desktop and RHEL 10 support, and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
+Planned work beyond this release, including Ubuntu desktop and RHEL 10 support, starting a host on demand, golden images and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contributing
 

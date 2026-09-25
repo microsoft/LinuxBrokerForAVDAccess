@@ -6,17 +6,22 @@ handled in one place instead of being rebuilt in every view.
 """
 
 import logging
+import re
 
-from flask import jsonify
+from flask import jsonify, request
 
 from function_authentication import login_required
-from function_api import api_get, api_post
+from function_api import api_get, api_post, page_vms_locally, vm_page_params
 from function_bff import API_PREFIX, BadRequest, broker_endpoint, history_page, json_body, require
 
 logger = logging.getLogger(__name__)
 
 STOP_MODES = ('PowerOff', 'Deallocate')
 SYNC_TIMEOUT_SECONDS = 60
+# Listing and importing read Azure and resolve DNS, each within the broker's own deadline.
+IMPORT_TIMEOUT_SECONDS = 90
+IMPORT_MAX_HOSTS = 100
+HOSTNAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 
 
 def _confirmation(payload):
@@ -32,7 +37,30 @@ def register_route_vm_management(app):
     @login_required
     @broker_endpoint("Unable to retrieve VM data. Please try again later.")
     def ui_vms():
-        return jsonify(api_get('/vms'))
+        params = vm_page_params(request.args)
+        if params is None:
+            return jsonify(api_get('/vms'))
+        result = api_get('/vms', params=params)
+        if isinstance(result, list):
+            # An API older than server-side paging answers with the bare list.
+            return jsonify(page_vms_locally(result, params))
+        return jsonify(result)
+
+    @app.route(f'{API_PREFIX}/vms/import/candidates')
+    @login_required
+    @broker_endpoint("Unable to list the Linux hosts in Azure. Please try again later.")
+    def ui_import_candidates():
+        return jsonify(api_get('/vms/import/candidates', timeout=IMPORT_TIMEOUT_SECONDS))
+
+    @app.route(f'{API_PREFIX}/vms/import', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to import the hosts. Please try again later.")
+    def ui_import_vms():
+        hostnames = json_body().get('hostnames')
+        if (not isinstance(hostnames, list) or not hostnames or len(hostnames) > IMPORT_MAX_HOSTS
+                or not all(isinstance(name, str) and HOSTNAME_RE.match(name) for name in hostnames)):
+            raise BadRequest(f"Choose between 1 and {IMPORT_MAX_HOSTS} hosts to import.")
+        return jsonify(api_post('/vms/import', {'hostnames': hostnames}, timeout=IMPORT_TIMEOUT_SECONDS))
 
     # Registered before the /vms/<int:vmid> rule for readability; Werkzeug matches
     # the static path first regardless.

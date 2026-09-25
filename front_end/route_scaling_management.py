@@ -2,7 +2,8 @@
 
 import logging
 
-from flask import jsonify
+import requests
+from flask import jsonify, request
 
 from function_authentication import login_required
 from function_api import api_get, api_post
@@ -68,6 +69,87 @@ def register_route_scaling_management(app):
     @broker_endpoint("Unable to retrieve the scaling activity log. Please try again later.")
     def ui_scaling_activity_log():
         return history_page('/scaling/log')
+
+    # Scaling policy: the time zone, schedule windows and the preview.
+
+    @app.route(f'{API_PREFIX}/scaling/policy')
+    @login_required
+    @broker_endpoint("Unable to retrieve the scaling policy. Please try again later.")
+    def ui_scaling_policy():
+        # The Scaling section opens on this page. A broker API or database older than scaling
+        # schedules answers 404, which becomes Available: false so the page can offer the
+        # scaling rules instead of an error with no way to reach them.
+        try:
+            body = api_get('/scaling/policy')
+        except requests.exceptions.HTTPError as e:
+            if getattr(getattr(e, 'response', None), 'status_code', None) != 404:
+                raise
+            logger.info("The broker has no scaling policy yet; offering the scaling rules instead.")
+            return jsonify({'Available': False})
+        return jsonify(dict(body if isinstance(body, dict) else {}, Available=True))
+
+    @app.route(f'{API_PREFIX}/scaling/policy', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to update the scaling policy. Please try again later.")
+    def ui_update_scaling_policy():
+        zone = json_body().get('timezone')
+        if not isinstance(zone, str) or not zone.strip():
+            raise BadRequest("Choose a time zone.")
+        return jsonify(api_post('/scaling/policy/update', {'timezone': zone.strip()[:64]}))
+
+    @app.route(f'{API_PREFIX}/scaling/timezones')
+    @login_required
+    @broker_endpoint("Unable to list time zones. Please try again later.")
+    def ui_time_zones():
+        return jsonify(api_get('/scaling/timezones'))
+
+    @app.route(f'{API_PREFIX}/scaling/schedules', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to save the scaling schedule. Please try again later.")
+    def ui_create_scaling_schedule():
+        return jsonify(api_post('/scaling/schedules/create', _schedule_payload(json_body()))), 201
+
+    @app.route(f'{API_PREFIX}/scaling/schedules/<int:scheduleid>/update', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to save the scaling schedule. Please try again later.")
+    def ui_update_scaling_schedule(scheduleid):
+        return jsonify(api_post(f'/scaling/schedules/{scheduleid}/update', _schedule_payload(json_body())))
+
+    @app.route(f'{API_PREFIX}/scaling/schedules/<int:scheduleid>/delete', methods=['POST'])
+    @login_required
+    @broker_endpoint("Unable to delete the scaling schedule. Please try again later.")
+    def ui_delete_scaling_schedule(scheduleid):
+        return jsonify(api_post(f'/scaling/schedules/{scheduleid}/delete'))
+
+    @app.route(f'{API_PREFIX}/scaling/preview', methods=['GET', 'POST'])
+    @login_required
+    @broker_endpoint("Unable to preview scaling. Please try again later.")
+    def ui_scaling_preview():
+        if request.method == 'GET':
+            at = (request.args.get('at') or '').strip()[:32]
+            return jsonify(api_get('/scaling/preview', params={'at': at} if at else None))
+
+        payload = json_body()
+        body = {}
+        at = payload.get('at')
+        if isinstance(at, str) and at.strip():
+            body['at'] = at.strip()[:32]
+        rule = payload.get('rule')
+        if isinstance(rule, dict):
+            body['rule'] = {key: rule[key] for key in (*RULE_FIELDS, 'stopmode', 'name') if key in rule}
+        return jsonify(api_post('/scaling/preview', body))
+
+
+SCHEDULE_FIELDS = ('name', 'days', 'start', 'end', 'enabled', 'stopmode', *RULE_FIELDS)
+
+
+def _schedule_payload(payload):
+    """Forward a schedule window's fields. The broker validates them and names any problem."""
+    missing = [field for field in ('name', 'days', 'start', 'end', *RULE_FIELDS)
+               if payload.get(field) is None or (isinstance(payload.get(field), str) and not payload[field].strip())]
+    if missing:
+        raise BadRequest(f"Missing required field(s): {', '.join(missing)}.")
+    return {field: payload[field] for field in SCHEDULE_FIELDS if field in payload and payload[field] is not None}
 
 
 def _rule_payload(payload):

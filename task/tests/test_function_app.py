@@ -1,4 +1,5 @@
 import importlib
+import json
 
 import pytest
 
@@ -130,12 +131,14 @@ def test_request_timeouts_are_passed(monkeypatch):
     function_app.trigger_return_released_vms(timer)
     function_app.time_triggered_scaling(timer)
     function_app.purge_audit_log(timer)
+    function_app.advance_maintenance(timer)
 
     assert calls == [
         ("get", "https://broker.example/api/vms", 30),
         ("post", "https://broker.example/api/vms/released", 120),
         ("post", "https://broker.example/api/scaling/trigger", 120),
         ("post", "https://broker.example/api/audit/purge", 120),
+        ("post", "https://broker.example/api/maintenance/advance", 110),
     ]
 
 
@@ -165,6 +168,29 @@ def test_timer_functions_tolerate_api_errors(monkeypatch):
     function_app.trigger_return_released_vms(timer)
     function_app.time_triggered_scaling(timer)
     function_app.purge_audit_log(timer)
+    function_app.advance_maintenance(timer)
+
+
+@pytest.mark.parametrize("status,body,level,text", [
+    (200, '{"Result": "Advanced", "RunID": 7, "Status": "Active", "Actions": [{"Hostname": "lnx-01"}]}', "INFO",
+     "Maintenance run 7 advanced (Active): 1 action(s)."),
+    (404, '{"error": "That endpoint does not exist."}', "WARNING", "does not support rolling maintenance yet"),
+    (500, '{"error": "boom"}', "ERROR", "Failed to advance maintenance"),
+])
+def test_the_maintenance_advance_reports_its_outcome(monkeypatch, caplog, status, body, level, text):
+    monkeypatch.setattr(function_app.requests, "post", lambda *_args, **_kwargs: FakeResponse(status, data=json.loads(body), text=body))
+
+    with caplog.at_level("INFO"):
+        function_app.advance_maintenance(function_app.func.TimerRequest(past_due=True))
+
+    assert any(record.levelname == level and text in record.getMessage() for record in caplog.records)
+
+
+def test_an_idle_advance_logs_nothing(monkeypatch, caplog):
+    monkeypatch.setattr(function_app.requests, "post", lambda *_args, **_kwargs: FakeResponse(200, data={"Result": "NoRun"}))
+    with caplog.at_level("INFO"):
+        function_app.advance_maintenance(function_app.func.TimerRequest())
+    assert not [record for record in caplog.records if "Maintenance" in record.getMessage()]
 
 
 def test_fake_modules_are_used():

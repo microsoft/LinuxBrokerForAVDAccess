@@ -56,6 +56,17 @@ Use that path when you need to:
 - `067_create_table-audit_log.sql`: creates `dbo.AuditLog`
 - `072_add_drain_requested_to_virtual_machines.sql`: adds the drain flag to `dbo.VirtualMachines`
 - `083_create_table-host_heartbeats.sql`: creates `dbo.HostHeartbeats`
+- `088_add_assignment_dates_to_virtual_machines.sql`: adds `AssignedDate` and `LastCheckoutDate` to `dbo.VirtualMachines`
+- `089_add_profile_reset_to_vmusers.sql`: adds the requested profile reset to `dbo.VmUsers`
+- `090_add_username_index_to_virtual_machines_history.sql`: indexes `dbo.VirtualMachinesHistory` by user for the user page
+- `101_create_table-scaling_policy.sql`: creates `dbo.ScalingPolicy`, the one-row policy holding the schedules' time zone
+- `102_create_table-scaling_schedules.sql`: creates `dbo.ScalingSchedules`, the time windows that override the default rule
+- `111_add_phase_columns_to_vm_scaling_activity_log.sql`: records the phase, its minimum and maximum, and the serviceable and draining counts on each scaling run
+- `112_add_start_requested_at_to_virtual_machines.sql`: adds `StartRequestedAt`, the stamp start-to-ready times are measured from
+- `115_create_table-checkout_events.sql`: creates `dbo.CheckoutEvents`, one row per checkout request and its outcome
+- `116_create_table-host_start_events.sql`: creates `dbo.HostStartEvents`, how long each start took to become reachable
+- `124_create_table-maintenance_runs.sql`: creates `dbo.MaintenanceRuns`
+- `125_create_table-maintenance_run_hosts.sql`: creates `dbo.MaintenanceRunHosts`, each host's progress through a run
 
 The table scripts above are written to be rerunnable.
 
@@ -142,6 +153,40 @@ The scripts do not contain `USE <database>` statements. The target database come
 - `085_create_procedure-GetHostHealth.sql`: returns every host with its latest heartbeat, the heartbeat age, and the current settings version and reconcile interval
 - `086_alter_procedure-DeleteVm.sql`: returns a row only when a VM was deleted, with its hostname, and removes its heartbeat
 - `087_create_procedure-RevertVmPowerAction.sql`: puts back what `BeginVmPowerAction` recorded when Azure refuses the operation, including the assignment a refused stop ended, unless the user has since been given another host
+- `091_alter_procedure-CheckoutVm.sql`: stamps the assignment dates and adds `CheckoutType` (`Assigned` or `Reused`) and `ProfileResetRequested` to its result
+- `092_create_procedure-GetSessions.sql`: every assignment joined with the sessions each host last reported
+- `093_create_procedure-SearchUsers.sql`: finds broker users by any part of the name, exact and prefix matches first
+- `094_create_procedure-GetUserDetails.sql`: one user, with the hosts they hold or that are still cleaning them up
+- `095_create_procedure-GetUserHostHistory.sql`: the hosts a user had, from the temporal history
+- `096_create_procedure-GetVmByHostname.sql`: the registered host a session action names
+- `097_create_procedure-RequestProfileReset.sql`, `098_create_procedure-CancelProfileReset.sql`: request or withdraw a fresh profile at the user's next new assignment
+- `099_create_procedure-BeginProfileReset.sql`, `100_create_procedure-CompleteProfileReset.sql`: decide during a checkout whether the reset can be applied (only when nothing else can be using the profile), and clear it once applied
+- `103_create_function-fnScheduleWeekIntervals.sql`: the minutes of the week a schedule window covers, across midnight and the end of the week
+- `104_create_function-fnActiveScalingPhase.sql`: the scaling values in force at a time: the enabled window covering it in the policy's time zone, or the default rule
+- `105_create_procedure-GetScalingPolicy.sql`, `106_create_procedure-GetScalingSchedules.sql`: the policy, what is in force now, and every window
+- `107_create_procedure-SaveScalingSchedule.sql`, `108_create_procedure-DeleteScalingSchedule.sql`: create, replace or remove a window; overlapping enabled windows are refused under an application lock
+- `109_create_procedure-SetScalingPolicyTimeZone.sql`, `110_create_procedure-GetTimeZones.sql`: the policy time zone, from `sys.time_zone_info`
+- `113_alter_procedure-TriggerScalingLogic.sql`: takes its values from the active phase, lets `MinVMs` win over `MaxVMs`, waits briefly for the scaling lock, stamps `StartRequestedAt`, logs the phase, and adds a dry run (`@DryRun`, `@AtUtc`, `@OverrideJson`) that changes nothing
+- `114_alter_procedure-BeginVmPowerAction.sql`: a stop that names no mode uses the active phase's, and starts are stamped for timing
+- `117_create_procedure-RecordCheckoutEvent.sql`: records one checkout outcome; an unknown outcome is stored as `Error`
+- `118_alter_procedure-SetVmNetworkStatus.sql`: records a host start's time to reachable in `dbo.HostStartEvents`
+- `119_create_procedure-GetUtilizationSeries.sql`, `120_create_procedure-GetCheckoutStats.sql`: the dashboard's capacity series and checkout health
+- `121_create_procedure-GetAttentionItems.sql`: what needs an operator now: no ready hosts, denied checkouts, and hosts unreachable, stuck in cleanup or never connected to
+- `122_create_procedure-PurgeCheckoutEvents.sql`: removes checkout and host-start events past the retention, in batches
+- `123_alter_procedure-GetVmSummary.sql`: adds `Serviceable` and `InUse`, the scaler's definitions
+- `126_create_function-fnMaintenanceRunSummary.sql`: every maintenance run with how many hosts are at each stage
+- `127_create_procedure-CreateMaintenanceRun.sql`: starts a run; only one is active, paused or stopping at a time
+- `128_create_procedure-GetMaintenanceRuns.sql`, `129_create_procedure-GetMaintenanceRun.sql`, `130_create_procedure-GetMaintenanceRunHosts.sql`: the runs, one run with what admission sees now, and its hosts with their live state
+- `131_create_procedure-BeginMaintenanceTick.sql`, `132_create_procedure-EndMaintenanceTick.sql`: a lease so two advances never work on a run at once
+- `133_create_procedure-ClaimMaintenanceAdmissions.sql`: admits the next hosts under the scaling application lock, taking a ready host only while more than the minimum are ready
+- `134_create_procedure-SetMaintenanceHostState.sql`: a compare-and-set on each host's step; a final state never changes
+- `135_create_procedure-SetMaintenanceRunStatus.sql`: pause, resume, cancel, fail, complete and finish
+- `136_create_procedure-ReturnMaintenanceHost.sql`: puts a host back the way the run found it
+- `137_create_procedure-GetMaintenanceAttention.sql`: hosts a run could not patch that are still out of rotation
+- `138_alter_procedure-SetVmDrain.sql`, `139_alter_procedure-SetVmMaintenance.sql`: refuse to return a host a run is patching, restarting or verifying (`InvalidState`, `InMaintenanceRun`); before patching starts, a manual return skips it
+- `140_alter_procedure-TriggerScalingLogic.sql`: keeps one more host serviceable while a run waits for a spare ready host, never past `MaxVMs`
+- `141_create_procedure-GetVmsPaged.sql`, `142_create_procedure-GetVmStatusCounts.sql`: the host list's page, filtered, searched and sorted, and its status counts
+- `143_create_procedure-ImportLinuxHostVm.sql`: registers a host found in Azure as `Unreachable` with its Azure power state, or reports `Exists`
 
 `033` exists as its own file rather than being folded into `014` because `014` runs before `029` adds those columns, and SQL Server validates column references against existing tables when a procedure is created.
 
@@ -158,7 +203,10 @@ The current code and deployment flow depend on the following SQL objects being p
 - `dbo.LinuxHostSettings`
 - `dbo.AuditLog`
 - `dbo.HostHeartbeats`
-- all of the stored procedures above
+- `dbo.ScalingPolicy` and `dbo.ScalingSchedules`
+- `dbo.CheckoutEvents` and `dbo.HostStartEvents`
+- `dbo.MaintenanceRuns` and `dbo.MaintenanceRunHosts`
+- all of the stored procedures and functions above
 - especially `dbo.CheckoutVm`, `dbo.ReleaseVm`, `dbo.UpdateVmAttributes`, and `dbo.RegisterLinuxHostVm`
 
 Two current behaviors are worth calling out:
@@ -174,6 +222,11 @@ Two current behaviors are worth calling out:
 - A draining host (`DrainRequested = 1`) is offered to no new user, is left out of scaling capacity, and moves to Maintenance once its assignment has ended and it is clean. `dbo.BeginVmPowerAction` records every operator start, stop and restart the way scaling records its own, and stopping an assigned host ends the assignment exactly as `dbo.ReturnVm` does. If Azure refuses, `dbo.RevertVmPowerAction` restores the power state and gives the assignment back in one transaction.
 - `dbo.AuditLog` is append-only and UTC. The API writes it through `dbo.WriteAuditEntry` and purges it through `dbo.PurgeAuditLog`; nothing else updates or deletes it.
 - `dbo.HostHeartbeats` keeps only each host's latest heartbeat. `dbo.RecordHostHeartbeat` writes `dbo.VirtualMachines` only when the reported settings version changed, because that table is system-versioned and a write on every heartbeat would add a history row per host per minute.
+- Sessions come from `dbo.GetSessions`, which joins each assignment with the sessions the host's heartbeat last reported. A requested profile reset (`dbo.VmUsers.ProfileResetRequestedAt`) is applied only on the user's next new assignment, and only when `dbo.BeginProfileReset` finds nothing else that could be using the profile.
+- Scaling reads its values from `dbo.fnActiveScalingPhase`: the enabled `dbo.ScalingSchedules` window covering the current time in `dbo.ScalingPolicy`'s time zone, or else the default rule. Enabled windows never overlap. `MinVMs` wins over `MaxVMs`, so draining and maintenance hosts counting toward the maximum never make scaling stop ready hosts below the minimum. `TriggerScalingLogic @DryRun = 1` makes the same decision and writes nothing.
+- `dbo.CheckoutEvents` and `dbo.HostStartEvents` are kept for the API's `CHECKOUT_EVENT_RETENTION_DAYS` and purged with the audit log.
+- Only one maintenance run is active, paused or stopping at a time. Admission takes the scaling application lock, so neither admission nor scaling can take ready capacity below the minimum while the other acts, and a run waiting for a spare ready host makes scaling keep one more host on. `dbo.SetMaintenanceHostState` is a compare-and-set, so overlapping advances cannot both act on a step.
+- `dbo.GetVmsPaged` and `dbo.GetVmStatusCounts` apply the same status tests as `dbo.CheckoutVm`, so a host the list calls ready is one a checkout could take. Imported hosts start `Unreachable`.
 
 Linux host settings are a single fleet-wide profile:
 
@@ -275,7 +328,8 @@ After bootstrap, verify both tables and procedures.
 ```sql
 SELECT name
 FROM sys.tables
-WHERE name IN ('VmScalingRules', 'VmScalingActivityLog', 'VirtualMachines', 'VmUsers', 'LinuxHostSettings', 'AuditLog', 'HostHeartbeats')
+WHERE name IN ('VmScalingRules', 'VmScalingActivityLog', 'VirtualMachines', 'VmUsers', 'LinuxHostSettings', 'AuditLog', 'HostHeartbeats',
+               'ScalingPolicy', 'ScalingSchedules', 'CheckoutEvents', 'HostStartEvents', 'MaintenanceRuns', 'MaintenanceRunHosts')
 ORDER BY name;
 ```
 
@@ -328,8 +382,52 @@ WHERE name IN (
     'BeginVmPowerAction',
     'RevertVmPowerAction',
     'RecordHostHeartbeat',
-    'GetHostHealth'
+    'GetHostHealth',
+    'GetSessions',
+    'SearchUsers',
+    'GetUserDetails',
+    'GetUserHostHistory',
+    'GetVmByHostname',
+    'RequestProfileReset',
+    'CancelProfileReset',
+    'BeginProfileReset',
+    'CompleteProfileReset',
+    'GetScalingPolicy',
+    'GetScalingSchedules',
+    'SaveScalingSchedule',
+    'DeleteScalingSchedule',
+    'SetScalingPolicyTimeZone',
+    'GetTimeZones',
+    'RecordCheckoutEvent',
+    'GetUtilizationSeries',
+    'GetCheckoutStats',
+    'GetAttentionItems',
+    'PurgeCheckoutEvents',
+    'CreateMaintenanceRun',
+    'GetMaintenanceRuns',
+    'GetMaintenanceRun',
+    'GetMaintenanceRunHosts',
+    'BeginMaintenanceTick',
+    'EndMaintenanceTick',
+    'ClaimMaintenanceAdmissions',
+    'SetMaintenanceHostState',
+    'SetMaintenanceRunStatus',
+    'ReturnMaintenanceHost',
+    'GetMaintenanceAttention',
+    'GetVmsPaged',
+    'GetVmStatusCounts',
+    'ImportLinuxHostVm'
 )
+ORDER BY name;
+```
+
+### Check functions
+
+```sql
+SELECT name
+FROM sys.objects
+WHERE type IN ('FN', 'IF', 'TF')
+  AND name IN ('fnScheduleWeekIntervals', 'fnActiveScalingPhase', 'fnMaintenanceRunSummary')
 ORDER BY name;
 ```
 

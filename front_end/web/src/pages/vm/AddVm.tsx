@@ -73,7 +73,7 @@ export function AddVm() {
 
   return (
     <>
-      <Breadcrumbs items={[{ label: 'Virtual machines', to: '/vms' }, { label: 'Add VM' }]} />
+      <Breadcrumbs items={[{ label: 'Hosts', to: '/vms' }, { label: 'Add VM' }]} />
 
       <PageHeader
         title="Add virtual machine"

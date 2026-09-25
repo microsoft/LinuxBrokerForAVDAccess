@@ -20,6 +20,9 @@ from route_vm_management import register_route_vm_management
 from route_scaling_management import register_route_scaling_management
 from route_host_settings import register_route_host_settings
 from route_audit import register_route_audit
+from route_sessions import register_route_sessions
+from route_metrics import register_route_metrics
+from route_maintenance import register_route_maintenance
 
 # ===============================
 # Flask App
@@ -27,7 +30,7 @@ from route_audit import register_route_audit
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('FLASK_KEY')
 app.config['SESSION_TYPE'] = 'filesystem'
-app.config['VERSION'] = '0.116'
+app.config['VERSION'] = '0.120'
 # Tokens stay valid for the life of the session rather than expiring after an
 # hour, so a long-lived management page does not start rejecting submissions.
 app.config['WTF_CSRF_TIME_LIMIT'] = None
@@ -299,6 +302,21 @@ register_route_host_settings(app)
 # Audit log
 
 register_route_audit(app)
+
+# ===============================
+# Sessions and users
+
+register_route_sessions(app)
+
+# ===============================
+# Dashboard metrics
+
+register_route_metrics(app)
+
+# ===============================
+# Rolling maintenance
+
+register_route_maintenance(app)
 
 # ===============================
 # Main

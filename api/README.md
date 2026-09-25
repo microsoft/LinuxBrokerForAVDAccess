@@ -17,7 +17,7 @@ Role groups used below: **READ** = `Reader`, `Operator`, `FullAccess`; **OPERATE
 | GET | `/health` | none | Checks database connectivity and returns API health and version. |
 | GET | `/api/version` | none | Returns the API version string. |
 | GET | `/api/me` | any valid token | The caller's app roles and `permissions` (`read`, `operate`, `admin`), plus `legacyScopeAccess`. The portal uses it to adapt its interface. |
-| GET | `/api/vms` | READ, `ScheduledTask` | Lists all broker VM records, including `ReleasedDate`, `CleanupPending`, `CleanupUsername`, `PowerStateChangedDate`, `DrainRequested`, and `DrainRequestedDate`. |
+| GET | `/api/vms` | READ, `ScheduledTask` | Lists all broker VM records, including `ReleasedDate`, `CleanupPending`, `CleanupUsername`, `PowerStateChangedDate`, `DrainRequested`, and `DrainRequestedDate`. With any of `page`, `per_page`, `q`, `status`, `sort` or `dir` it answers one page of the host list instead; see [Host List and Import](#host-list-and-import). |
 | GET | `/api/vms/summary` | READ, `ScheduledTask` | Returns dashboard counters: `TotalVMs`, `Available`, `CheckedOut`, `Maintenance`, `Released`, `PoweredOn`, `PoweredOff`, `Unreachable`, `Ready`, `CleanupPending`, and `Draining`. |
 | POST | `/api/vms/checkout` | `AvdHost`, `FullAccess`, or `AVD_HOST_GROUP_ID` membership | Checks out a ready Linux host and provisions the user in one SSH session. |
 | POST | `/api/vms/<vmid>/update-attributes` | ADMIN, `ScheduledTask` | Repairs the broker's record of a VM's power, network, or broker status. It does not start or stop anything. `ScheduledTask` keeps access for task builds older than `/network-status`. |
@@ -32,6 +32,8 @@ Role groups used below: **READ** = `Reader`, `Operator`, `FullAccess`; **OPERATE
 | POST | `/api/vms/sync` | OPERATE | Corrects every host's recorded power state from Azure now, as scaling does before each run. |
 | POST | `/api/vms/<vmid>/delete` | ADMIN | Deletes a VM record; `404` when there is none. |
 | POST | `/api/vms/add` | ADMIN | Adds a VM record. |
+| GET | `/api/vms/import/candidates` | ADMIN | Linux host VMs in `VM_RESOURCE_GROUP` tagged `broker-role=linux-host` that are not registered, with their power states and DNS-resolved addresses. |
+| POST | `/api/vms/import` | ADMIN | Registers tagged hosts by name (`{"hostnames": [...]}`, at most 100), checking each against Azure and DNS again. |
 | GET | `/api/vms/<vmid>` | READ | Gets one VM record. |
 | POST | `/api/vms/<vmid>/return` | OPERATE | Ends an assignment and removes the user from the host; the VM stays `CleanupPending` until that succeeds. |
 | POST | `/api/vms/<hostname>/release` | OPERATE, `LinuxHost`, or `LINUX_HOST_GROUP_ID` membership | Marks a host-side session released, with optional `username` and `leaseId` validation. |
@@ -45,6 +47,28 @@ Role groups used below: **READ** = `Reader`, `Operator`, `FullAccess`; **OPERATE
 | POST | `/api/scaling/rules/<int:ruleid>/update` | ADMIN | Updates the scaling rule; the resulting rule is validated. |
 | POST | `/api/scaling/rules/<int:ruleid>/delete` | ADMIN | Deletes a scaling rule. |
 | POST | `/api/scaling/rules/history` | READ | Returns scaling rule history, optionally paged with `page` and `per_page`. |
+| GET | `/api/scaling/policy` | READ | The policy time zone, the default rule, every schedule window, and what applies now and next; `404` until the database has the scaling policy procedures. |
+| POST | `/api/scaling/policy/update` | ADMIN | Sets the time zone every schedule window is read in (`{"timezone": "<Windows zone name>"}`). |
+| GET | `/api/scaling/timezones` | READ | The time zones the policy can use, from `sys.time_zone_info`. |
+| POST | `/api/scaling/schedules/create` | ADMIN | Adds a schedule window; `409` when it overlaps another enabled window. |
+| POST | `/api/scaling/schedules/<int:scheduleid>/update` | ADMIN | Replaces a schedule window. |
+| POST | `/api/scaling/schedules/<int:scheduleid>/delete` | ADMIN | Removes a schedule window. |
+| GET, POST | `/api/scaling/preview` | READ | A dry run of the next scaling decision and why, optionally at another time (`at`) or, in a POST, with proposed values (`rule`). Changes nothing. |
+| GET | `/api/metrics/utilization` | READ | Capacity and checkout health over the last day (`?hours=24`) or week (`?hours=168`). |
+| GET | `/api/metrics/attention` | READ | What needs an operator now, most severe first. |
+| GET | `/api/sessions` | READ | Every assignment and reported session, with the state an operator acts on (`?q=` matches user or host, `?state=` one state). |
+| GET | `/api/users` | READ | Broker users whose name contains `?q=`, exact and prefix matches first. |
+| GET | `/api/users/<username>` | READ | One user: where they are now, their sessions, the hosts they had, and recent actions on them. |
+| POST | `/api/sessions/<hostname>/<username>/signout` | OPERATE | Ends the user's desktop, then releases the host; `{"returnHost": true}` also ends the assignment. |
+| POST | `/api/sessions/<hostname>/<username>/message` | OPERATE | Shows a message in the user's sessions on the host. |
+| POST | `/api/sessions/broadcast` | OPERATE | Shows a message in every session, or in every session on the named hosts (`hostnames`). |
+| POST | `/api/users/<username>/reset-profile` | ADMIN | Requests a fresh profile at the user's next new assignment. The old profile is kept, renamed. |
+| POST | `/api/users/<username>/reset-profile/cancel` | ADMIN | Withdraws a requested profile reset. |
+| GET | `/api/maintenance/runs` | READ | Recent maintenance runs, newest first, and the active one with what admission sees now. Each run's `LastTickAgeSeconds` and `CreatedAgeSeconds` come from the database's clock, so the portal can tell a run that is not being advanced. |
+| GET | `/api/maintenance/runs/<int:run_id>` | READ | One run and every host in it, with its progress and live state. |
+| POST | `/api/maintenance/runs/create` | ADMIN | Starts a rolling maintenance run over the named hosts; `409` while another run is active. |
+| POST | `/api/maintenance/runs/<int:run_id>/pause`, `/resume`, `/cancel` | ADMIN | Pauses, resumes or cancels a run. Hosts mid-step finish their step. |
+| POST | `/api/maintenance/advance` | `ScheduledTask`, `FullAccess` | Advances the active run within a deadline. The scheduled task calls it every minute. |
 | GET | `/api/hosts/settings` | READ, `LinuxHost`, `ScheduledTask`, or `LINUX_HOST_GROUP_ID` membership | Returns the fleet-wide Linux host settings profile. |
 | POST | `/api/hosts/settings/update` | ADMIN | Updates the fleet-wide Linux host settings profile. A portal user is recorded as `UpdatedBy` from their token. |
 | POST | `/api/hosts/settings/apply` | OPERATE, `ScheduledTask` | Pushes the current settings profile to reachable hosts over SSH, in parallel. |
@@ -77,8 +101,8 @@ These callers constrain response shapes and endpoint compatibility.
 
 | Consumer | Endpoints |
 | --- | --- |
-| `front_end` portal | VM, host action, scaling, host-settings, fleet health, and audit endpoints, and `/api/me` at sign-in. The dashboard prefers `/api/vms/summary` and reads `/api/hosts/health?summary=true`; history pages request `page` and `per_page`. |
-| `task\function_app.py` | `/api/vms`, `/api/vms/released`, `/api/vms/<vmid>/network-status` (falling back to `update-attributes` on older APIs), `/api/scaling/trigger`, `/api/audit/purge` (daily) |
+| `front_end` portal | VM, host action, import, scaling policy, host-settings, fleet health, session, user, metrics, maintenance and audit endpoints, and `/api/me` at sign-in. The dashboard prefers `/api/vms/summary` and reads `/api/hosts/health?summary=true` and `/api/metrics/*`; the host list and history pages request `page` and `per_page`. |
+| `task\function_app.py` | `/api/vms`, `/api/vms/released`, `/api/vms/<vmid>/network-status` (falling back to `update-attributes` on older APIs), `/api/scaling/trigger`, `/api/maintenance/advance` (every minute), `/api/audit/purge` (daily, which also purges checkout events) |
 | Linux host release agent (`linux_host\...\release-session.sh`) | `/api/vms/<hostname>/release`, `/api/hosts/<hostname>/heartbeat` |
 | AVD host (`avd_host\...\Connect-LinuxBroker.ps1`) | `/api/vms/checkout` |
 | Linux host settings agent | `/api/hosts/settings`, `/api/hosts/<hostname>/settings/ack` |
@@ -89,7 +113,7 @@ The start, stop and restart endpoints record the intended state in SQL first (`B
 
 A host with a user assigned can only be stopped or restarted by `FullAccess`, and only when the request names its hostname in `confirm`; an Operator gets `403` and a missing confirmation `409`, naming the user. The procedure re-checks the assignment, so a host assigned between the check and the action is refused too. Stopping an assigned host ends the assignment first, as a return does: the host is `CleanupPending` until the previous user is removed, which the sweep retries once the host is running again, and the user gets a different, running host when they reconnect. Restart keeps the assignment, and the user can reconnect once the host is back. The scaler may start a stopped idle host again to keep `MinVMs`; drain it to keep it out of rotation.
 
-Drain sets `DrainRequested` rather than a new `VmStatus`, so the lifecycle states and their constraint are unchanged. `CheckoutVm` gives a draining host to no new user but lets its current user reconnect. When the assignment ends and the host is clean, `CompleteVmCleanup` moves it to `Maintenance`, and the sweep's `FinalizeVmDrains` catches any other path to an unassigned, clean host. Draining an idle host moves it to `Maintenance` at once. Drain has no deadline: forcing a signed-in user off needs the session control that 2.3 in the [roadmap](../docs/ROADMAP.md) adds. Scaling leaves draining hosts out of its capacity counts and never starts or stops them, so draining a busy pool brings up replacements within `MaxVMs`.
+Drain sets `DrainRequested` rather than a new `VmStatus`, so the lifecycle states and their constraint are unchanged. `CheckoutVm` gives a draining host to no new user but lets its current user reconnect. When the assignment ends and the host is clean, `CompleteVmCleanup` moves it to `Maintenance`, and the sweep's `FinalizeVmDrains` catches any other path to an unassigned, clean host. Draining an idle host moves it to `Maintenance` at once. Drain has no deadline. An operator can sign the user out from Sessions, and a maintenance run can set a deadline after a warning (see [Rolling Maintenance](#rolling-maintenance)). Scaling leaves draining hosts out of its capacity counts and never starts or stops them, so draining a busy pool brings up replacements within `MaxVMs`.
 
 ## Heartbeat and Fleet Health
 
@@ -115,6 +139,49 @@ The actor comes from the validated token: a portal user's sign-in name, or for a
 
 `GET /api/audit` takes `page`, `per_page` (up to 1000), `from` and `to` (a UTC date, `YYYY-MM-DD`, or an ISO-8601 UTC time; a bare `to` date covers that whole day), `actor` (exact object ID or any part of the name), `action` (exact, or a prefix ending in a dot such as `vm.`), `targetType`, `target` (any part), and `outcome`. It answers with the same envelope as the paged history endpoints, and `OccurredAtUtc` is an ISO-8601 UTC string. The scheduled task calls `POST /api/audit/purge` daily. It removes entries older than `AUDIT_RETENTION_DAYS` in batches of up to 2,000 rows and commits each one, so an audit write never waits for more than one batch; a run stops after 90 seconds and the next run finishes a larger backlog. `PurgeAuditLog` clamps the retention to 30–3650 days.
 
+## Sessions and Users
+
+`GET /api/sessions` joins every assignment (checked out, released, or waiting for its user to be cleaned up) with the sessions each host last reported in its heartbeat, and gives each one the state an operator acts on:
+
+| State | Meaning |
+| --- | --- |
+| `active`, `disconnected` | What a current heartbeat reports for the assigned user. |
+| `released` | The user disconnected and the grace period is running (`GraceRemainingSeconds`). |
+| `connecting` | Checked out in the last three minutes; the user is still signing in. |
+| `not-connected` | Checked out longer ago, and the host does not report the user. |
+| `cleanup-pending` | Returned, and the previous user has not been removed yet. |
+| `unmanaged` | A session a host reports for a user the broker did not assign there. |
+| `unknown` | No current heartbeat, so the host's view is not known. |
+
+Sign-out, messages and profile resets run the allowlisted `session-control.sh` on the host over SSH, and it only acts on accounts the broker created. Sign-out ends the user's desktop and then releases the host through the lease-qualified `ReleaseVm`, so the grace period starts without depending on the agent's own release; `returnHost` also ends the assignment. `POST /api/sessions/broadcast` runs `session-control.sh message-all` on every host in use, or on the named hosts, in parallel within `BROADCAST_CONCURRENCY`, `BROADCAST_HOST_TIMEOUT_SECONDS` and `BROADCAST_DEADLINE_SECONDS`, and reports each host as `Delivered`, `NoSession`, `AgentOutdated` or `Failed`, plus the hosts it had no time to try. Messages are at most 500 characters; the audit keeps the first 200.
+
+A profile reset is requested and then applied at the user's next new assignment, on the assigned host, just before `create-user.sh` mounts the home, so it can never race a sign-in. `BeginProfileReset` allows it only when this is the user's only assignment, no host is still cleaning them up, and no current heartbeat reports them elsewhere; otherwise it stays pending. The old home is renamed `<user>.reset-<UTC timestamp>` on the share and never deleted. A host running an agent older than 1.1.0 answers these actions with `409`, naming `Migrate-LinuxHostReleaseAgent.ps1`.
+
+## Scaling Policy and Schedules
+
+Schedule windows override the default rule on chosen days and times, read in one policy time zone (a Windows zone name, `UTC` until one is chosen): for example Monday to Friday 08:00–18:00 keeping at least five hosts ready. A window may run past midnight; outside every enabled window the default rule applies. Overlapping enabled windows are refused in SQL under a lock, and in the API with a message naming the clash. `TriggerScalingLogic` takes its values from the active phase, and `GET /api/scaling/preview` runs the same decision as a dry run against the current counts, so the portal can show what the next run would do, and why, before anything is saved. `MinVMs` wins over `MaxVMs`: draining and maintenance hosts count toward the maximum, and a scale-down never takes serviceable hosts below the minimum. Windows take effect at the next five-minute scaling run.
+
+## Trends and Attention
+
+Every checkout records its outcome (`Assigned`, `Reused`, `NoneAvailable`, `ProvisionFailed` or `Error`) and duration in `CheckoutEvents`. Recording never fails the checkout, and a missing procedure is logged once. `GET /api/metrics/utilization` combines the five-minute scaling runs with those events: running, in use, serviceable and the scaling maximum per bucket (15 minutes over a day, an hour over a week), denied checkouts, checkout time percentiles, and how long started hosts took to become reachable. `GET /api/metrics/attention` lists what needs an operator now: no ready host, denied checkouts in the last hour, hosts unreachable for 10 minutes, stuck in cleanup for 15, or checked out 30 minutes ago without the user connecting, hosts a maintenance run could not patch, and the fleet health flags, grouped. The daily audit purge also removes events older than `CHECKOUT_EVENT_RETENTION_DAYS`. Both endpoints answer `404` against a database without the procedures, and the portal then hides the charts.
+
+## Rolling Maintenance
+
+A maintenance run patches or restarts hosts a batch at a time while users keep working. Only one run is active at a time. The scheduled task calls `POST /api/maintenance/advance` every minute; each advance holds a lease on the run, records each step before taking it and confirms it once its effect is seen, and every change is a compare-and-set, so an advance that dies part way is picked up by the next. Each host goes:
+
+1. **Pending**, until admitted. Admission holds the scaling application lock and takes a ready host only while more than the minimum are ready (the run's override, or the phase's `MinVMs`). When a ready host waits for a spare, scaling keeps one more host on, never past `MaxVMs`.
+2. **Draining**, waiting for the user to leave. With a sign-out deadline, the user is warned first and signed out at the deadline; without one the run waits.
+3. **Starting**, if it was powered off, then **Patching** with the allowlisted `patch-host.sh` over SSH (`Security`, `All`, or none for `RebootOnly`), within `MAINTENANCE_PATCH_TIMEOUT_MINUTES`. A patch only succeeds when the kernel the host boots next has its initramfs, so the restart never lands in GRUB; when `/boot` is too small for another kernel the run keeps two.
+4. **Restarting** through Azure, then **Verifying**: reachable, a heartbeat whose boot time is after the restart, and xrdp active.
+5. **Succeeded**, and put back the way it was found: in service, or still drained or in maintenance if it was, and stopped again if it was off.
+
+Steps are retried after a timeout a bounded number of times, then the host is **Failed** and stays out of rotation for inspection. The run stops after too many failures and can pause after canary hosts. Pause stops admitting hosts and starting new steps; cancel returns hosts still draining, and hosts mid-step finish. Returning a host to service by hand is refused while a run is patching, restarting or verifying it; before that, a manual return skips it. Patching needs host agent 1.1.0; restart-only runs work with older agents.
+
+## Host List and Import
+
+`GET /api/vms` pages when any of `page`, `per_page` (1–200, default 50), `q`, `status`, `sort` or `dir` is sent; the task's bare list is unchanged. `status` is one of `all`, `ready`, `in-use`, `released`, `maintenance`, `draining`, `unreachable`, `off` or `cleanup`, using the same tests as checkout, and `sort` one of `hostname`, `status`, `power`, `network`, `user`, `ip`, `os`, `agent`, `heartbeat`, `sessions`, `vmid` or `updated`. The envelope adds `counts` for every status, narrowed by the search, and each row carries the host's OS, agent version, settings currency, last heartbeat and the assigned user's session state.
+
+`GET /api/vms/import/candidates` lists the VMs in `VM_RESOURCE_GROUP` tagged `broker-role=linux-host` that are not registered, with their power states, and resolves each as `<hostname>.<DOMAIN_NAME>`, the name every SSH call uses, within 10 seconds. A name that does not resolve is listed but cannot be imported: an address typed in by hand could let the IP-based probe mark a host ready that every SSH call would fail on. `POST /api/vms/import` checks each name against the tagged VMs and DNS again, and registers it through `ImportLinuxHostVm` as `Unreachable` with the power state Azure reports, so no one is given it before the probe reaches it. Both answer `409` until `VM_SUBSCRIPTION_ID` and `VM_RESOURCE_GROUP` are set.
 ## Authentication and Authorization
 
 Clients send Entra ID bearer tokens in the HTTP `Authorization` header. `token_required()` validates the token signature against the tenant JWKS, accepts audiences `CLIENT_ID` and `api://<CLIENT_ID>`, and accepts issuers:
@@ -166,6 +233,8 @@ Content-Type: application/json
 
 When neither `page` nor `per_page` is present, the response remains a bare JSON array. Do not remove that default: `task\function_app.py` and older portal builds consume these endpoints as plain lists. The unpaged path also deliberately tolerates `"null"` for `limit`; older portal builds sent that sentinel for **No Limit**, and rolling deployments must not turn it into a SQL `INT` conversion failure.
 
+`GET /api/vms` opts in the same way, with filters, sorting and status counts; see [Host List and Import](#host-list-and-import).
+
 Empty collection responses are arrays with `200`, including `/api/scaling/rules`, `/api/scaling/log`, and `/api/scaling/rules/history`.
 
 ## VM Summary
@@ -213,6 +282,10 @@ The API reads environment variables directly; it does not load `.env` files by i
 | `SWEEP_CONCURRENCY`, `SWEEP_DEADLINE_SECONDS` | optional | Parallel cleanups in the released-VM sweep (default `8`), and the time after which it stops starting new ones (default `40`); the rest are retried on the next run. |
 | `APPLY_CONCURRENCY`, `APPLY_HOST_TIMEOUT_SECONDS`, `APPLY_DEADLINE_SECONDS` | optional | Parallel pushes for Apply Now (default `10`), the SSH timeout per host (default `30`), and the time after which no new push starts (default `90`); hosts not reached converge on their next reconcile run. |
 | `AUDIT_RETENTION_DAYS` | optional | Audit entries older than this are removed by the daily purge. Defaults to `365`; clamped to 30–3650. |
+| `CHECKOUT_EVENT_RETENTION_DAYS` | optional | Checkout and host-start events older than this are removed by the same daily purge. Defaults to `90`; 7–3650. |
+| `BROADCAST_CONCURRENCY`, `BROADCAST_HOST_TIMEOUT_SECONDS`, `BROADCAST_DEADLINE_SECONDS` | optional | Parallel hosts for a broadcast message (default `10`), the SSH timeout per host (default `20`), and the time after which no new host is tried (default `60`). |
+| `MAINTENANCE_ADVANCE_DEADLINE_SECONDS` | optional | How long one maintenance advance may work before it leaves the rest for the next (default `45`, 15–100). |
+| `MAINTENANCE_PATCH_TIMEOUT_MINUTES` | optional | How long a host's patch may run before it counts as timed out and is retried (default `90`, 10–600). |
 | `EXPECTED_HOST_AGENT_VERSION` | optional | The host agent version fleet health expects. Defaults to `HOST_AGENT_VERSION` in `config.py`; override only to quiet the `agent-outdated` flag during a staged host migration. |
 
 ## Database Access
@@ -242,7 +315,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest
 ```
 
-`api\tests\` contains the unit tests. They replace pymssql, PyJWT and the Azure SDKs with fakes, and cover the error envelopes, pagination, authorization and the route-to-role contract, caching, the database concurrency limit, provisioning, the release lifecycle, scaling, host settings, host actions and drain, heartbeats and fleet health, and the audit log. An autouse fixture captures audit entries in memory (`audit_entries`) instead of sending them to the fake database, and a contract test requires every mutating route to be audited or listed as agent-only.
+`api\tests\` contains the unit tests. They replace pymssql, PyJWT and the Azure SDKs with fakes, and cover the error envelopes, pagination, authorization and the route-to-role contract, caching, the database concurrency limit, provisioning, the release lifecycle, scaling, schedules and the preview, host settings, host actions and drain, heartbeats and fleet health, sessions, messages and profile resets, checkout events and the dashboard metrics, the maintenance state machine tick by tick, the paged host list and import, and the audit log. An autouse fixture captures audit entries in memory (`audit_entries`) instead of sending them to the fake database, and a contract test requires every mutating route to be audited or listed as agent-only.
 
 `api\tests_integration\` runs the handlers against a real SQL Server with every script in `sql_queries` applied, through the real driver, so it catches procedure and handler mismatches the fakes cannot. Run it on its own, because the unit tests load fake modules for the whole process:
 

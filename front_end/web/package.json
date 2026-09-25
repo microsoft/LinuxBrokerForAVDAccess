@@ -1,7 +1,7 @@
 {
   "name": "linux-broker-portal",
   "private": true,
-  "version": "0.116.0",
+  "version": "0.120.0",
   "type": "module",
   "description": "Service Management Portal for the Linux Broker for AVD Access solution.",
   "scripts": {

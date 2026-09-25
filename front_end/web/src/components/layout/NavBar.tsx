@@ -16,24 +16,25 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { to: '/', label: 'Dashboard', icon: 'gauge' },
-  { to: '/vms', label: 'VM Management', icon: 'server' },
-  { to: '/scaling/rules', label: 'Scaling Management', icon: 'sliders', match: ['/scaling'] },
-  { to: '/settings/hosts', label: 'Host Settings', icon: 'wrench' },
+  { to: '/', label: 'Overview', icon: 'gauge' },
+  { to: '/vms', label: 'Hosts', icon: 'server' },
+  { to: '/sessions', label: 'Sessions', icon: 'person', match: ['/sessions', '/users'] },
+  { to: '/scaling', label: 'Scaling', icon: 'sliders', match: ['/scaling'] },
+  { to: '/settings/hosts', label: 'Settings', icon: 'wrench', match: ['/settings'] },
   { to: '/audit', label: 'Audit', icon: 'shield' },
 ];
 
 /**
  * Whether a nav item owns the current path.
  *
- * A section covers more than the page it links to: Scaling Management points at
- * /scaling/rules but also owns /scaling/log, which is why `match` exists. This is
+ * A section covers more than the page it links to: Scaling points at /scaling but also owns
+ * /scaling/log, which is why `match` exists. This is
  * deliberately not React Router's `NavLink`, whose matching is limited to the `to`
  * path and which overrides any `aria-current` passed to it.
  */
 function isActive(item: NavItem, pathname: string) {
   if (item.to === '/') {
-    // Every path starts with '/', so the dashboard needs an exact match.
+    // Every path starts with '/', so the overview needs an exact match.
     return pathname === '/';
   }
   const prefixes = item.match ?? [item.to];

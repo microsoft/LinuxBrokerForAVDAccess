@@ -179,13 +179,29 @@ AUDIT_PURGE_MAX_BATCHES = 500
 AUDIT_PURGE_TIME_BUDGET_SECONDS = 90
 
 # ===============================
+# Dashboard trends
+#
+# Every checkout is recorded with its outcome and duration, and every host start with how
+# long it took to become reachable. The daily audit purge removes both after this many days;
+# dbo.PurgeCheckoutEvents clamps to the same range.
+CHECKOUT_EVENT_RETENTION_DAYS = env_int('CHECKOUT_EVENT_RETENTION_DAYS', 90, minimum=7, maximum=3650)
+# GET /api/metrics/utilization windows, in hours, and the bucket each is drawn with.
+UTILIZATION_WINDOWS = {24: 15, 168: 60}
+# The Attention panel flags a powered-on host unreachable this long, a cleanup pending this
+# long, a checkout with no session this long, and counts denied checkouts over this window.
+ATTENTION_UNREACHABLE_MINUTES = 10
+ATTENTION_CLEANUP_MINUTES = 15
+ATTENTION_NOT_CONNECTED_MINUTES = 30
+ATTENTION_DENIED_MINUTES = 60
+
+# ===============================
 # Linux host agent
 #
 # The version every script in linux_host/ declares as LINUXBROKER_AGENT_VERSION. Bump it
 # with any change to those scripts; api/tests checks they agree. Fleet health flags a host
 # whose reported agent or scripts are older. The override exists so an operator can silence
 # the flag during a staged rollout.
-HOST_AGENT_VERSION = '1.0.0'
+HOST_AGENT_VERSION = '1.1.0'
 EXPECTED_HOST_AGENT_VERSION = (os.environ.get('EXPECTED_HOST_AGENT_VERSION') or '').strip() or HOST_AGENT_VERSION
 
 HEARTBEAT_MAX_BYTES = 32 * 1024
@@ -194,3 +210,62 @@ HEARTBEAT_MAX_SESSIONS = 50
 HEARTBEAT_STALE_INTERVALS = 3
 HEARTBEAT_STALE_MINIMUM_SECONDS = 180
 LOW_DISK_FREE_PERCENT = 10
+
+# ===============================
+# Sessions and users
+#
+# Signing a user out, messaging a session and resetting a profile all run
+# linux_host/session-control.sh on the host over SSH. A message is at most this many characters
+# (the host script refuses anything that could be longer in bytes), and the audit log keeps the
+# first SESSION_AUDIT_MESSAGE_CHARS of it.
+SESSION_CONTROL_TIMEOUT_SECONDS = 30
+PROFILE_RESET_TIMEOUT_SECONDS = 60
+SESSION_MESSAGE_MAX_CHARS = 500
+SESSION_AUDIT_MESSAGE_CHARS = 200
+# A checkout this recent with no session reported yet is still connecting, not stuck.
+SESSION_CONNECTING_SECONDS = 180
+USER_SEARCH_MAX_RESULTS = 200
+
+# Broadcast messages go to many hosts at once, in parallel and bounded like Apply Now, so one
+# unreachable host cannot hold up the rest.
+BROADCAST_CONCURRENCY = env_int('BROADCAST_CONCURRENCY', 10, minimum=1, maximum=64)
+BROADCAST_HOST_TIMEOUT_SECONDS = env_int('BROADCAST_HOST_TIMEOUT_SECONDS', 20, minimum=5, maximum=60)
+BROADCAST_DEADLINE_SECONDS = env_int('BROADCAST_DEADLINE_SECONDS', 60, minimum=10, maximum=100)
+BROADCAST_MAX_HOSTNAMES = 500
+
+# ===============================
+# Rolling maintenance
+#
+# The scheduled task calls POST /api/maintenance/advance every minute. One advance works for
+# at most MAINTENANCE_ADVANCE_DEADLINE_SECONDS and leaves any host it did not reach for the
+# next; it holds the run for MAINTENANCE_TICK_LEASE_SECONDS so two advances never overlap.
+MAINTENANCE_ADVANCE_DEADLINE_SECONDS = env_int('MAINTENANCE_ADVANCE_DEADLINE_SECONDS', 45, minimum=15, maximum=100)
+MAINTENANCE_TICK_LEASE_SECONDS = 120
+# How long each step may take before its request is repeated, and how many requests a step
+# gets before the host fails. Patch start, patch status and the Azure restart are idempotent.
+MAINTENANCE_START_TIMEOUT_SECONDS = 15 * 60
+MAINTENANCE_PATCH_TIMEOUT_SECONDS = env_int('MAINTENANCE_PATCH_TIMEOUT_MINUTES', 90, minimum=10, maximum=600) * 60
+MAINTENANCE_PATCH_START_GRACE_SECONDS = 3 * 60
+MAINTENANCE_RESTART_GRACE_SECONDS = 2 * 60
+MAINTENANCE_VERIFY_TIMEOUT_SECONDS = 15 * 60
+MAINTENANCE_SIGNOUT_RETRY_SECONDS = 5 * 60
+MAINTENANCE_MAX_ATTEMPTS = 3
+MAINTENANCE_SSH_TIMEOUT_SECONDS = 30
+MAINTENANCE_MAX_HOSTS = 500
+MAINTENANCE_RUN_LIST_LIMIT = 20
+# Patching needs patch-host.sh, which host agent 1.1.0 ships. Restart-only runs work with 1.0.0.
+PATCH_MIN_AGENT_VERSION = '1.1.0'
+
+# ===============================
+# Host list and import
+#
+# The portal pages the host list on the server. Importing lists the VMs in VM_RESOURCE_GROUP
+# tagged broker-role=linux-host that are not registered yet; each must resolve as
+# <hostname>.<DOMAIN_NAME>, the name every SSH call uses, before it can be imported.
+VM_LIST_STATUSES = ('all', 'ready', 'in-use', 'released', 'maintenance', 'draining', 'unreachable', 'off', 'cleanup')
+VM_LIST_SORTS = ('hostname', 'status', 'power', 'network', 'user', 'ip', 'os', 'agent', 'heartbeat', 'sessions', 'vmid', 'updated')
+IMPORT_TAG_NAME = 'broker-role'
+IMPORT_TAG_VALUE = 'linux-host'
+IMPORT_DNS_DEADLINE_SECONDS = 10
+IMPORT_DNS_CONCURRENCY = 16
+IMPORT_MAX_HOSTS = 100

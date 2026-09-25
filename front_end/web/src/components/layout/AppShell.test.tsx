@@ -31,7 +31,7 @@ describe('AppShell', () => {
 
   it('offers the management sections and the signed-in account when authenticated', () => {
     renderShell('/');
-    for (const label of ['Dashboard', 'VM Management', 'Scaling Management', 'Host Settings']) {
+    for (const label of ['Overview', 'Hosts', 'Sessions', 'Scaling', 'Settings', 'Audit']) {
       expect(screen.getByRole('link', { name: label })).toBeInTheDocument();
     }
     expect(screen.getByRole('link', { name: /Test Operator/ })).toBeInTheDocument();
@@ -40,29 +40,57 @@ describe('AppShell', () => {
 
   it('offers only sign in when signed out', () => {
     renderShell('/', ANONYMOUS);
-    expect(screen.queryByRole('link', { name: 'VM Management' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Hosts' })).not.toBeInTheDocument();
     // A full navigation to Flask, which starts the MSAL redirect.
     expect(screen.getByRole('link', { name: /Sign in/ })).toHaveAttribute('href', '/login');
   });
 
   it.each([
-    ['/', 'Dashboard'],
-    ['/vms', 'VM Management'],
-    ['/vms/12/update', 'VM Management'],
-    ['/scaling/rules', 'Scaling Management'],
-    ['/scaling/log', 'Scaling Management'],
-    ['/scaling/rules/history', 'Scaling Management'],
-    ['/settings/hosts', 'Host Settings'],
+    ['/', 'Overview'],
+    ['/vms', 'Hosts'],
+    ['/vms/12/update', 'Hosts'],
+    ['/vms/maintenance/3', 'Hosts'],
+    ['/scaling/rules', 'Scaling'],
+    ['/scaling/log', 'Scaling'],
+    ['/scaling/rules/history', 'Scaling'],
+    ['/settings/hosts', 'Settings'],
+    ['/users/alice', 'Sessions'],
   ])('marks %s as the current page under %s', (route, label) => {
     renderShell(route);
     expect(screen.getByRole('link', { name: label })).toHaveAttribute('aria-current', 'page');
   });
 
-  it('does not mark the dashboard current on a sub-page', () => {
+  it('does not mark the overview current on a sub-page', () => {
     // '/' is a prefix of every path, so it needs an exact match rather than the
     // prefix match the other sections use.
     renderShell('/vms');
-    expect(screen.getByRole('link', { name: 'Dashboard' })).not.toHaveAttribute('aria-current');
+    expect(screen.getByRole('link', { name: 'Overview' })).not.toHaveAttribute('aria-current');
+  });
+
+  it.each([
+    ['/vms', 'Hosts pages', 'All hosts'],
+    ['/vms/12', 'Hosts pages', 'All hosts'],
+    ['/vms/health', 'Hosts pages', 'Fleet health'],
+    ['/vms/maintenance/new', 'Hosts pages', 'Maintenance'],
+    ['/vms/history', 'Hosts pages', 'History'],
+    ['/vms/import', 'Hosts pages', 'Import'],
+    ['/scaling', 'Scaling pages', 'Policy'],
+    ['/scaling/schedules/4', 'Scaling pages', 'Policy'],
+    ['/scaling/rules/2', 'Scaling pages', 'Policy'],
+    ['/scaling/log', 'Scaling pages', 'Activity log'],
+    ['/scaling/rules/history', 'Scaling pages', 'Rule history'],
+  ])('shows %s under the %s tab %s', (route, section, tab) => {
+    renderShell(route);
+    const tabs = screen.getByRole('navigation', { name: section });
+    const current = Array.from(tabs.querySelectorAll('[aria-current="page"]')).map((link) => link.textContent);
+    expect(current).toEqual([tab]);
+  });
+
+  it('shows no section tabs outside a section or when signed out', () => {
+    renderShell('/sessions');
+    expect(screen.queryByRole('navigation', { name: /pages$/ })).not.toBeInTheDocument();
+    renderShell('/vms', ANONYMOUS);
+    expect(screen.queryByRole('navigation', { name: 'Hosts pages' })).not.toBeInTheDocument();
   });
 
   it('falls back to a generic profile label when the account has no name', () => {

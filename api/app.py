@@ -12,9 +12,11 @@ import threading
 import logging
 import re
 import shlex
+import socket
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from concurrent.futures import wait as wait_futures
+from datetime import datetime, timedelta, timezone
 
 from azure.monitor.opentelemetry import configure_azure_monitor
 
@@ -42,7 +44,7 @@ except ImportError:  # pragma: no cover - only when the telemetry package is abs
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.165'
+app.config['VERSION'] = '0.170'
 
 # Backs is_member_of_group_cached, which keeps token validation off the Graph API on
 # every request.
@@ -51,6 +53,8 @@ cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 REMOTE_CREATE_USER_SCRIPT = '/usr/local/bin/create-user.sh'
 REMOTE_MANAGE_LEASE_SCRIPT = '/usr/local/bin/manage-lease.sh'
 REMOTE_APPLY_SETTINGS_SCRIPT = '/usr/local/bin/apply-host-settings.sh'
+REMOTE_SESSION_CONTROL_SCRIPT = '/usr/local/bin/session-control.sh'
+REMOTE_PATCH_HOST_SCRIPT = '/usr/local/bin/patch-host.sh'
 
 # Output markers shared with linux_host/manage-lease.sh, linux_host/create-user.sh and the
 # delete command below. manage-lease.sh printed cleared-in-use before it learned to keep the
@@ -242,6 +246,7 @@ def reset_caches():
         _graph_token_state.update({'token': None, 'expires_at': 0.0})
     with _ssh_key_lock:
         _ssh_key_state.update({'path': None, 'fetched_at': 0.0})
+    _checkout_event_state['missing_logged'] = False
     cache.clear()
 
 def is_duplicate_key_error(error) -> bool:
@@ -1170,7 +1175,9 @@ AUDIT_DENIED = 'denied'
 AUDIT_OUTCOMES = (AUDIT_SUCCESS, AUDIT_FAILURE, AUDIT_DENIED)
 
 # POST routes that only read. They carry no audit action and their denials are not audited.
-READ_ONLY_POST_ENDPOINTS = frozenset({'get_vm_history', 'get_scaling_activity_log', 'get_scaling_rules_history'})
+READ_ONLY_POST_ENDPOINTS = frozenset({
+    'get_vm_history', 'get_scaling_activity_log', 'get_scaling_rules_history', 'preview_scaling',
+})
 
 _MIRID_RESOURCE_NAME_RE = re.compile(r'/providers/[^/]+/[^/]+/(?P<name>[^/]+)/?$', re.IGNORECASE)
 _MIRID_VM_NAME_RE = re.compile(r'/providers/Microsoft\.Compute/virtualMachines/(?P<name>[^/]+)/?$', re.IGNORECASE)
@@ -1644,7 +1651,16 @@ def get_me():
 @app.route('/api/vms', methods=['GET'])
 @token_required(READ_ROLES + [ROLE_SCHEDULED_TASK])
 def get_all_vms():
+    """Every registered host, as a bare list; or one page of them.
+
+    Paging is opt-in, as for the history endpoints: with page, per_page, q, status, sort or
+    dir the answer is one page with its total and the status counts, filtered and sorted in
+    SQL. Without, it stays the bare list the scheduled task and older portals read.
+    """
     try:
+        if any(request.args.get(name) is not None for name in ('page', 'per_page', 'q', 'status', 'sort', 'dir')):
+            return get_vms_page()
+
         with db_connection() as conn:
             with conn.cursor(as_dict=True) as cursor:
                 cursor.execute("EXEC GetVms")
@@ -1658,6 +1674,271 @@ def get_all_vms():
     except Exception:
         logger.exception("Failed to list VMs.")
         return error_response("Unable to retrieve virtual machines.", 500)
+
+
+VM_STATUS_COUNT_KEYS = {
+    'all': 'All', 'ready': 'Ready', 'in-use': 'InUse', 'released': 'Released', 'maintenance': 'Maintenance',
+    'draining': 'Draining', 'unreachable': 'Unreachable', 'off': 'Off', 'cleanup': 'Cleanup',
+}
+
+
+def vm_list_item(row):
+    """One host of the paged list, with what the heartbeat says about its user's session."""
+    item = {key: value for key, value in row.items() if key not in ('TotalCount', 'SessionsJson', 'ReconcileIntervalSeconds')}
+    age = row.get('HeartbeatAgeSeconds')
+    fresh = age is not None and age <= heartbeat_stale_after(row.get('ReconcileIntervalSeconds'))
+    session = None
+    if fresh and row.get('Username'):
+        states = {
+            str(entry.get('username')).lower(): entry.get('state')
+            for entry in (_json_column(row.get('SessionsJson'), list) or [])
+            if isinstance(entry, dict) and entry.get('username')
+        }
+        session = states.get(str(row.get('Username')).lower()) or 'none'
+    current = row.get('CurrentSettingsVersion')
+    applied = row.get('SettingsVersion')
+    item.update({
+        'Ready': bool(row.get('Ready')),
+        'CleanupPending': bool(row.get('CleanupPending')),
+        'DrainRequested': bool(row.get('DrainRequested')),
+        'HeartbeatFresh': fresh,
+        'SessionState': session,
+        'SettingsCurrent': None if not current else bool(applied is not None and applied >= current),
+        'AgentOutdated': None if age is None else agent_is_outdated(row.get('AgentVersion'), None, EXPECTED_HOST_AGENT_VERSION),
+    })
+    return serialize_for_json(item)
+
+
+def get_vms_page():
+    page = coerce_optional_int(request.args.get('page'), default=1, minimum=1)
+    per_page = coerce_optional_int(request.args.get('per_page'), default=DEFAULT_PAGE_SIZE, minimum=1, maximum=MAX_PAGE_SIZE)
+    search = (request.args.get('q') or '').strip()[:128] or None
+    status = (request.args.get('status') or 'all').strip().lower()
+    sort = (request.args.get('sort') or 'hostname').strip().lower()
+    direction = (request.args.get('dir') or 'asc').strip().lower()
+    if status not in VM_LIST_STATUSES:
+        return error_response(f"status must be one of: {', '.join(VM_LIST_STATUSES)}.", 400)
+    if sort not in VM_LIST_SORTS:
+        return error_response(f"sort must be one of: {', '.join(VM_LIST_SORTS)}.", 400)
+    if direction not in ('asc', 'desc'):
+        return error_response("dir must be asc or desc.", 400)
+
+    offset = (page - 1) * per_page
+    statement = ("EXEC GetVmsPaged @Search = %s, @Status = %s, @Sort = %s, @Descending = %s, "
+                 "@Offset = %s, @PageSize = %s")
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute(statement, (search, status, sort, direction == 'desc', offset, per_page))
+            rows = cursor.fetchall() or []
+            # As in run_history_query: an out-of-range page must still report the total.
+            if not rows and offset > 0:
+                cursor.execute(statement, (search, status, sort, direction == 'desc', 0, 1))
+                probe = cursor.fetchall() or []
+                total = int(probe[0].get('TotalCount') or 0) if probe else 0
+            else:
+                total = int(rows[0].get('TotalCount') or 0) if rows else 0
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetVmStatusCounts @Search = %s", (search,))
+            counts_row = cursor.fetchone() or {}
+
+    return jsonify({
+        'items': [vm_list_item(row) for row in rows],
+        'page': page,
+        'per_page': per_page,
+        'total': total,
+        'total_pages': (total + per_page - 1) // per_page if per_page else 0,
+        'counts': {key: int(counts_row.get(column) or 0) for key, column in VM_STATUS_COUNT_KEYS.items()},
+        'q': search,
+        'status': status,
+        'sort': sort,
+        'dir': direction,
+    }), 200
+
+
+def list_tagged_linux_hosts(compute_client):
+    """The VM names in VM_RESOURCE_GROUP tagged broker-role=linux-host. Tag keys ignore case."""
+    names = []
+    for vm in compute_client.virtual_machines.list(VM_RESOURCE_GROUP):
+        tags = {str(key).lower(): str(value).lower() for key, value in (getattr(vm, 'tags', None) or {}).items()}
+        name = getattr(vm, 'name', None)
+        if name and tags.get(IMPORT_TAG_NAME) == IMPORT_TAG_VALUE:
+            names.append(name)
+    return sorted(names, key=str.lower)
+
+
+def host_fqdn(hostname):
+    return f"{hostname}.{DOMAIN_NAME}" if DOMAIN_NAME else hostname
+
+
+def resolve_host_address(hostname):
+    """The IPv4 address <hostname>.<DOMAIN_NAME> resolves to, or None."""
+    try:
+        infos = socket.getaddrinfo(host_fqdn(hostname), None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except (OSError, ValueError):
+        # ValueError covers the IDNA codec's UnicodeError for a label that is empty or longer than
+        # 63 characters, which Azure allows in a Linux VM name. It is a host that cannot resolve.
+        return None
+    return infos[0][4][0] if infos else None
+
+
+def resolve_host_addresses(hostnames):
+    """Resolve many hosts in parallel, within IMPORT_DNS_DEADLINE_SECONDS. Unfinished ones are None."""
+    if not hostnames:
+        return {}
+    pool = ThreadPoolExecutor(max_workers=min(IMPORT_DNS_CONCURRENCY, len(hostnames)))
+    futures = {pool.submit(resolve_host_address, name): name for name in hostnames}
+    done, _ = wait_futures(futures, timeout=IMPORT_DNS_DEADLINE_SECONDS)
+    pool.shutdown(wait=False, cancel_futures=True)
+    return {name: (future.result() if future in done else None) for future, name in futures.items()}
+
+
+def dns_name_problem(hostname):
+    """Why <hostname>.<DOMAIN_NAME> can never be looked up in DNS, or None when it can."""
+    fqdn = host_fqdn(hostname)
+    if len(fqdn) > 253 or any(not label or len(label) > 63 for label in fqdn.split('.')):
+        return (f"{fqdn} cannot be a DNS name: each part between dots must be 1 to 63 characters. "
+                "Rename the VM so the broker can reach it by name.")
+    return None
+
+
+def unresolved_problem(hostname):
+    if not DOMAIN_NAME:
+        return "DOMAIN_NAME is not set, so the broker cannot tell which name to reach the host by."
+    return dns_name_problem(hostname) or (
+        f"{host_fqdn(hostname)} does not resolve. Add it to the DNS zone the broker uses "
+        "(the private zone linked to its network), then refresh.")
+
+
+def import_context():
+    """(compute client, tagged names by lower-case name, registered lower-case names)."""
+    compute_client = get_compute_client()
+    tagged = {name.lower(): name for name in list_tagged_linux_hosts(compute_client)}
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetVms")
+            registered = {str(vm.get('Hostname') or '').lower() for vm in cursor.fetchall() or []}
+    return compute_client, tagged, registered
+
+
+@app.route('/api/vms/import/candidates', methods=['GET'])
+@token_required(ADMIN_ROLES)
+def get_import_candidates():
+    """Linux host VMs in Azure the broker does not know yet, and whether each can be imported."""
+    try:
+        if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
+            return error_response("Configure VM_SUBSCRIPTION_ID and VM_RESOURCE_GROUP to import hosts from Azure.", 409)
+
+        compute_client, tagged, registered = import_context()
+        names = [name for key, name in sorted(tagged.items()) if key not in registered]
+        states, _ = read_azure_power_states(compute_client, names) if names else ([], 0)
+        power = {entry['hostname']: entry['powerState'] for entry in states}
+        addresses = resolve_host_addresses(names)
+
+        candidates = []
+        for name in names:
+            address = addresses.get(name)
+            candidates.append({
+                'Hostname': name,
+                'Fqdn': host_fqdn(name),
+                'IPAddress': address,
+                'PowerState': power.get(name),
+                'Importable': bool(address),
+                'Problem': None if address else unresolved_problem(name),
+            })
+
+        return jsonify({
+            'Candidates': candidates,
+            'TaggedCount': len(tagged),
+            'RegisteredCount': len(tagged) - len(names),
+            'Tag': f"{IMPORT_TAG_NAME}={IMPORT_TAG_VALUE}",
+            'ResourceGroup': VM_RESOURCE_GROUP,
+            'DomainName': DOMAIN_NAME,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while listing hosts to import.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to list hosts to import from Azure.")
+        return error_response("Unable to list the Linux hosts in Azure.", 502)
+
+
+IMPORT_MESSAGES = {
+    'Imported': "Imported. It is offered to users once the probe reaches it.",
+    'Exists': "Already registered.",
+    'NotTagged': "Not a VM tagged broker-role=linux-host in the resource group.",
+    'Unresolved': "Does not resolve in DNS, so it was not imported.",
+}
+
+
+@app.route('/api/vms/import', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('vm.import', target_type='fleet')
+def import_vms():
+    """Register tagged Linux host VMs by name. Each is checked against Azure and DNS again."""
+    try:
+        body = request.get_json(silent=True)
+        hostnames = body.get('hostnames') if isinstance(body, dict) else None
+        if (not isinstance(hostnames, list) or not hostnames or len(hostnames) > IMPORT_MAX_HOSTS
+                or not all(isinstance(name, str) and HEARTBEAT_HOSTNAME_RE.match(name) for name in hostnames)):
+            return error_response(f"hostnames must be a list of 1 to {IMPORT_MAX_HOSTS} hostnames.", 400)
+        if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
+            return error_response("Configure VM_SUBSCRIPTION_ID and VM_RESOURCE_GROUP to import hosts from Azure.", 409)
+
+        compute_client, tagged, registered = import_context()
+        requested = list(dict.fromkeys(name.lower() for name in hostnames))
+        results = {}
+        eligible = []
+        for key in requested:
+            if key not in tagged:
+                results[key] = {'Hostname': key, 'Result': 'NotTagged'}
+            elif key in registered:
+                results[key] = {'Hostname': tagged[key], 'Result': 'Exists'}
+            else:
+                eligible.append(tagged[key])
+
+        addresses = resolve_host_addresses(eligible)
+        states, _ = read_azure_power_states(compute_client, eligible) if eligible else ([], 0)
+        power = {entry['hostname']: entry['powerState'] for entry in states}
+
+        for name in eligible:
+            address = addresses.get(name)
+            if not address:
+                results[name.lower()] = {'Hostname': name, 'Result': 'Unresolved', 'Problem': unresolved_problem(name)}
+                continue
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute(
+                        "EXEC ImportLinuxHostVm @Hostname = %s, @IPAddress = %s, @PowerState = %s",
+                        (name, address, power.get(name) or 'Off')
+                    )
+                    row = cursor.fetchone() or {}
+                conn.commit()
+            results[name.lower()] = {
+                'Hostname': name, 'Result': row.get('Result') or 'Exists', 'VMID': row.get('VMID'),
+                'IPAddress': address, 'PowerState': power.get(name) or 'Off',
+            }
+
+        ordered = [dict(results[key], message=IMPORT_MESSAGES.get(results[key]['Result'], '')) for key in requested]
+        imported = [entry['Hostname'] for entry in ordered if entry['Result'] == 'Imported']
+        g.audit_detail = {'requested': len(requested), 'imported': imported,
+                          'refused': [entry['Hostname'] for entry in ordered if entry['Result'] != 'Imported']}
+
+        return jsonify({
+            'Results': ordered,
+            'Imported': len(imported),
+            'message': (f"Imported {len(imported)} of {len(requested)} host{'s' if len(requested) != 1 else ''}. "
+                        "Each is offered to users once the reachability probe reaches it."),
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while importing hosts.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to import hosts from Azure.")
+        return error_response("Unable to import the hosts.", 500)
 
 @app.route('/api/vms/summary', methods=['GET'])
 @token_required(READ_ROLES + [ROLE_SCHEDULED_TASK])
@@ -1680,6 +1961,11 @@ def get_vm_summary():
         fields = ('TotalVMs', 'Available', 'CheckedOut', 'Maintenance', 'Released',
                   'PoweredOn', 'PoweredOff', 'Unreachable', 'Ready', 'CleanupPending', 'Draining')
         normalized = {field: int(summary.get(field) or 0) for field in fields}
+        # The scaler's counts, only from a database that has them (123), so the portal can
+        # tell them from a real zero and fall back to its older utilization figure.
+        for field in ('Serviceable', 'InUse'):
+            if field in summary:
+                normalized[field] = int(summary.get(field) or 0)
 
         return jsonify(normalized), 200
 
@@ -1690,10 +1976,51 @@ def get_vm_summary():
         logger.exception("Failed to build the VM summary.")
         return error_response("Unable to retrieve the virtual machine summary.", 500)
 
+CHECKOUT_OUTCOMES = ('Assigned', 'Reused', 'NoneAvailable', 'ProvisionFailed', 'Error')
+_checkout_event_state = {'missing_logged': False}
+
+
+def record_checkout_event(event, started):
+    """Record one checkout's outcome and duration for the dashboard's demand and latency figures.
+
+    Never raises: a checkout must not fail because its statistics could not be written. A
+    database without dbo.RecordCheckoutEvent, while the API is upgraded ahead of SQL, is
+    logged once per process rather than on every checkout.
+    """
+    duration_ms = max(0, int((time.monotonic() - started) * 1000))
+    try:
+        with db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "EXEC RecordCheckoutEvent @Username = %s, @AvdHost = %s, @Outcome = %s, @DurationMs = %s, @Hostname = %s",
+                    (event.get('username'), event.get('avdhost'), event['outcome'], duration_ms, event.get('hostname'))
+                )
+                cursor.fetchone()
+            conn.commit()
+    except Exception as e:
+        if not is_missing_procedure_error(e):
+            logger.warning("Could not record the checkout event (%s).", event.get('outcome'), exc_info=True)
+        elif not _checkout_event_state['missing_logged']:
+            _checkout_event_state['missing_logged'] = True
+            logger.warning("RecordCheckoutEvent is not deployed yet; checkouts are not counted until the SQL upgrade.")
+
+
 @app.route('/api/vms/checkout', methods=['POST'])
 @token_required([ROLE_AVD_HOST, ROLE_ADMIN], required_group_ids=[AVD_HOST_GROUP_ID])
 @audited('vm.checkout', target_type='vm')
 def checkout_vm():
+    # Every checkout that passes validation is counted with its outcome, including the ones
+    # that find no host: that is the demand the pool did not meet.
+    started = time.monotonic()
+    event = {}
+    try:
+        return _checkout_vm(event)
+    finally:
+        if event.get('outcome') in CHECKOUT_OUTCOMES:
+            record_checkout_event(event, started)
+
+
+def _checkout_vm(event):
     try:
         req_body = request.get_json(silent=True) or {}
 
@@ -1707,6 +2034,7 @@ def checkout_vm():
         if not username:
             return error_response("The username contains no characters a Linux account can use.", 400)
 
+        event.update(username=username, avdhost=avdhost, outcome='Error')
         g.audit_detail = {'username': username, 'avdhost': avdhost}
         user_password = generate_secure_password()
 
@@ -1721,6 +2049,7 @@ def checkout_vm():
             return error_response("Unable to check out a virtual machine.", 500)
 
         if not rows or 'Message' in rows[0]:
+            event['outcome'] = 'NoneAvailable'
             return error_response("No available VM found. Please try again.", 409)
 
         checked_out_vm = rows[0]
@@ -1728,9 +2057,15 @@ def checkout_vm():
         vm_hostname = checked_out_vm.get('Hostname')
         lease_id = normalize_lease_id(checked_out_vm.get('LeaseId'))
         g.audit_target_id = vm_hostname
+        event['hostname'] = vm_hostname
 
         if not vm_hostname or not lease_id:
             return error_response("No hostname or LeaseId found for the checked-out VM.", 500)
+
+        # A requested profile reset is applied on a new assignment only, before create-user.sh
+        # mounts the home. It never stops the user signing in.
+        if checked_out_vm.get('ProfileResetRequested') and checked_out_vm.get('CheckoutType') == 'Assigned':
+            apply_pending_profile_reset(vmid, vm_hostname, username)
 
         if not create_or_update_remote_user(vm_hostname, username, user_password, lease_id):
             # create-user.sh may already have written the lease and mounted the home. The VM
@@ -1745,8 +2080,10 @@ def checkout_vm():
                     returned.get('ReturnedLeaseId') or lease_id,
                     timeout=30
                 )
+            event['outcome'] = 'ProvisionFailed'
             return error_response(f"Failed to create or update user '{username}' on VM '{vm_hostname}'.", 500)
 
+        event['outcome'] = 'Reused' if checked_out_vm.get('CheckoutType') == 'Reused' else 'Assigned'
         response_data = {
             "VMID": vmid,
             "Hostname": vm_hostname,
@@ -1758,6 +2095,8 @@ def checkout_vm():
         return jsonify(serialize_for_json(response_data)), 200
 
     except DatabaseUnavailable as e:
+        # Recording the event would wait for the same unreachable database.
+        event.clear()
         logger.error("Database connection failed while checking out a VM.")
         return database_unavailable_response(e)
 
@@ -1895,6 +2234,8 @@ def set_vm_maintenance(vmid):
             return error_response(f"VM {hostname} is assigned to a user. Return it before changing maintenance.", 409)
 
         if result == 'InvalidState':
+            if (row or {}).get('Reason') == 'InMaintenanceRun':
+                return error_response(maintenance_refusal(hostname, row.get('MaintenanceRunID')), 409)
             return error_response(f"VM {hostname} is in a state maintenance cannot change. Repair its status first.", 409)
 
         return error_response(f"VM with VMID {vmid} was not found.", 404)
@@ -2547,6 +2888,8 @@ def set_vm_drain(vmid, enabled):
         g.audit_detail = {'result': result, 'username': row.get('Username')}
 
         if result == 'InvalidState':
+            if row.get('Reason') == 'InMaintenanceRun':
+                return error_response(maintenance_refusal(hostname, row.get('MaintenanceRunID')), 409)
             return error_response(f"{hostname} is in a state drain cannot change. Repair its status first.", 409)
 
         template = DRAIN_MESSAGES.get(result)
@@ -3153,6 +3496,549 @@ def get_scaling_rules_history():
     )
 
 # ===============================
+# Scaling Policy APIs
+#
+# Schedule windows override the default rule at set times of the week, read in the policy's
+# time zone. SQL decides which window applies (fnActiveScalingPhase) and rejects overlapping
+# windows under a lock; the checks here mirror it, so an administrator gets a message that
+# names the clash. The preview is a dry run of the real scaling decision.
+
+SCHEDULE_DAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
+SCHEDULE_DAY_NAMES = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+SCHEDULE_TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
+SCHEDULE_NAME_MAX = 64
+WEEK_MINUTES = 7 * 1440
+TIME_ZONE_CACHE_SECONDS = 3600
+
+
+def schedule_days_mask(value):
+    """Day codes ('mon'...'sun') or a bit mask (1 = Monday ... 64 = Sunday) as a bit mask."""
+    if isinstance(value, bool):
+        raise RuleValidationError("days must list the days the window applies on.")
+    if isinstance(value, int):
+        if 1 <= value <= 127:
+            return value
+        raise RuleValidationError("Choose at least one day.")
+    if not isinstance(value, list) or not value:
+        raise RuleValidationError("Choose at least one day.")
+    mask = 0
+    for day in value:
+        code = str(day).strip().lower()[:3]
+        if code not in SCHEDULE_DAYS:
+            raise RuleValidationError("days must be day names such as mon, tue or sun.")
+        mask |= 1 << SCHEDULE_DAYS.index(code)
+    return mask
+
+
+def schedule_day_codes(mask):
+    return [day for index, day in enumerate(SCHEDULE_DAYS) if int(mask or 0) & (1 << index)]
+
+
+def schedule_minutes(value, field):
+    text = str(value or '').strip()
+    match = SCHEDULE_TIME_RE.match(text)
+    if not match:
+        raise RuleValidationError(f"{field} must be a time as HH:MM, from 00:00 to 23:59.")
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def schedule_week_intervals(mask, start_minute, end_minute):
+    """The same intervals as dbo.fnScheduleWeekIntervals, in minutes of the week from Monday."""
+    intervals = []
+    for index in range(7):
+        if not int(mask) & (1 << index):
+            continue
+        start = index * 1440 + start_minute
+        end = index * 1440 + end_minute + (1440 if end_minute <= start_minute else 0)
+        intervals.append((start, min(end, WEEK_MINUTES)))
+        if end > WEEK_MINUTES:
+            intervals.append((0, end - WEEK_MINUTES))
+    return intervals
+
+
+def schedules_overlap(first, second):
+    return any(a_start < b_end and b_start < a_end for a_start, a_end in first for b_start, b_end in second)
+
+
+def _minutes_text(minutes):
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def parse_schedule(body):
+    """A complete schedule window from a request body. Raises RuleValidationError."""
+    name = body.get('name')
+    if not isinstance(name, str) or not name.strip():
+        raise RuleValidationError("name is required.")
+    name = ''.join(character for character in name if character.isprintable()).strip()
+    if len(name) > SCHEDULE_NAME_MAX:
+        raise RuleValidationError(f"name must be at most {SCHEDULE_NAME_MAX} characters.")
+
+    mask = schedule_days_mask(body.get('days'))
+    start = schedule_minutes(body.get('start'), 'start')
+    end = schedule_minutes(body.get('end'), 'end')
+    if start == end:
+        raise RuleValidationError("start and end must differ. To cover a whole day, end at 00:00 and start later, or use two windows.")
+
+    enabled = body.get('enabled', True)
+    if not isinstance(enabled, bool):
+        raise RuleValidationError("enabled must be true or false.")
+
+    if any(_is_blank(body.get(field)) for field in SCALING_RULE_FIELDS):
+        raise RuleValidationError(
+            "Please provide all required fields: 'minvms', 'maxvms', 'scaleupratio', "
+            "'scaleupincrement', 'scaledownratio', 'scaledownincrement'."
+        )
+    rule = parse_rule_fields(body)
+    validate_rule(rule)
+
+    return {
+        'name': name,
+        'mask': mask,
+        'start': start,
+        'end': end,
+        'enabled': enabled,
+        'rule': rule,
+        'stopmode': parse_stop_mode(body.get('stopmode')),
+    }
+
+
+def schedule_item(row):
+    start = schedule_minutes(row.get('StartTime'), 'start')
+    end = schedule_minutes(row.get('EndTime'), 'end')
+    return serialize_for_json({
+        'ScheduleID': row.get('ScheduleID'),
+        'Name': row.get('Name'),
+        'Enabled': bool(row.get('Enabled')),
+        'Days': schedule_day_codes(row.get('DaysOfWeek')),
+        'DaysOfWeek': row.get('DaysOfWeek'),
+        'StartTime': row.get('StartTime'),
+        'EndTime': row.get('EndTime'),
+        'CrossesMidnight': end <= start,
+        'MinVMs': row.get('MinVMs'),
+        'MaxVMs': row.get('MaxVMs'),
+        'ScaleUpRatio': float(row['ScaleUpRatio']) if row.get('ScaleUpRatio') is not None else None,
+        'ScaleUpIncrement': row.get('ScaleUpIncrement'),
+        'ScaleDownRatio': float(row['ScaleDownRatio']) if row.get('ScaleDownRatio') is not None else None,
+        'ScaleDownIncrement': row.get('ScaleDownIncrement'),
+        'StopMode': row.get('StopMode'),
+        'UpdatedBy': row.get('UpdatedBy'),
+        'UpdatedAtUtc': row.get('UpdatedAtUtc'),
+    })
+
+
+def schedule_intervals_of(item):
+    return schedule_week_intervals(
+        item['DaysOfWeek'], schedule_minutes(item['StartTime'], 'start'), schedule_minutes(item['EndTime'], 'end')
+    )
+
+
+def describe_window(item):
+    days = ', '.join(day.capitalize() for day in item['Days'])
+    return f"{days} {item['StartTime']}\u2013{item['EndTime']}"
+
+
+def next_phase_change(schedules, local_time):
+    """When the phase in force next changes, from the enabled windows and the local time.
+
+    Returns None without any enabled window, because the default rule then always applies.
+    """
+    enabled = [(item, schedule_intervals_of(item)) for item in schedules if item['Enabled']]
+    if not enabled or not local_time:
+        return None
+    try:
+        local = datetime.strptime(str(local_time)[:16], '%Y-%m-%dT%H:%M')
+    except ValueError:
+        return None
+
+    now = local.weekday() * 1440 + local.hour * 60 + local.minute
+    boundaries = {edge for _, intervals in enabled for interval in intervals for edge in interval}
+    deltas = sorted({(edge - now) % WEEK_MINUTES for edge in boundaries} - {0})
+    if not deltas:
+        return None
+
+    for delta in deltas:
+        minute = (now + delta) % WEEK_MINUTES
+        after = next((item for item, intervals in enabled if any(start <= minute < end for start, end in intervals)), None)
+        before = next((item for item, intervals in enabled
+                       if any(start <= (minute - 1) % WEEK_MINUTES < end for start, end in intervals)), None)
+        # A boundary where one window ends and another starts at the same minute changes the phase too.
+        if (after or {}).get('ScheduleID') == (before or {}).get('ScheduleID'):
+            continue
+        return {
+            'InMinutes': delta,
+            'AtLocal': f"{SCHEDULE_DAY_NAMES[minute // 1440]} {_minutes_text(minute % 1440)}",
+            'PhaseName': after['Name'] if after else 'Default rule',
+            'ScheduleID': after['ScheduleID'] if after else None,
+        }
+    return None
+
+
+def fetch_schedules():
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetScalingSchedules")
+            rows = cursor.fetchall() or []
+    return [schedule_item(row) for row in rows]
+
+
+def _phase_from_policy(row):
+    if not row or not row.get('ActiveSource'):
+        return None
+    return serialize_for_json({
+        'Source': row.get('ActiveSource'),
+        'ScheduleID': row.get('ActiveScheduleID'),
+        'Name': row.get('ActivePhaseName'),
+        'MinVMs': row.get('ActiveMinVMs'),
+        'MaxVMs': row.get('ActiveMaxVMs'),
+        'ScaleUpRatio': float(row['ActiveScaleUpRatio']) if row.get('ActiveScaleUpRatio') is not None else None,
+        'ScaleUpIncrement': row.get('ActiveScaleUpIncrement'),
+        'ScaleDownRatio': float(row['ActiveScaleDownRatio']) if row.get('ActiveScaleDownRatio') is not None else None,
+        'ScaleDownIncrement': row.get('ActiveScaleDownIncrement'),
+        'StopMode': row.get('ActiveStopMode'),
+    })
+
+
+@app.route('/api/scaling/policy', methods=['GET'])
+@token_required(READ_ROLES)
+def get_scaling_policy():
+    """The time zone, the default rule, every schedule window, and what applies now and next."""
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetScalingPolicy")
+                policy = cursor.fetchone() or {}
+                cursor.execute("EXEC GetScalingRules")
+                rules = cursor.fetchall() or []
+                cursor.execute("EXEC GetScalingActivityLog @StartDate = NULL, @EndDate = NULL, @Limit = 1")
+                last_run = cursor.fetchone()
+
+        schedules = fetch_schedules()
+        default_rule = next((rule for rule in rules if rule.get('IsActive')), rules[0] if rules else None)
+
+        return jsonify(serialize_for_json({
+            'TimeZone': policy.get('TimeZone') or 'UTC',
+            'UpdatedBy': policy.get('UpdatedBy'),
+            'UpdatedAtUtc': policy.get('UpdatedAtUtc'),
+            'NowUtc': policy.get('NowUtc'),
+            'LocalTime': policy.get('LocalTime'),
+            'ActivePhase': _phase_from_policy(policy),
+            'DefaultRule': default_rule,
+            'Schedules': schedules,
+            'NextChange': next_phase_change(schedules, policy.get('LocalTime')),
+            'LastRun': last_run,
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading the scaling policy.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            logger.warning("GetScalingPolicy is not deployed yet; scaling schedules are unavailable.")
+            return error_response("Scaling schedules are not available until the database is upgraded.", 404)
+        logger.exception("Failed to read the scaling policy.")
+        return error_response("Unable to retrieve the scaling policy.", 500)
+
+
+@app.route('/api/scaling/timezones', methods=['GET'])
+@token_required(READ_ROLES)
+def get_time_zones():
+    """The zones the policy can use. They change only with SQL Server updates, so they are cached."""
+    try:
+        zones = cache.get('scaling-time-zones')
+        if zones is None:
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute("EXEC GetTimeZones")
+                    zones = serialize_for_json(cursor.fetchall() or [])
+            cache.set('scaling-time-zones', zones, timeout=TIME_ZONE_CACHE_SECONDS)
+        return jsonify(zones), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while listing time zones.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to list time zones.")
+        return error_response("Unable to list time zones.", 500)
+
+
+@app.route('/api/scaling/policy/update', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('scaling.policy_update', target_type='scaling')
+def update_scaling_policy():
+    """Set the time zone every schedule window is read in."""
+    try:
+        g.audit_target_id = 'Policy'
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+        zone = body.get('timezone')
+        if not isinstance(zone, str) or not zone.strip() or len(zone) > 64:
+            return error_response("Provide the timezone as a name from /api/scaling/timezones.", 400)
+
+        _, updated_by, _ = audit_actor()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC SetScalingPolicyTimeZone @TimeZone = %s, @UpdatedBy = %s", (zone.strip(), updated_by))
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        result = row.get('Result')
+        if result == 'InvalidTimeZone':
+            return error_response(f"'{zone.strip()}' is not a time zone SQL Server knows. Choose one from the list.", 400)
+
+        g.audit_detail = {'from': row.get('PreviousTimeZone'), 'to': row.get('TimeZone'), 'result': result}
+        return jsonify({'TimeZone': row.get('TimeZone'), 'Result': result,
+                        'message': f"Schedules are now read in {row.get('TimeZone')}." if result == 'Updated'
+                        else f"Schedules were already read in {row.get('TimeZone')}."}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while updating the scaling policy.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to update the scaling policy.")
+        return error_response("Unable to update the scaling policy.", 500)
+
+
+def save_scaling_schedule(schedule_id):
+    try:
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+        try:
+            schedule = parse_schedule(body)
+        except RuleValidationError as e:
+            return error_response(e.client_message, 400)
+
+        existing = fetch_schedules()
+        previous = next((item for item in existing if item['ScheduleID'] == schedule_id), None)
+        if schedule_id is not None and previous is None:
+            return error_response(f"Scaling schedule {schedule_id} was not found.", 404)
+
+        start_text = _minutes_text(schedule['start'])
+        end_text = _minutes_text(schedule['end'])
+        if schedule['enabled']:
+            proposed = schedule_week_intervals(schedule['mask'], schedule['start'], schedule['end'])
+            for other in existing:
+                if other['ScheduleID'] != schedule_id and other['Enabled'] and schedules_overlap(proposed, schedule_intervals_of(other)):
+                    return error_response(
+                        f"This window overlaps '{other['Name']}' ({describe_window(other)}). "
+                        "Change the days or times, or disable one of them.", 409
+                    )
+
+        _, updated_by, _ = audit_actor()
+        rule = schedule['rule']
+        values = {
+            'name': schedule['name'], 'days': schedule_day_codes(schedule['mask']), 'start': start_text,
+            'end': end_text, 'enabled': schedule['enabled'], 'stopmode': schedule['stopmode'], **rule,
+        }
+        if previous is None:
+            g.audit_detail = {'schedule': values}
+        else:
+            before = {
+                'name': previous['Name'], 'days': previous['Days'], 'start': previous['StartTime'], 'end': previous['EndTime'],
+                'enabled': previous['Enabled'], 'stopmode': previous['StopMode'], **_rule_from_row(previous),
+            }
+            g.audit_detail = {'changes': {
+                field: {'from': before.get(field), 'to': value} for field, value in values.items() if before.get(field) != value
+            }}
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    """
+                    EXEC SaveScalingSchedule @ScheduleID = %s, @Name = %s, @Enabled = %s, @DaysOfWeek = %s,
+                        @StartTime = %s, @EndTime = %s, @MinVMs = %s, @MaxVMs = %s, @ScaleUpRatio = %s,
+                        @ScaleUpIncrement = %s, @ScaleDownRatio = %s, @ScaleDownIncrement = %s, @StopMode = %s,
+                        @UpdatedBy = %s
+                    """,
+                    (schedule_id, schedule['name'], schedule['enabled'], schedule['mask'], start_text, end_text,
+                     rule['minvms'], rule['maxvms'], rule['scaleupratio'], rule['scaleupincrement'],
+                     rule['scaledownratio'], rule['scaledownincrement'], schedule['stopmode'], updated_by),
+                )
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        result = row.get('Result')
+        if result == 'Invalid':
+            return error_response(str(row.get('Message') or 'The schedule is not valid.'), 400)
+        if result == 'NotFound':
+            return error_response(f"Scaling schedule {schedule_id} was not found.", 404)
+        if result == 'Overlap':
+            return error_response(f"This window overlaps '{row.get('OverlapsName')}'. Refresh and try again.", 409)
+        if result == 'Busy':
+            return error_response("Scaling schedules are busy. Please try again.", 503)
+        if result not in ('Created', 'Updated'):
+            logger.error("SaveScalingSchedule returned %s.", result)
+            return error_response("Unable to save the scaling schedule.", 500)
+
+        g.audit_target_id = row.get('ScheduleID')
+        return jsonify({
+            'ScheduleID': row.get('ScheduleID'),
+            'Result': result,
+            'message': f"Saved '{schedule['name']}'. It applies from the next scaling run.",
+        }), 201 if result == 'Created' else 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while saving a scaling schedule.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to save a scaling schedule.")
+        return error_response("Unable to save the scaling schedule.", 500)
+
+
+@app.route('/api/scaling/schedules/create', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('scaling.schedule_create', target_type='schedule')
+def create_scaling_schedule():
+    return save_scaling_schedule(None)
+
+
+@app.route('/api/scaling/schedules/<int:scheduleid>/update', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('scaling.schedule_update', target_type='schedule', target_param='scheduleid')
+def update_scaling_schedule(scheduleid):
+    return save_scaling_schedule(scheduleid)
+
+
+@app.route('/api/scaling/schedules/<int:scheduleid>/delete', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('scaling.schedule_delete', target_type='schedule', target_param='scheduleid')
+def delete_scaling_schedule(scheduleid):
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC DeleteScalingSchedule @ScheduleID = %s", (scheduleid,))
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        if row.get('Result') != 'Deleted':
+            return error_response(f"Scaling schedule {scheduleid} was not found.", 404)
+
+        g.audit_detail = {'name': row.get('Name')}
+        return jsonify({'ScheduleID': scheduleid, 'message': f"Deleted '{row.get('Name')}'."}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while deleting scaling schedule %s.", scheduleid)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to delete scaling schedule %s.", scheduleid)
+        return error_response("Unable to delete the scaling schedule.", 500)
+
+
+def preview_summary(row, candidates):
+    action = row.get('Action')
+    count = len(candidates)
+    hosts = f" ({', '.join(candidates[:5])}{', …' if count > 5 else ''})" if candidates else ''
+    if action == 'PowerOn':
+        return f"Start {count} host{'s' if count != 1 else ''}{hosts}."
+    if action == 'PowerOff':
+        verb = 'Deallocate' if row.get('StopMode') == 'Deallocate' else 'Stop'
+        return f"{verb} {count} host{'s' if count != 1 else ''}{hosts}."
+    return "No change."
+
+
+@app.route('/api/scaling/preview', methods=['GET', 'POST'])
+@token_required(READ_ROLES)
+def preview_scaling():
+    """What the next scaling run would do, and why: a dry run of the real decision.
+
+    ?at= (or "at" in a POST body) resolves the phase at another UTC time. A POST can also try
+    proposed rule values ("rule"), such as a schedule window being edited, before saving them.
+    Nothing is changed either way.
+    """
+    try:
+        body = request.get_json(silent=True) if request.method == 'POST' else None
+        body = body if isinstance(body, dict) else {}
+
+        try:
+            at = parse_audit_time(body.get('at') if request.method == 'POST' else request.args.get('at'), 'at')
+        except AuditFilterError as e:
+            return error_response(e.client_message, 400)
+
+        override = None
+        proposed = body.get('rule')
+        if proposed is not None:
+            if not isinstance(proposed, dict):
+                return error_response("rule must be an object with the scaling values.", 400)
+            try:
+                if any(_is_blank(proposed.get(field)) for field in SCALING_RULE_FIELDS):
+                    raise RuleValidationError(
+                        "Please provide all required fields: 'minvms', 'maxvms', 'scaleupratio', "
+                        "'scaleupincrement', 'scaledownratio', 'scaledownincrement'."
+                    )
+                values = parse_rule_fields(proposed)
+                validate_rule(values)
+                stop_mode = parse_stop_mode(proposed.get('stopmode'))
+            except RuleValidationError as e:
+                return error_response(e.client_message, 400)
+            name = proposed.get('name')
+            override = json.dumps({
+                'MinVMs': values['minvms'], 'MaxVMs': values['maxvms'],
+                'ScaleUpRatio': values['scaleupratio'], 'ScaleUpIncrement': values['scaleupincrement'],
+                'ScaleDownRatio': values['scaledownratio'], 'ScaleDownIncrement': values['scaledownincrement'],
+                'StopMode': stop_mode,
+                'PhaseName': str(name).strip()[:SCHEDULE_NAME_MAX] if isinstance(name, str) and name.strip() else 'Proposed values',
+            })
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC TriggerScalingLogic @DryRun = 1, @AtUtc = %s, @OverrideJson = %s",
+                    (at, override)
+                )
+                row = cursor.fetchone() or {}
+
+        candidates = [
+            entry.get('Hostname') for entry in (_json_column(row.get('CandidatesJson'), list) or [])
+            if isinstance(entry, dict) and entry.get('Hostname')
+        ]
+        utilization = row.get('Utilization')
+        return jsonify(serialize_for_json({
+            'Action': row.get('Action') or 'None',
+            'Summary': preview_summary(row, candidates),
+            'Reason': row.get('Reason'),
+            'RequestCount': row.get('RequestCount'),
+            'Candidates': candidates,
+            'Phase': {
+                'Source': row.get('PhaseSource'),
+                'ScheduleID': row.get('ScheduleID'),
+                'Name': row.get('PhaseName'),
+                'MinVMs': row.get('MinVMs'),
+                'MaxVMs': row.get('MaxVMs'),
+                'ScaleUpRatio': float(row['ScaleUpRatio']) if row.get('ScaleUpRatio') is not None else None,
+                'ScaleUpIncrement': row.get('ScaleUpIncrement'),
+                'ScaleDownRatio': float(row['ScaleDownRatio']) if row.get('ScaleDownRatio') is not None else None,
+                'ScaleDownIncrement': row.get('ScaleDownIncrement'),
+                'StopMode': row.get('StopMode'),
+                # A maintenance run waiting for a spare ready host raises MinVMs by one.
+                'MaintenanceSurge': bool(row.get('MaintenanceSurge')),
+            },
+            'Counts': {
+                'PoweredOn': row.get('PoweredOn'),
+                'Serviceable': row.get('Serviceable'),
+                'InUse': row.get('InUse'),
+                'Draining': row.get('Draining'),
+                'Utilization': float(utilization) if utilization is not None else None,
+            },
+            'TimeZone': row.get('TimeZone'),
+            'LocalTime': row.get('LocalTime'),
+            'AtUtc': row.get('AtUtc'),
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while previewing scaling.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if 'too many arguments' in str(e).lower():
+            return error_response("The preview needs the updated database scripts. Apply sql_queries and try again.", 409)
+        logger.exception("Failed to preview scaling.")
+        return error_response("Unable to preview scaling.", 500)
+
+# ===============================
 # Linux Host Settings APIs
 
 @app.route('/api/hosts/settings', methods=['GET'])
@@ -3446,7 +4332,8 @@ HEARTBEAT_TOKEN_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z.+~_:-]*$')
 HEARTBEAT_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
 HEARTBEAT_SCRIPTS = (
     'release-session.sh', 'logind-session-watcher.sh', 'xrdp-who-xorg.sh',
-    'create-user.sh', 'manage-lease.sh', 'apply-host-settings.sh',
+    'create-user.sh', 'manage-lease.sh', 'apply-host-settings.sh', 'session-control.sh',
+    'patch-host.sh',
 )
 HEARTBEAT_DESKTOPS = ('gnome', 'xfce', 'mate', 'kde', 'other', 'none', 'unknown')
 HEARTBEAT_SESSION_STATES = ('active', 'disconnected', 'unknown')
@@ -3844,6 +4731,2036 @@ def get_host_health():
         return error_response("Unable to retrieve fleet health.", 500)
 
 # ===============================
+# Dashboard metrics APIs
+#
+# Capacity over time, and what needs an operator now. The utilization series and checkout
+# statistics come from the scaling runs, checkout events and host-start events; the attention
+# items from the broker's current state and the host agents' heartbeats.
+
+ATTENTION_SEVERITY = {
+    'no-ready-hosts': 'critical',
+    'denied-checkouts': 'critical',
+    'unreachable': 'warning',
+    'cleanup-stuck': 'warning',
+    'never-connected': 'warning',
+    'maintenance-failed': 'warning',
+}
+HEALTH_FLAG_SEVERITY = {
+    'no-heartbeat': 'warning',
+    'stale': 'warning',
+    'xrdp-down': 'warning',
+    'nfs-unreachable': 'warning',
+    'low-disk': 'warning',
+    'agent-outdated': 'info',
+    'settings-drift': 'info',
+}
+ATTENTION_SEVERITY_ORDER = ('critical', 'warning', 'info')
+ATTENTION_MAX_HOSTNAMES = 10
+CHECKOUT_STAT_COUNTS = (
+    'Total', 'Assigned', 'Reused', 'NoneAvailable', 'ProvisionFailed', 'Errors', 'DeniedLastHour', 'HostStarts',
+)
+
+
+def _optional_float(value):
+    return float(value) if value is not None else None
+
+
+def _optional_int(value):
+    return int(value) if value is not None else None
+
+
+def _utc_text(value):
+    return value.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def utilization_window(hours, now=None):
+    """(start, end, bucket minutes) in naive UTC: `hours` of whole buckets ending with the one
+    that holds now, so every refresh draws the same bucket boundaries."""
+    bucket = UTILIZATION_WINDOWS[hours]
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
+    current = now - timedelta(minutes=(now.hour * 60 + now.minute) % bucket)
+    end = current + timedelta(minutes=bucket)
+    return end - timedelta(hours=hours), end, bucket
+
+
+def utilization_point(row):
+    return {
+        'BucketStartUtc': row.get('BucketStartUtc'),
+        'Runs': int(row.get('Runs') or 0),
+        'PoweredOn': _optional_float(row.get('PoweredOn')),
+        'InUse': _optional_float(row.get('InUse')),
+        'Serviceable': _optional_float(row.get('Serviceable')),
+        'PeakInUse': _optional_int(row.get('PeakInUse')),
+        'MinVMs': _optional_int(row.get('MinVMs')),
+        'MaxVMs': _optional_int(row.get('MaxVMs')),
+        'Checkouts': int(row.get('Checkouts') or 0),
+        'Denied': int(row.get('Denied') or 0),
+        'Failed': int(row.get('Failed') or 0),
+    }
+
+
+def checkout_stats(row):
+    stats = {field: int(row.get(field) or 0) for field in CHECKOUT_STAT_COUNTS}
+    stats.update({
+        'P50Ms': _optional_int(row.get('P50Ms')),
+        'P95Ms': _optional_int(row.get('P95Ms')),
+        'StartP50Seconds': _optional_int(row.get('StartP50Seconds')),
+        'StartP95Seconds': _optional_int(row.get('StartP95Seconds')),
+        'LastDeniedUtc': row.get('LastDeniedUtc'),
+        'DeniedPercent': round(stats['NoneAvailable'] * 100.0 / stats['Total'], 1) if stats['Total'] else None,
+    })
+    return stats
+
+
+@app.route('/api/metrics/utilization', methods=['GET'])
+@token_required(READ_ROLES)
+def get_utilization_metrics():
+    """Capacity and checkout health over the last day (?hours=24) or week (?hours=168).
+
+    Series has one point per bucket, empty ones included, so a chart can show gaps. A database
+    without the checkout events (115-123) answers 404, as an API without this route does.
+    """
+    try:
+        hours = int((request.args.get('hours') or '24').strip())
+    except ValueError:
+        hours = None
+    if hours not in UTILIZATION_WINDOWS:
+        return error_response(f"hours must be one of: {', '.join(str(h) for h in UTILIZATION_WINDOWS)}.", 400)
+
+    start, end, bucket = utilization_window(hours)
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC GetUtilizationSeries @FromUtc = %s, @ToUtc = %s, @BucketMinutes = %s",
+                    (start, end, bucket)
+                )
+                series = cursor.fetchall() or []
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetCheckoutStats @FromUtc = %s, @ToUtc = %s", (start, end))
+                stats = cursor.fetchone() or {}
+
+        return jsonify({
+            'Hours': hours,
+            'BucketMinutes': bucket,
+            'FromUtc': _utc_text(start),
+            'ToUtc': _utc_text(end),
+            'Series': [utilization_point(row) for row in series],
+            'Checkouts': checkout_stats(stats),
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading utilization metrics.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            logger.warning("GetUtilizationSeries is not deployed yet; capacity trends are unavailable.")
+            return error_response("Capacity trends are not available until the database is upgraded.", 404)
+        logger.exception("Failed to read utilization metrics.")
+        return error_response("Unable to retrieve utilization metrics.", 500)
+
+
+def attention_item(row):
+    kind = row.get('Kind')
+    age = row.get('AgeSeconds')
+    return {
+        'Kind': kind,
+        'Severity': ATTENTION_SEVERITY.get(kind, 'warning'),
+        'VMID': row.get('VMID'),
+        'Hostname': row.get('Hostname'),
+        'Username': row.get('Username'),
+        'AgeSeconds': max(0, age) if isinstance(age, int) else None,
+        'Count': row.get('ItemCount'),
+    }
+
+
+def maintenance_attention_items():
+    """Hosts a maintenance run could not patch that are still out of rotation. Never raises."""
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetMaintenanceAttention")
+                rows = cursor.fetchall() or []
+    except DatabaseUnavailable:
+        raise
+    except Exception as e:
+        if not is_missing_procedure_error(e):
+            logger.exception("Could not read failed maintenance hosts.")
+        return []
+
+    return [{
+        'Kind': 'maintenance-failed',
+        'Severity': ATTENTION_SEVERITY['maintenance-failed'],
+        'VMID': row.get('VMID'),
+        'Hostname': row.get('Hostname'),
+        'Username': None,
+        'AgeSeconds': max(0, row['AgeSeconds']) if isinstance(row.get('AgeSeconds'), int) else None,
+        'Count': None,
+        'RunID': row.get('RunID'),
+        'Detail': row.get('Detail'),
+    } for row in rows]
+
+
+def health_attention_items(hosts, already_listed=()):
+    """One item per health flag, with the hosts that have it.
+
+    Only reachable, powered-on hosts count: a host that is starting has not sent a heartbeat
+    yet, and one the probe cannot reach is already listed as unreachable.
+    """
+    listed = set(already_listed)
+    by_flag = {}
+    for host in hosts:
+        if host.get('Status') == 'off' or host.get('NetworkStatus') != 'Reachable' or host.get('Hostname') in listed:
+            continue
+        for flag in host.get('Flags') or []:
+            by_flag.setdefault(flag, []).append(host.get('Hostname'))
+
+    items = []
+    for flag in HEALTH_FLAGS:
+        hostnames = sorted(name for name in by_flag.get(flag, []) if name)
+        if hostnames:
+            items.append({
+                'Kind': 'health',
+                'Flag': flag,
+                'Severity': HEALTH_FLAG_SEVERITY.get(flag, 'warning'),
+                'Count': len(hostnames),
+                'Hostnames': hostnames[:ATTENTION_MAX_HOSTNAMES],
+            })
+    return items
+
+
+@app.route('/api/metrics/attention', methods=['GET'])
+@token_required(READ_ROLES)
+def get_attention_items():
+    """What needs an operator now, most severe first: no host ready, denied checkouts, hosts
+    unreachable, cleanups stuck, checkouts with no session, and host agent health flags.
+
+    Incomplete is true while the database does not have GetAttentionItems yet; the host health
+    items are still returned.
+    """
+    try:
+        items = []
+        incomplete = False
+        try:
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute(
+                        "EXEC GetAttentionItems @UnreachableMinutes = %s, @CleanupMinutes = %s, "
+                        "@NotConnectedMinutes = %s, @DeniedMinutes = %s",
+                        (ATTENTION_UNREACHABLE_MINUTES, ATTENTION_CLEANUP_MINUTES,
+                         ATTENTION_NOT_CONNECTED_MINUTES, ATTENTION_DENIED_MINUTES)
+                    )
+                    items.extend(attention_item(row) for row in cursor.fetchall() or [])
+        except DatabaseUnavailable:
+            raise
+        except Exception as e:
+            if not is_missing_procedure_error(e):
+                raise
+            logger.warning("GetAttentionItems is not deployed yet; listing host health only.")
+            incomplete = True
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetHostHealth @Hostname = %s", (None,))
+                health_rows = cursor.fetchall() or []
+
+        items.extend(maintenance_attention_items())
+        unreachable = [item['Hostname'] for item in items if item['Kind'] == 'unreachable']
+        items.extend(health_attention_items(
+            [host_health(row, EXPECTED_HOST_AGENT_VERSION) for row in health_rows], unreachable
+        ))
+        # Stable, so each severity keeps the procedure's order: the longest-standing first.
+        items.sort(key=lambda item: ATTENTION_SEVERITY_ORDER.index(item['Severity']))
+
+        summary = {'Total': len(items)}
+        summary.update({severity.capitalize(): sum(1 for item in items if item['Severity'] == severity)
+                        for severity in ATTENTION_SEVERITY_ORDER})
+        return jsonify(serialize_for_json({'Items': items, 'Summary': summary, 'Incomplete': incomplete})), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading attention items.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read attention items.")
+        return error_response("Unable to retrieve attention items.", 500)
+
+# ===============================
+# Sessions and Users APIs
+#
+# Where each user is and why they cannot connect: the broker's assignments joined with the
+# sessions the host agents last reported. The actions a helpdesk operator needs, signing a
+# user out and messaging a session, run session-control.sh on the host, which checks again
+# that it only touches accounts the broker created. A profile reset is only requested here;
+# checkout applies it at the user's next new assignment, so the rename can never race a
+# sign-in.
+
+BROKER_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
+SESSION_STATES = (
+    'active', 'disconnected', 'released', 'connecting', 'not-connected',
+    'cleanup-pending', 'unmanaged', 'unknown',
+)
+_SESSION_CONTROL_LINE_RE = re.compile(r'^__SESSION_CONTROL_([A-Z_]+)=(.*)$')
+_MESSAGE_CONTROL_CHARACTERS_RE = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+
+
+class HostAgentOutdated(Exception):
+    """The host has no session-control.sh, or sudo does not allow it: its agent predates 1.1.0."""
+
+
+def host_agent_outdated_response(hostname, what):
+    return error_response(
+        f"{hostname} runs a host agent older than 1.1.0, which cannot {what}. "
+        "Update it with deploy/Migrate-LinuxHostReleaseAgent.ps1.", 409
+    )
+
+
+def parse_session_control_output(stdout):
+    values = {}
+    for line in (stdout or '').splitlines():
+        match = _SESSION_CONTROL_LINE_RE.match(line.strip())
+        if match:
+            values[match.group(1)] = match.group(2).strip()
+    return values
+
+
+def run_session_control(hostname, arguments, stdin_input=None, timeout=SESSION_CONTROL_TIMEOUT_SECONDS):
+    """Run session-control.sh on a host and return what it reported.
+
+    `sudo -n` fails at once, instead of waiting for a password, on a host whose agent has no
+    session-control.sh or does not allow it yet; that is raised as HostAgentOutdated.
+    """
+    command = "sudo -n {script} {arguments}".format(
+        script=REMOTE_SESSION_CONTROL_SCRIPT,
+        arguments=' '.join(shlex.quote(str(argument)) for argument in arguments),
+    )
+    result, host_fqdn = run_remote_command(hostname, command, stdin_input=stdin_input, timeout=timeout)
+    values = parse_session_control_output(result.stdout)
+
+    if not values and result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        if any(line.strip().startswith('sudo:') for line in stderr.splitlines()):
+            raise HostAgentOutdated(hostname)
+        logger.error("session-control.sh %s failed on %s (exit %s): %s",
+                     arguments[0] if arguments else '', host_fqdn, result.returncode, stderr)
+
+    return values, result.returncode
+
+
+def normalize_session_message(value):
+    """(message, problem) for a message an operator wants shown in sessions."""
+    if not isinstance(value, str):
+        return None, "Provide the message to send."
+    text = _MESSAGE_CONTROL_CHARACTERS_RE.sub('', value.replace('\r\n', '\n').replace('\t', ' ')).strip()
+    if not text:
+        return None, "Provide the message to send."
+    if len(text) > SESSION_MESSAGE_MAX_CHARS:
+        return None, f"The message must be at most {SESSION_MESSAGE_MAX_CHARS} characters."
+    return text, None
+
+
+def _epoch_to_utc(value):
+    if not isinstance(value, int) or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def session_state(row, stale_after):
+    """What an operator should read from one row of GetSessions."""
+    age = row.get('HeartbeatAgeSeconds')
+    fresh = age is not None and age <= stale_after
+    reported = row.get('SessionState')
+
+    if row.get('CleanupPending'):
+        return 'cleanup-pending'
+    if not row.get('BrokerTracked'):
+        return 'unmanaged' if fresh else 'unknown'
+    if reported in ('active', 'disconnected') and fresh:
+        return reported
+    if row.get('VmStatus') == 'Released':
+        return 'released'
+    if not fresh:
+        return 'unknown'
+    last_checkout = row.get('LastCheckoutAgeSeconds')
+    if last_checkout is not None and last_checkout < SESSION_CONNECTING_SECONDS:
+        return 'connecting'
+    return 'not-connected'
+
+
+def session_item(row):
+    stale_after = heartbeat_stale_after(row.get('ReconcileIntervalSeconds'))
+    age = row.get('HeartbeatAgeSeconds')
+    grace = row.get('GraceRemainingSeconds')
+    return serialize_for_json({
+        'Hostname': row.get('Hostname'),
+        'VMID': row.get('VMID'),
+        'Username': row.get('Username'),
+        'AvdHost': row.get('AvdHost'),
+        'State': session_state(row, stale_after),
+        'VmStatus': row.get('VmStatus'),
+        'PowerState': row.get('PowerState'),
+        'NetworkStatus': row.get('NetworkStatus'),
+        'DrainRequested': bool(row.get('DrainRequested')),
+        'HasAssignment': bool(row.get('HasAssignment')),
+        'CleanupPending': bool(row.get('CleanupPending')),
+        'ReportedState': row.get('SessionState'),
+        'SessionStartUtc': _epoch_to_utc(row.get('SessionStartEpoch')),
+        'DisconnectedForSeconds': row.get('DisconnectedForSeconds'),
+        'IdleSeconds': row.get('IdleSeconds'),
+        'AssignedForSeconds': row.get('AssignedForSeconds'),
+        'LastCheckoutAgeSeconds': row.get('LastCheckoutAgeSeconds'),
+        'GraceRemainingSeconds': max(0, grace) if isinstance(grace, int) else None,
+        'GracePeriodSeconds': row.get('GracePeriodSeconds'),
+        'HeartbeatAgeSeconds': age,
+        'HeartbeatFresh': age is not None and age <= stale_after,
+    })
+
+
+def fetch_sessions():
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetSessions")
+            rows = cursor.fetchall() or []
+    return [session_item(row) for row in rows]
+
+
+def summarize_sessions(sessions):
+    summary = {'Total': len(sessions)}
+    summary.update({state: 0 for state in SESSION_STATES})
+    for session in sessions:
+        summary[session['State']] = summary.get(session['State'], 0) + 1
+    return summary
+
+
+@app.route('/api/sessions', methods=['GET'])
+@token_required(READ_ROLES)
+def get_sessions():
+    """Every assignment and reported session. ?q= matches user or host; ?state= one state."""
+    try:
+        query = (request.args.get('q') or '').strip().lower()
+        state = (request.args.get('state') or '').strip().lower() or None
+        if state and state not in SESSION_STATES:
+            return error_response(f"state must be one of: {', '.join(SESSION_STATES)}.", 400)
+
+        sessions = fetch_sessions()
+        summary = summarize_sessions(sessions)
+        if query:
+            sessions = [
+                session for session in sessions
+                if query in str(session.get('Username') or '').lower() or query in str(session.get('Hostname') or '').lower()
+            ]
+        if state:
+            sessions = [session for session in sessions if session['State'] == state]
+
+        return jsonify({'Sessions': sessions, 'Summary': summary}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading sessions.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read sessions.")
+        return error_response("Unable to retrieve sessions.", 500)
+
+
+@app.route('/api/users', methods=['GET'])
+@token_required(READ_ROLES)
+def search_users():
+    """Broker users whose name contains ?q=, exact and prefix matches first."""
+    try:
+        query = re.sub(r'[^A-Za-z0-9_]', '', request.args.get('q') or '')[:64] or None
+        limit = coerce_optional_int(request.args.get('limit'), default=25, minimum=1, maximum=USER_SEARCH_MAX_RESULTS)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC SearchUsers @Query = %s, @Limit = %s", (query, limit))
+                rows = cursor.fetchall() or []
+
+        return jsonify({'Users': serialize_for_json(rows), 'Query': query}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while searching users.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to search users.")
+        return error_response("Unable to search users.", 500)
+
+
+def user_audit_entries(username, limit=20):
+    """Recent audit entries about one user. The reader matches part of a target, so exact
+    matches are kept here."""
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC GetAuditLogPaged @TargetType = %s, @TargetId = %s, @Offset = 0, @PageSize = %s",
+                    ('user', username, limit * 2)
+                )
+                rows = cursor.fetchall() or []
+    except DatabaseUnavailable:
+        raise
+    except Exception:
+        logger.exception("Could not read the audit entries for %s.", username)
+        return []
+    return [_audit_item(row) for row in rows if str(row.get('TargetId') or '').lower() == username.lower()][:limit]
+
+
+@app.route('/api/users/<username>', methods=['GET'])
+@token_required(READ_ROLES)
+def get_user_details(username):
+    """One user: where they are now, their sessions, the hosts they had, and recent actions."""
+    try:
+        if not BROKER_USERNAME_RE.match(username or ''):
+            return error_response("The username is not valid.", 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetUserDetails @Username = %s", (username,))
+                details = cursor.fetchone()
+
+        if not details:
+            return error_response(f"The broker has no user named {username}.", 404)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetUserHostHistory @Username = %s", (username,))
+                history = cursor.fetchall() or []
+
+        sessions = [session for session in fetch_sessions() if str(session.get('Username') or '').lower() == username.lower()]
+        requested_at = details.get('ProfileResetRequestedAtUtc')
+
+        return jsonify(serialize_for_json({
+            'Username': details.get('Username'),
+            'Uid': details.get('Uid'),
+            'FirstProvisionedDate': details.get('FirstProvisionedDate'),
+            'ProfileReset': {
+                'RequestedAtUtc': requested_at,
+                'RequestedBy': details.get('ProfileResetRequestedBy'),
+            } if requested_at else None,
+            'Assignments': _json_column(details.get('AssignmentsJson'), list) or [],
+            'Sessions': sessions,
+            'HostHistory': history,
+            'RecentActivity': user_audit_entries(username),
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading user %s.", username)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to read user %s.", username)
+        return error_response("Unable to retrieve the user.", 500)
+
+
+def lookup_vm_by_hostname(hostname):
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetVmByHostname @Hostname = %s", (hostname,))
+            return cursor.fetchone()
+
+
+def reported_session_users(hostname):
+    """The users the host's latest heartbeat reports signed in, when that heartbeat is fresh."""
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetHostHealth @Hostname = %s", (hostname,))
+            row = cursor.fetchone() or {}
+
+    age = row.get('HeartbeatAgeSeconds')
+    if age is None or age > heartbeat_stale_after(row.get('ReconcileIntervalSeconds')):
+        return set()
+    return {
+        str(session.get('username')).lower()
+        for session in (_json_column(row.get('SessionsJson'), list) or [])
+        if isinstance(session, dict) and session.get('username')
+    }
+
+
+def resolve_session_target(hostname, username):
+    """(vm, error response) for an action on one user's session on one host.
+
+    The host must be registered, and the user must be one the broker has on it (assigned or
+    waiting for cleanup) or one the host's fresh heartbeat reports there.
+    """
+    if not HEARTBEAT_HOSTNAME_RE.match(hostname or ''):
+        return None, error_response("The hostname is not valid.", 400)
+    if not BROKER_USERNAME_RE.match(username or ''):
+        return None, error_response("The username is not valid.", 400)
+
+    vm = lookup_vm_by_hostname(hostname)
+    if not vm:
+        return None, error_response(f"No VM found with Hostname {hostname}.", 404)
+
+    g.audit_detail = {'hostname': vm.get('Hostname')}
+    name = username.lower()
+    bound = (
+        str(vm.get('Username') or '').lower() == name
+        or (vm.get('CleanupPending') and str(vm.get('CleanupUsername') or '').lower() == name)
+        or name in reported_session_users(vm.get('Hostname'))
+    )
+    if not bound:
+        return None, error_response(f"The broker has no session for {username} on {vm.get('Hostname')}.", 409)
+    if vm.get('PowerState') != 'On':
+        return None, error_response(f"{vm.get('Hostname')} is powered off.", 409)
+    return vm, None
+
+
+def release_after_signout(vm, username):
+    """Mark the assignment released, as the agent would, so grace starts without it."""
+    if str(vm.get('Username') or '').lower() != username.lower() or vm.get('VmStatus') != 'CheckedOut':
+        return False
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC ReleaseVm @Hostname = %s, @LeaseId = %s, @Username = %s",
+                    (vm.get('Hostname'), normalize_lease_id(vm.get('LeaseId')), vm.get('Username'))
+                )
+                row = cursor.fetchone() or {}
+            conn.commit()
+        return (row.get('ReleaseStatus') or '').strip() == 'Released'
+    except DatabaseUnavailable:
+        raise
+    except Exception:
+        logger.exception("Could not release %s after signing %s out.", vm.get('Hostname'), username)
+        return False
+
+
+def return_after_signout(vm, username):
+    """End the assignment that sign-out left in grace. Returns the cleanup outcome, or None."""
+    lease_id = normalize_lease_id(vm.get('LeaseId'))
+    if str(vm.get('Username') or '').lower() != username.lower() or not lease_id:
+        return None
+
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            # The lease must still match, so an assignment made since the lookup is untouched.
+            cursor.execute("EXEC ReturnVm @VMID = %s, @ExpectedLeaseId = %s", (vm.get('VMID'), lease_id))
+            returned = cursor.fetchone()
+        conn.commit()
+
+    if not returned or is_procedure_error(returned):
+        return None
+    return clean_up_returned_user(
+        vm.get('VMID'),
+        returned.get('Hostname') or vm.get('Hostname'),
+        returned.get('ReturnedUsername') or vm.get('Username'),
+        returned.get('ReturnedLeaseId') or lease_id,
+        timeout=60,
+    )
+
+
+@app.route('/api/sessions/<hostname>/<username>/signout', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('session.signout', target_type='user', target_param='username')
+def sign_out_session(hostname, username):
+    """End a user's desktop on a host, then release the host. returnHost also ends the assignment."""
+    try:
+        body = request.get_json(silent=True)
+        return_host = isinstance(body, dict) and body.get('returnHost') is True
+
+        vm, problem = resolve_session_target(hostname, username)
+        if problem:
+            return problem
+        hostname = vm.get('Hostname')
+        g.audit_detail = {'hostname': hostname, 'returnHost': return_host}
+
+        try:
+            values, _ = run_session_control(hostname, ['signout', username])
+        except HostAgentOutdated:
+            return host_agent_outdated_response(hostname, 'sign users out')
+
+        result = values.get('RESULT')
+        g.audit_detail['result'] = result
+        if result == 'refused':
+            return error_response(f"{hostname} refused to sign out {username}: it is not an account the broker created.", 409)
+        if result not in ('signed-out', 'no-session'):
+            return error_response(f"Could not sign {username} out of {hostname}. Try again, or restart the host.", 502)
+
+        released = release_after_signout(vm, username)
+        cleanup = return_after_signout(vm, username) if return_host else None
+        g.audit_detail.update({'released': released, 'cleanupResult': cleanup})
+
+        if cleanup in (CLEANUP_COMPLETED, CLEANUP_NOT_REQUIRED):
+            message = f"Signed {username} out of {hostname} and returned the host."
+        elif cleanup:
+            message = f"Signed {username} out of {hostname}. The host was returned; its cleanup is retried automatically."
+        elif result == 'no-session':
+            message = f"{username} had no session left on {hostname}."
+        else:
+            message = f"Signed {username} out of {hostname}. They can reconnect within the grace period."
+
+        return jsonify({
+            'Hostname': hostname,
+            'Username': username,
+            'Result': 'SignedOut' if result == 'signed-out' else 'NoSession',
+            'Released': released,
+            'Returned': cleanup is not None,
+            'CleanupResult': cleanup,
+            'message': message,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while signing %s out of %s.", username, hostname)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to sign %s out of %s.", username, hostname)
+        return error_response("Unable to sign the user out.", 500)
+
+
+@app.route('/api/sessions/<hostname>/<username>/message', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('session.message', target_type='user', target_param='username')
+def message_session(hostname, username):
+    """Show a message in a user's sessions on a host."""
+    try:
+        body = request.get_json(silent=True)
+        message, problem = normalize_session_message(body.get('message') if isinstance(body, dict) else None)
+        if problem:
+            return error_response(problem, 400)
+
+        vm, problem = resolve_session_target(hostname, username)
+        if problem:
+            return problem
+        hostname = vm.get('Hostname')
+        g.audit_detail = {'hostname': hostname, 'message': message[:SESSION_AUDIT_MESSAGE_CHARS]}
+
+        try:
+            values, _ = run_session_control(hostname, ['message', username], stdin_input=message)
+        except HostAgentOutdated:
+            return host_agent_outdated_response(hostname, 'show messages')
+
+        result = values.get('RESULT')
+        delivered = coerce_optional_int(values.get('DELIVERED'), default=0, minimum=0)
+        sessions = coerce_optional_int(values.get('SESSIONS'), default=0, minimum=0)
+        g.audit_detail.update({'result': result, 'delivered': delivered})
+
+        if result == 'refused':
+            return error_response(f"{hostname} refused to message {username}: it is not an account the broker created.", 409)
+        if result not in ('delivered', 'no-session'):
+            return error_response(f"Could not send the message to {hostname}.", 502)
+
+        if result == 'no-session' or not sessions:
+            text = f"{username} has no session on {hostname} to show the message in."
+        elif delivered < sessions:
+            text = f"Sent to {delivered} of {username}'s {sessions} sessions on {hostname}."
+        else:
+            text = f"Sent to {username} on {hostname}."
+
+        return jsonify({
+            'Hostname': hostname,
+            'Username': username,
+            'Sessions': sessions,
+            'Delivered': delivered,
+            'message': text,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while messaging %s on %s.", username, hostname)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to message %s on %s.", username, hostname)
+        return error_response("Unable to send the message.", 500)
+
+
+BROADCAST_DESKTOP_STATES = ('active', 'disconnected', 'unmanaged')
+
+
+def broadcast_targets(vms, sessions, requested):
+    """(hostnames to message, requested names that are not registered).
+
+    Without a list, every host someone is using: an assignment or a desktop its heartbeat
+    reports. With one, those hosts, whatever the broker knows about their sessions. Only
+    powered-on, reachable hosts are messaged either way.
+    """
+    reachable = {
+        str(vm.get('Hostname')).lower(): vm.get('Hostname')
+        for vm in vms
+        if vm.get('Hostname') and vm.get('PowerState') == 'On' and vm.get('NetworkStatus') == 'Reachable'
+    }
+    registered = {str(vm.get('Hostname')).lower() for vm in vms if vm.get('Hostname')}
+
+    if requested is not None:
+        wanted = {name.lower() for name in requested}
+        unknown = sorted(name for name in requested if name.lower() not in registered)
+        return sorted((reachable[name] for name in wanted if name in reachable), key=str.lower), unknown
+
+    in_use = {
+        str(session.get('Hostname')).lower()
+        for session in sessions
+        if session.get('HasAssignment') or session.get('State') in BROADCAST_DESKTOP_STATES
+    }
+    return sorted((reachable[name] for name in in_use if name in reachable), key=str.lower), []
+
+
+@app.route('/api/sessions/broadcast', methods=['POST'])
+@token_required(OPERATE_ROLES)
+@audited('session.broadcast', target_type='fleet')
+def broadcast_message():
+    """Show a message in every session, or in every session on the named hosts."""
+    try:
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+
+        message, problem = normalize_session_message(body.get('message'))
+        if problem:
+            return error_response(problem, 400)
+
+        requested = body.get('hostnames')
+        if requested is not None:
+            if (not isinstance(requested, list) or len(requested) > BROADCAST_MAX_HOSTNAMES
+                    or not all(isinstance(name, str) and HEARTBEAT_HOSTNAME_RE.match(name) for name in requested)):
+                return error_response(f"hostnames must be a list of at most {BROADCAST_MAX_HOSTNAMES} hostnames.", 400)
+            if not requested:
+                return error_response("Name at least one host, or leave hostnames out to message every session.", 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetVms")
+                vms = cursor.fetchall() or []
+        sessions = fetch_sessions() if requested is None else []
+
+        hostnames, unknown = broadcast_targets(vms, sessions, requested)
+        skipped = []
+        if requested is not None:
+            chosen = {name.lower() for name in hostnames}
+            missing = {name.lower() for name in unknown}
+            skipped = sorted({name for name in requested if name.lower() not in chosen and name.lower() not in missing}, key=str.lower)
+        deadline = time.monotonic() + BROADCAST_DEADLINE_SECONDS
+
+        def deliver(hostname):
+            if time.monotonic() >= deadline:
+                return hostname, None
+            try:
+                values, _ = run_session_control(
+                    hostname, ['message-all'], stdin_input=message, timeout=BROADCAST_HOST_TIMEOUT_SECONDS
+                )
+            except HostAgentOutdated:
+                return hostname, {'Result': 'AgentOutdated'}
+            except Exception:
+                logger.exception("Could not deliver the broadcast to %s.", hostname)
+                return hostname, {'Result': 'Failed'}
+
+            result = values.get('RESULT')
+            return hostname, {
+                'Result': {'delivered': 'Delivered', 'no-session': 'NoSession'}.get(result, 'Failed'),
+                'Sessions': coerce_optional_int(values.get('SESSIONS'), default=0, minimum=0),
+                'Delivered': coerce_optional_int(values.get('DELIVERED'), default=0, minimum=0),
+            }
+
+        outcomes = []
+        if hostnames:
+            with ThreadPoolExecutor(max_workers=min(BROADCAST_CONCURRENCY, len(hostnames))) as pool:
+                outcomes = list(pool.map(deliver, hostnames))
+
+        results = []
+        not_attempted = []
+        for hostname, outcome in outcomes:
+            if outcome is None:
+                not_attempted.append(hostname)
+                continue
+            results.append({'Hostname': hostname, 'Sessions': 0, 'Delivered': 0, **outcome})
+
+        delivered = sum(entry['Delivered'] for entry in results)
+        failed = [entry['Hostname'] for entry in results if entry['Result'] in ('Failed', 'AgentOutdated')]
+        g.audit_detail = {
+            'message': message[:SESSION_AUDIT_MESSAGE_CHARS],
+            'targetCount': len(hostnames),
+            'delivered': delivered,
+            'hostsFailed': len(failed),
+            'notAttempted': len(not_attempted),
+        }
+        if requested is not None and len(requested) <= 10:
+            g.audit_detail['hostnames'] = sorted(requested, key=str.lower)
+
+        if not hostnames:
+            summary = ("None of those hosts is powered on and reachable, so nothing was sent."
+                       if requested is not None else
+                       "No powered-on, reachable host has anyone on it, so nothing was sent.")
+        else:
+            summary = f"Shown in {delivered} session(s) on {len(hostnames) - len(failed) - len(not_attempted)} of {len(hostnames)} host(s)."
+            if failed:
+                summary += f" Not delivered to {', '.join(failed[:5])}{' and others' if len(failed) > 5 else ''}."
+            if not_attempted:
+                summary += f" {len(not_attempted)} host(s) were not reached before the time limit."
+            if skipped:
+                summary += f" Skipped {len(skipped)} host(s) that are off or unreachable."
+
+        return jsonify({
+            'TargetCount': len(hostnames),
+            'Delivered': delivered,
+            'Results': results,
+            'NotAttempted': not_attempted,
+            'UnknownHostnames': unknown,
+            'SkippedHostnames': skipped,
+            'message': summary,
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while broadcasting a message.")
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to broadcast a message.")
+        return error_response("Unable to send the message.", 500)
+
+
+@app.route('/api/users/<username>/reset-profile', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('user.reset_profile_requested', target_type='user', target_param='username')
+def request_profile_reset(username):
+    """Ask for a fresh profile at the user's next new assignment. The old one is kept."""
+    try:
+        if not BROKER_USERNAME_RE.match(username or ''):
+            return error_response("The username is not valid.", 400)
+
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+        if str(body.get('confirm') or '').strip().lower() != username.lower():
+            return jsonify({
+                'error': f"Send the username as confirm to reset {username}'s profile.",
+                'requiresConfirmation': True,
+                'Username': username,
+            }), 409
+
+        _, requested_by, _ = audit_actor()
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC RequestProfileReset @Username = %s, @RequestedBy = %s",
+                    (username, requested_by)
+                )
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        if row.get('Result') != 'Requested':
+            return error_response(f"The broker has no user named {username}.", 404)
+
+        assigned = bool(row.get('CurrentlyAssigned'))
+        g.audit_detail = {'currentlyAssigned': assigned}
+        message = (
+            f"{username} gets a fresh profile at their next sign-in after the current session ends. "
+            "The current profile is kept, renamed."
+            if assigned else
+            f"{username} gets a fresh profile at their next sign-in. The current profile is kept, renamed."
+        )
+        return jsonify(serialize_for_json({
+            'Username': row.get('Username'),
+            'RequestedAtUtc': row.get('ProfileResetRequestedAtUtc'),
+            'RequestedBy': row.get('ProfileResetRequestedBy'),
+            'CurrentlyAssigned': assigned,
+            'message': message,
+        })), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while requesting a profile reset for %s.", username)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to request a profile reset for %s.", username)
+        return error_response("Unable to request the profile reset.", 500)
+
+
+@app.route('/api/users/<username>/reset-profile/cancel', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('user.reset_profile_cancelled', target_type='user', target_param='username')
+def cancel_profile_reset(username):
+    try:
+        if not BROKER_USERNAME_RE.match(username or ''):
+            return error_response("The username is not valid.", 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC CancelProfileReset @Username = %s", (username,))
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        result = row.get('Result')
+        g.audit_detail = {'result': result}
+        if result == 'NotFound':
+            return error_response(f"The broker has no user named {username}.", 404)
+        if result == 'NotPending':
+            return jsonify({'Username': username, 'Result': result, 'message': f"{username} had no profile reset pending."}), 200
+        return jsonify({'Username': username, 'Result': result, 'message': f"Cancelled the profile reset for {username}."}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while cancelling a profile reset for %s.", username)
+        return database_unavailable_response(e)
+
+    except Exception:
+        logger.exception("Failed to cancel a profile reset for %s.", username)
+        return error_response("Unable to cancel the profile reset.", 500)
+
+
+def apply_pending_profile_reset(vmid, hostname, username):
+    """Apply a requested profile reset during a new checkout, before the home is mounted.
+
+    Never fails the checkout: if the reset cannot be applied now, the user signs in with the
+    existing profile and the reset stays pending for a later checkout. Returns the outcome.
+    """
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC BeginProfileReset @Username = %s, @VMID = %s", (username, vmid))
+                row = cursor.fetchone() or {}
+
+        readiness = row.get('Result')
+        if readiness != 'Ready':
+            if readiness == 'InUseElsewhere':
+                logger.info("Left the profile reset for %s pending: the profile may be in use on another host.", username)
+            return readiness
+
+        if not NFS_SHARE:
+            logger.error("Cannot reset the profile of %s: NFS_SHARE is not configured.", username)
+            return 'NotConfigured'
+
+        try:
+            values, _ = run_session_control(
+                hostname, ['reset-profile', NFS_SHARE, username], timeout=PROFILE_RESET_TIMEOUT_SECONDS
+            )
+        except HostAgentOutdated:
+            logger.warning("Left the profile reset for %s pending: %s runs a host agent older than 1.1.0.", username, hostname)
+            audit('user.reset_profile_applied', 'user', username, AUDIT_FAILURE, {
+                'hostname': hostname, 'error': 'The host agent is older than 1.1.0.',
+            })
+            return 'AgentOutdated'
+
+        outcome = values.get('RESULT')
+        if outcome not in ('profile-reset', 'profile-missing'):
+            logger.error("The profile reset for %s failed on %s (%s); it stays pending.", username, hostname, outcome)
+            audit('user.reset_profile_applied', 'user', username, AUDIT_FAILURE, {
+                'hostname': hostname, 'result': outcome or 'error',
+            })
+            return outcome or 'Failed'
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC CompleteProfileReset @Username = %s", (username,))
+                cursor.fetchone()
+            conn.commit()
+
+        audit('user.reset_profile_applied', 'user', username, AUDIT_SUCCESS, {
+            'hostname': hostname, 'result': outcome, 'renamedTo': values.get('RENAMED_TO'),
+        })
+        return outcome
+    except Exception:
+        logger.exception("Could not apply the profile reset for %s on %s; it stays pending.", username, hostname)
+        return 'Failed'
+
+# ===============================
+# Maintenance APIs
+#
+# Rolling maintenance patches or restarts hosts a batch at a time while keeping enough hosts
+# ready for users. The run lives in SQL (dbo.MaintenanceRuns and dbo.MaintenanceRunHosts) and
+# the scheduled task advances it every minute through POST /api/maintenance/advance. Each step
+# is recorded in SQL before its action is taken and confirmed once its effect is seen, and
+# every change is a compare-and-set, so an advance that dies part way is picked up by the next.
+
+MAINTENANCE_PATCH_MODES = {'security': 'Security', 'all': 'All', 'rebootonly': 'RebootOnly'}
+MAINTENANCE_HOST_IN_PROGRESS = ('Draining', 'Starting', 'Patching', 'Restarting', 'Verifying')
+MAINTENANCE_NAME_MAX = 100
+MAINTENANCE_REASON_MAX = 400
+DEFAULT_MAINTENANCE_WARNING = (
+    "This host restarts for maintenance in {minutes} minutes. Save your work and sign out. "
+    "When you reconnect you get another host."
+)
+_PATCH_HOST_LINE_RE = re.compile(r'^__PATCH_HOST_([A-Z_]+)=(.*)$')
+
+
+class MaintenanceValidationError(Exception):
+    """A maintenance run setting the operator must correct. The message names the field."""
+
+    def __init__(self, client_message):
+        super().__init__(client_message)
+        self.client_message = client_message
+
+
+class MaintenanceConflict(Exception):
+    """Another advance changed the host first, so this one leaves it alone."""
+
+
+def maintenance_refusal(hostname, run_id):
+    run = f"maintenance run {run_id}" if run_id else "a maintenance run"
+    return (f"{hostname} is being patched or restarted by {run}. It returns to service when the run "
+            "is done with it; cancel the run to stop sooner.")
+
+
+def patch_agent_outdated_message(hostname):
+    return (f"{hostname} runs a host agent older than {PATCH_MIN_AGENT_VERSION}, which cannot patch it. Update it with "
+            "deploy/Migrate-LinuxHostReleaseAgent.ps1, or use a restart-only run.")
+
+
+def run_patch_host(hostname, arguments):
+    """Run patch-host.sh on a host and return what it reported.
+
+    As with run_session_control, `sudo -n` fails at once on a host whose agent does not have the
+    script or does not allow it yet; that is raised as HostAgentOutdated.
+    """
+    command = "sudo -n {script} {arguments}".format(
+        script=REMOTE_PATCH_HOST_SCRIPT,
+        arguments=' '.join(shlex.quote(str(argument)) for argument in arguments),
+    )
+    result, host_fqdn = run_remote_command(hostname, command, timeout=MAINTENANCE_SSH_TIMEOUT_SECONDS)
+    values = {}
+    for line in (result.stdout or '').splitlines():
+        match = _PATCH_HOST_LINE_RE.match(line.strip())
+        if match:
+            values[match.group(1)] = match.group(2).strip()
+
+    if not values and result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        if any(line.strip().startswith('sudo:') for line in stderr.splitlines()):
+            raise HostAgentOutdated(hostname)
+        logger.error("patch-host.sh %s failed on %s (exit %s): %s",
+                     arguments[0] if arguments else '', host_fqdn, result.returncode, stderr)
+    return values
+
+
+def agent_can_patch(agent_version):
+    reported = version_tuple(agent_version)
+    return reported is not None and reported >= version_tuple(PATCH_MIN_AGENT_VERSION)
+
+
+def maintenance_run_item(row):
+    if not row or row.get('RunID') is None:
+        return None
+    item = {
+        field: row.get(field) for field in (
+            'RunID', 'Name', 'Status', 'EndStatus', 'PatchMode', 'BatchSize', 'MinReadyOverride',
+            'SignOutDeadlineMinutes', 'WarningMinutes', 'WarningMessage', 'MaxFailures', 'CanaryCount',
+            'WaitReason', 'StatusReason', 'CreatedBy', 'UpdatedBy', 'CreatedAtUtc', 'UpdatedAtUtc',
+            'EndedAtUtc', 'LastTickAtUtc', 'LastTickAgeSeconds', 'CreatedAgeSeconds',
+        )
+    }
+    item.update({
+        'IncludePoweredOff': bool(row.get('IncludePoweredOff')),
+        'CanaryReached': bool(row.get('CanaryReached')),
+        'SurgeRequested': bool(row.get('SurgeRequested')),
+        'Counts': {
+            field: int(row.get(field) or 0)
+            for field in ('Total', 'Pending', 'InProgress', 'Succeeded', 'Failed', 'Skipped', 'Cancelled')
+        },
+    })
+    for field in ('MinReadyInForce', 'PhaseMinVMs', 'ReadyNow'):
+        if field in row:
+            item[field] = row.get(field)
+    return serialize_for_json(item)
+
+
+def maintenance_host_item(row):
+    item = {
+        field: row.get(field) for field in (
+            'RunHostID', 'VMID', 'Hostname', 'Position', 'State', 'Attempts', 'Detail', 'RebootRequired',
+            'AdmittedAtUtc', 'WarningSentAtUtc', 'SignOutRequestedAtUtc', 'PatchStartedAtUtc', 'PatchFinishedAtUtc',
+            'RestartRequestedAtUtc', 'VerifiedAtUtc', 'CompletedAtUtc', 'StepAgeSeconds', 'PowerState',
+            'NetworkStatus', 'VmStatus', 'Username', 'AgentVersion', 'HeartbeatAgeSeconds',
+        )
+    }
+    item.update({
+        'WasDrained': bool(row.get('WasDrained')),
+        'WasMaintenance': bool(row.get('WasMaintenance')),
+        'WasPoweredOff': bool(row.get('WasPoweredOff')),
+        'Registered': bool(row.get('Registered')),
+        'DrainRequested': bool(row.get('DrainRequested')),
+        'XrdpActive': None if row.get('XrdpActive') is None else bool(row.get('XrdpActive')),
+        'AgentCanPatch': agent_can_patch(row.get('AgentVersion')),
+    })
+    return serialize_for_json(item)
+
+
+def fetch_maintenance_run(run_id=None):
+    """A run with what admission works from now; the active run when run_id is None."""
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetMaintenanceRun @RunID = %s", (run_id,))
+            return cursor.fetchone()
+
+
+def fetch_maintenance_hosts(run_id):
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetMaintenanceRunHosts @RunID = %s", (run_id,))
+            return cursor.fetchall() or []
+
+
+def set_maintenance_run_status(run_id, action, reason=None, updated_by=None):
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute(
+                "EXEC SetMaintenanceRunStatus @RunID = %s, @Action = %s, @Reason = %s, @UpdatedBy = %s",
+                (run_id, action, reason, updated_by)
+            )
+            row = cursor.fetchone() or {}
+        conn.commit()
+    return row
+
+
+_HOST_STATE_FLAGS = (
+    'MarkAction', 'MarkWarning', 'MarkSignOut', 'MarkPatchStarted', 'MarkPatchFinished', 'MarkRestart',
+    'RestartFromAction', 'MarkVerified',
+)
+
+
+def store_maintenance_host_state(host, changes):
+    """The compare-and-set itself, in SQL. Returns SetMaintenanceHostState's row."""
+    params = (
+        host['RunHostID'], host['Version'], changes.get('State'), changes.get('Detail'), 'Detail' in changes,
+        *(bool(changes.get(flag)) for flag in _HOST_STATE_FLAGS[:3]),
+        changes.get('PatchToken'),
+        *(bool(changes.get(flag)) for flag in _HOST_STATE_FLAGS[3:]),
+        changes.get('RebootRequired'),
+    )
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute(
+                "EXEC SetMaintenanceHostState @RunHostID = %s, @ExpectedVersion = %s, @State = %s, @Detail = %s, "
+                "@SetDetail = %s, @MarkAction = %s, @MarkWarning = %s, @MarkSignOut = %s, @PatchToken = %s, "
+                "@MarkPatchStarted = %s, @MarkPatchFinished = %s, @MarkRestart = %s, @RestartFromAction = %s, "
+                "@MarkVerified = %s, @RebootRequired = %s",
+                params
+            )
+            row = cursor.fetchone() or {}
+        conn.commit()
+    return row
+
+
+def set_maintenance_host(host, **changes):
+    """Record a host's progress as a compare-and-set, and keep `host` current.
+
+    Raises MaintenanceConflict when the row moved on since it was read: another advance got
+    there first, so this one does nothing more with the host.
+    """
+    row = store_maintenance_host_state(host, changes)
+    if row.get('Result') != 'Updated':
+        raise MaintenanceConflict(row.get('Result'))
+
+    previous_state = host.get('State')
+    host.update(Version=row.get('Version'), State=row.get('State'), Attempts=row.get('Attempts'), Detail=row.get('Detail'))
+    if host['State'] != previous_state:
+        host.update(StepAgeSeconds=0, ActionAgeSeconds=None)
+    if changes.get('MarkAction'):
+        host['ActionAgeSeconds'] = 0
+    if changes.get('MarkWarning'):
+        host['WarningAgeSeconds'] = 0
+    if changes.get('MarkSignOut'):
+        host['SignOutAgeSeconds'] = 0
+    if changes.get('PatchToken'):
+        host['PatchToken'] = changes['PatchToken']
+    if changes.get('MarkPatchStarted'):
+        host['PatchStartedAtUtc'] = host.get('PatchStartedAtUtc') or 'recorded'
+    if changes.get('MarkRestart') or changes.get('RestartFromAction'):
+        host.update(RestartAgeSeconds=0, HeartbeatAfterRestart=False, BootedAfterRestart=False)
+    return host
+
+
+def note_maintenance_host(host, text):
+    """Show what a host is waiting for, without writing the same words every minute."""
+    if host.get('Detail') != text:
+        set_maintenance_host(host, Detail=text)
+
+
+def return_maintenance_host(host):
+    """Put a host back the way the run found it. Returns ReturnMaintenanceHost's result."""
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC ReturnMaintenanceHost @RunHostID = %s", (host['RunHostID'],))
+            row = cursor.fetchone() or {}
+        conn.commit()
+    return row.get('Result')
+
+
+MAINTENANCE_POWER_VERBS = {'Start': 'start', 'Stop': 'stop', 'Restart': 'restart'}
+
+
+def maintenance_power(host, action):
+    """Record and request a power action for a host the run holds, as run_power_action does.
+
+    Returns None once Azure accepted the request, or what went wrong. The host is out of
+    rotation, so no assignment is ever ended; a host someone was just given is refused.
+    """
+    verb = MAINTENANCE_POWER_VERBS[action]
+    hostname = host['Hostname']
+    if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
+        return "The Azure subscription or resource group is not configured."
+
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC BeginVmPowerAction @VMID = %s, @Action = %s, @AllowAssigned = %s", (host['VMID'], action, False))
+            row = cursor.fetchone() or {}
+        conn.commit()
+
+    result = row.get('Result')
+    if result != 'Requested':
+        return f"The broker would not {verb} {hostname} ({result or 'no answer'})."
+
+    try:
+        virtual_machines = get_compute_client().virtual_machines
+        if action == 'Start':
+            virtual_machines.begin_start(VM_RESOURCE_GROUP, hostname)
+        elif action == 'Restart':
+            virtual_machines.begin_restart(VM_RESOURCE_GROUP, hostname)
+        elif (row.get('StopMode') or 'PowerOff') == 'Deallocate':
+            virtual_machines.begin_deallocate(VM_RESOURCE_GROUP, hostname)
+        else:
+            virtual_machines.begin_power_off(VM_RESOURCE_GROUP, hostname)
+    except Exception:
+        logger.exception("Azure refused to %s %s for maintenance.", verb, hostname)
+        revert_refused_power_action(host['VMID'], hostname, row)
+        return f"Azure refused to {verb} {hostname}."
+    return None
+
+
+class MaintenanceTick:
+    """One scheduled advance of a run: its deadline, and what it did, for the task's log."""
+
+    def __init__(self, run, deadline):
+        self.run = run
+        self.deadline = deadline
+        self.actions = []
+
+    def time_left(self):
+        return time.monotonic() < self.deadline
+
+    def record(self, host, action):
+        self.actions.append({'Hostname': host.get('Hostname'), 'State': host.get('State'), 'Action': action})
+
+
+def maintenance_audit(tick, action, host, outcome=AUDIT_SUCCESS, **detail):
+    audit(action, 'vm', host.get('Hostname'), outcome, dict(detail, runId=tick.run.get('RunID')))
+
+
+def maintenance_fail(tick, host, detail):
+    """The host stays out of rotation for an operator to look at."""
+    set_maintenance_host(host, State='Failed', Detail=detail)
+    maintenance_audit(tick, 'maintenance.host_failed', host, AUDIT_FAILURE, detail=detail)
+    tick.record(host, 'failed')
+    return False
+
+
+def maintenance_host_is_free(host):
+    return (not host.get('Username') and not host.get('LeaseId') and not host.get('CleanupPending')
+            and host.get('VmStatus') in ('Available', 'Maintenance'))
+
+
+def maintenance_session_users(host):
+    """The users the host's current heartbeat reports signed in, or None when it is not current."""
+    age = host.get('HeartbeatAgeSeconds')
+    if age is None or age > heartbeat_stale_after(host.get('ReconcileIntervalSeconds')):
+        return None
+    return {
+        str(session.get('username')).lower()
+        for session in (_json_column(host.get('SessionsJson'), list) or [])
+        if isinstance(session, dict) and session.get('username')
+    }
+
+
+def maintenance_warning_text(run):
+    custom = (run.get('WarningMessage') or '').strip()
+    return custom or DEFAULT_MAINTENANCE_WARNING.format(minutes=run.get('WarningMinutes') or 15)
+
+
+def maintenance_warn(tick, host, user):
+    hostname = host['Hostname']
+    try:
+        values, _ = run_session_control(
+            hostname, ['message-all'], stdin_input=maintenance_warning_text(tick.run), timeout=MAINTENANCE_SSH_TIMEOUT_SECONDS
+        )
+    except HostAgentOutdated:
+        return maintenance_fail(tick, host, (f"{hostname} runs a host agent older than 1.1.0, so {user} cannot be warned or "
+                                            "signed out. Update it with deploy/Migrate-LinuxHostReleaseAgent.ps1."))
+    except Exception:
+        logger.exception("Could not warn the users of %s about maintenance.", hostname)
+        note_maintenance_host(host, f"Could not reach {hostname} to warn {user}; retrying.")
+        return False
+
+    if values.get('RESULT') not in ('delivered', 'no-session'):
+        note_maintenance_host(host, f"Could not show the warning on {hostname}; retrying.")
+        return False
+
+    minutes = tick.run.get('WarningMinutes') or 15
+    set_maintenance_host(host, MarkWarning=True,
+                         Detail=f"Warned {user}; they are signed out in {minutes} minutes unless they leave first.")
+    maintenance_audit(tick, 'maintenance.user_warned', host, user=user, delivered=values.get('DELIVERED'))
+    tick.record(host, 'warned')
+    return False
+
+
+def maintenance_sign_out(tick, host, user, has_session=True):
+    """Sign the user out (when they have a desktop) and end the assignment, so the host frees up."""
+    hostname = host['Hostname']
+    if (host.get('Attempts') or 0) >= MAINTENANCE_MAX_ATTEMPTS:
+        return maintenance_fail(tick, host, f"Could not sign {user} out of {hostname} after {MAINTENANCE_MAX_ATTEMPTS} attempts.")
+
+    set_maintenance_host(host, MarkAction=True, MarkSignOut=True)
+    if has_session:
+        try:
+            values, _ = run_session_control(hostname, ['signout', user])
+        except HostAgentOutdated:
+            return maintenance_fail(tick, host, (f"{hostname} runs a host agent older than 1.1.0, so {user} cannot be signed "
+                                                "out. Update it with deploy/Migrate-LinuxHostReleaseAgent.ps1."))
+        except Exception:
+            logger.exception("Could not sign %s out of %s for maintenance.", user, hostname)
+            note_maintenance_host(host, f"Could not reach {hostname} to sign {user} out; retrying in five minutes.")
+            return False
+        if values.get('RESULT') not in ('signed-out', 'no-session'):
+            note_maintenance_host(host, f"Could not sign {user} out of {hostname}; retrying in five minutes.")
+            return False
+
+    cleanup = None
+    if host.get('Username'):
+        vm = {'VMID': host['VMID'], 'Hostname': hostname, 'Username': host['Username'], 'LeaseId': host.get('LeaseId')}
+        cleanup = return_after_signout(vm, host['Username'])
+
+    note_maintenance_host(host, f"Signed {user} out for maintenance." if has_session
+                          else f"{user} had no session, so the host was returned.")
+    maintenance_audit(tick, 'maintenance.user_signed_out', host, user=user, hadSession=has_session, cleanupResult=cleanup)
+    tick.record(host, 'signed-out')
+    return False
+
+
+def advance_draining(tick, host):
+    """Wait for the user to leave, warning and then signing them out when the run has a deadline."""
+    run = tick.run
+    if run.get('Status') == 'Stopping':
+        return_maintenance_host(host)
+        set_maintenance_host(host, State='Cancelled', Detail="The run stopped before this host was patched, so it was returned.")
+        maintenance_audit(tick, 'maintenance.host_returned', host)
+        tick.record(host, 'returned')
+        return False
+    if run.get('Status') != 'Active':
+        return False
+
+    if maintenance_host_is_free(host):
+        if host.get('PowerState') == 'Off':
+            next_state = 'Starting'
+        elif run.get('PatchMode') == 'RebootOnly':
+            next_state = 'Restarting'
+        else:
+            next_state = 'Patching'
+        set_maintenance_host(host, State=next_state, Detail=None)
+        return True
+
+    user = host.get('Username') or host.get('CleanupUsername') or 'the user'
+    if not host.get('Username'):
+        note_maintenance_host(host, f"Waiting for the broker to remove {user} from the host.")
+        return False
+
+    deadline_minutes = run.get('SignOutDeadlineMinutes')
+    if not deadline_minutes:
+        note_maintenance_host(host, f"Waiting for {user} to sign out.")
+        return False
+
+    deadline_seconds = deadline_minutes * 60
+    warning_seconds = (run.get('WarningMinutes') or 15) * 60
+    admitted = host.get('AdmittedAgeSeconds') or 0
+    sessions = maintenance_session_users(host)
+    last_checkout = host.get('LastCheckoutAgeSeconds')
+    connecting = last_checkout is not None and last_checkout < SESSION_CONNECTING_SECONDS
+
+    # No desktop to warn, and not just connecting: there is nothing to wait for.
+    if sessions is not None and user.lower() not in sessions and not connecting:
+        return maintenance_sign_out(tick, host, user, has_session=False)
+
+    if host.get('WarningAgeSeconds') is None:
+        if admitted >= deadline_seconds - warning_seconds:
+            return maintenance_warn(tick, host, user)
+        note_maintenance_host(host, f"Waiting for {user} to sign out; they are warned before the {deadline_minutes}-minute deadline.")
+        return False
+
+    if host['WarningAgeSeconds'] >= warning_seconds and admitted >= deadline_seconds:
+        if host.get('SignOutAgeSeconds') is None or host['SignOutAgeSeconds'] >= MAINTENANCE_SIGNOUT_RETRY_SECONDS:
+            return maintenance_sign_out(tick, host, user)
+    return False
+
+
+def advance_starting(tick, host):
+    """Start a host that was off before the run, then patch it, or verify it for a restart-only run."""
+    hostname = host['Hostname']
+    if host.get('ActionAgeSeconds') is None and host.get('PowerState') == 'On':
+        # Started some other way since it was admitted.
+        set_maintenance_host(host, State='Restarting' if tick.run.get('PatchMode') == 'RebootOnly' else 'Patching', Detail=None)
+        return True
+    if host.get('ActionAgeSeconds') is not None and host.get('PowerState') == 'On' and host.get('NetworkStatus') == 'Reachable':
+        if tick.run.get('PatchMode') == 'RebootOnly':
+            # A fresh start is the restart.
+            set_maintenance_host(host, State='Verifying', RestartFromAction=True, Detail=None)
+        else:
+            set_maintenance_host(host, State='Patching', Detail=None)
+        return True
+
+    if host.get('ActionAgeSeconds') is not None and host['ActionAgeSeconds'] < MAINTENANCE_START_TIMEOUT_SECONDS:
+        return False
+    if (host.get('Attempts') or 0) >= MAINTENANCE_MAX_ATTEMPTS:
+        return maintenance_fail(tick, host, f"{hostname} did not become reachable within 15 minutes of starting, "
+                                            f"{MAINTENANCE_MAX_ATTEMPTS} times.")
+
+    set_maintenance_host(host, MarkAction=True)
+    error = maintenance_power(host, 'Start')
+    note_maintenance_host(host, f"{error} Retrying." if error else f"Starting {hostname} to patch it.")
+    tick.record(host, 'start')
+    return False
+
+
+def maintenance_patch_mode(run):
+    return 'security' if run.get('PatchMode') == 'Security' else 'all'
+
+
+def maintenance_start_patch(tick, host, retry_reason=None):
+    """Ask patch-host.sh to start a run, under a token unique to this attempt."""
+    hostname = host['Hostname']
+    attempts = host.get('Attempts') or 0
+    if retry_reason and attempts >= MAINTENANCE_MAX_ATTEMPTS:
+        return maintenance_fail(tick, host, f"{retry_reason}, {MAINTENANCE_MAX_ATTEMPTS} times.")
+
+    mode = maintenance_patch_mode(tick.run)
+    token = f"lb{tick.run['RunID']}-{host['RunHostID']}-{attempts + 1}"
+    set_maintenance_host(host, MarkAction=True, PatchToken=token)
+    try:
+        values = run_patch_host(hostname, ['start', mode, token])
+    except HostAgentOutdated:
+        return maintenance_fail(tick, host, patch_agent_outdated_message(hostname))
+    except Exception:
+        logger.exception("Could not start patching %s.", hostname)
+        note_maintenance_host(host, f"Could not reach {hostname} to start patching; retrying.")
+        return False
+
+    result = values.get('RESULT')
+    if result == 'unsupported':
+        return maintenance_fail(tick, host, "No supported package manager (dnf, yum or apt-get) was found on the host.")
+    if result == 'busy':
+        note_maintenance_host(host, "Another patch run is already going on the host; waiting for it.")
+    elif result in ('started', 'already-started'):
+        note_maintenance_host(host, f"Installing {'security updates' if mode == 'security' else 'all updates'}.")
+    else:
+        note_maintenance_host(host, "patch-host.sh did not start the run; retrying.")
+    tick.record(host, 'patch-start')
+    return False
+
+
+def advance_patching(tick, host):
+    """Start patch-host.sh, then follow it until it succeeds, fails or runs out of time."""
+    hostname = host['Hostname']
+    if host.get('ActionAgeSeconds') is None:
+        return maintenance_start_patch(tick, host)
+
+    try:
+        values = run_patch_host(hostname, ['status'])
+    except HostAgentOutdated:
+        return maintenance_fail(tick, host, patch_agent_outdated_message(hostname))
+    except Exception:
+        logger.exception("Could not read the patch status of %s.", hostname)
+        values = None
+
+    timed_out = host['ActionAgeSeconds'] >= MAINTENANCE_PATCH_TIMEOUT_SECONDS
+    if values is None:
+        if timed_out:
+            return maintenance_fail(tick, host, f"Patching did not finish within {MAINTENANCE_PATCH_TIMEOUT_SECONDS // 60} minutes.")
+        note_maintenance_host(host, f"Could not reach {hostname} for the patch status; retrying.")
+        return False
+
+    state = values.get('STATE')
+    if values.get('TOKEN') and values.get('TOKEN') == host.get('PatchToken'):
+        if state == 'running':
+            if not host.get('PatchStartedAtUtc'):
+                set_maintenance_host(host, MarkPatchStarted=True)
+            if timed_out:
+                return maintenance_fail(tick, host, f"Patching did not finish within {MAINTENANCE_PATCH_TIMEOUT_SECONDS // 60} minutes.")
+            return False
+        if state == 'succeeded':
+            reboot = values.get('REBOOT_REQUIRED')
+            set_maintenance_host(host, State='Restarting', MarkPatchStarted=True, MarkPatchFinished=True,
+                                 RebootRequired=reboot if reboot in ('yes', 'no', 'unknown') else None, Detail=None)
+            maintenance_audit(tick, 'maintenance.host_patched', host, rebootRequired=reboot, manager=values.get('MANAGER'))
+            tick.record(host, 'patched')
+            return True
+        if state == 'failed':
+            summary = (values.get('SUMMARY') or '').strip()
+            code = values.get('EXIT_CODE') or '?'
+            return maintenance_fail(tick, host, f"Patching failed (exit {code})" + (f": {summary}" if summary else "."))
+        if state == 'interrupted':
+            return maintenance_start_patch(tick, host, retry_reason="The patch run was interrupted")
+
+    # The host has no record of this attempt: its start never arrived.
+    if host['ActionAgeSeconds'] >= MAINTENANCE_PATCH_START_GRACE_SECONDS:
+        return maintenance_start_patch(tick, host, retry_reason="The patch run did not start")
+    return False
+
+
+def advance_restarting(tick, host):
+    """Restart the host through Azure, recording when, and move on once the restart is under way."""
+    hostname = host['Hostname']
+    if host.get('ActionAgeSeconds') is not None:
+        # BeginVmPowerAction marks the host unreachable until the probe reaches it again.
+        if host.get('NetworkStatus') != 'Reachable' or host.get('BootedAfterRestart'):
+            set_maintenance_host(host, State='Verifying', Detail=None)
+            return True
+        if host['ActionAgeSeconds'] < MAINTENANCE_RESTART_GRACE_SECONDS:
+            return False
+        if (host.get('Attempts') or 0) >= MAINTENANCE_MAX_ATTEMPTS:
+            return maintenance_fail(tick, host, f"Azure did not restart {hostname} after {MAINTENANCE_MAX_ATTEMPTS} requests.")
+
+    set_maintenance_host(host, MarkAction=True, MarkRestart=True)
+    error = maintenance_power(host, 'Restart')
+    tick.record(host, 'restart')
+    if error:
+        note_maintenance_host(host, f"{error} Retrying.")
+        return False
+    set_maintenance_host(host, State='Verifying', Detail=None)
+    return True
+
+
+def maintenance_health_problem(host):
+    """What still stops the host counting as back, or None once it is healthy."""
+    if host.get('PowerState') != 'On' or host.get('NetworkStatus') != 'Reachable':
+        return "it is not reachable"
+    if not host.get('HeartbeatAfterRestart'):
+        return "its agent has not reported since the restart"
+    if not host.get('BootedAfterRestart'):
+        return "its agent does not show that it restarted"
+    if host.get('XrdpActive') is not True:
+        return "xrdp is not running"
+    return None
+
+
+def advance_verifying(tick, host):
+    """Wait for proof the restart happened and the host is healthy, restarting again if needed."""
+    problem = maintenance_health_problem(host)
+    if problem is None:
+        return maintenance_complete_host(tick, host)
+
+    if (host.get('RestartAgeSeconds') or 0) < MAINTENANCE_VERIFY_TIMEOUT_SECONDS:
+        return False
+    if (host.get('Attempts') or 0) >= MAINTENANCE_MAX_ATTEMPTS - 1:
+        return maintenance_fail(tick, host, f"{host['Hostname']} did not come back healthy after restarting: {problem}.")
+
+    set_maintenance_host(host, MarkAction=True, MarkRestart=True,
+                         Detail=f"Restarting again: 15 minutes after the restart, {problem}.")
+    error = maintenance_power(host, 'Restart')
+    if error:
+        note_maintenance_host(host, f"{error} Retrying.")
+    tick.record(host, 'restart')
+    return False
+
+
+def maintenance_complete_host(tick, host):
+    """Leave the host the way the run found it: stopped again if it was off, then back in service."""
+    stopped = ''
+    if host.get('WasPoweredOff'):
+        # Stopped while still out of rotation, so no one can be given it in between.
+        error = maintenance_power(host, 'Stop')
+        stopped = ' It was powered off again.' if not error else f' It could not be powered off again: {error}'
+    returned = return_maintenance_host(host)
+
+    detail = 'Restarted.' if tick.run.get('PatchMode') == 'RebootOnly' else 'Patched and restarted.'
+    if returned == 'LeftOutOfService':
+        detail += ' Left out of rotation, as it was before the run.'
+    set_maintenance_host(host, State='Succeeded', MarkVerified=True, Detail=detail + stopped)
+    maintenance_audit(tick, 'maintenance.host_completed', host, patchMode=tick.run.get('PatchMode'),
+                      rebootRequired=host.get('RebootRequired'), returned=returned)
+    tick.record(host, 'succeeded')
+    return False
+
+
+MAINTENANCE_HANDLERS = {
+    'Draining': advance_draining,
+    'Starting': advance_starting,
+    'Patching': advance_patching,
+    'Restarting': advance_restarting,
+    'Verifying': advance_verifying,
+}
+
+
+def advance_maintenance_host(tick, host):
+    """Take one host as far as it can go this tick: a step, or a step and the next one's request."""
+    for _ in range(4):
+        handler = MAINTENANCE_HANDLERS.get(host.get('State'))
+        if handler is None or not tick.time_left():
+            return
+        try:
+            if not host.get('Registered'):
+                maintenance_fail(tick, host, f"{host.get('Hostname')} is no longer registered with the broker.")
+                return
+            if not handler(tick, host):
+                return
+        except MaintenanceConflict:
+            return
+        except DatabaseUnavailable:
+            raise
+        except Exception:
+            logger.exception("Maintenance could not advance %s.", host.get('Hostname'))
+            return
+
+
+def finish_maintenance_tick(tick):
+    """Stop the run after too many failures, and end it once every host is done."""
+    run_id = tick.run['RunID']
+    summary = fetch_maintenance_run(run_id) or {}
+    status = summary.get('Status')
+    failed = int(summary.get('Failed') or 0)
+    pending = int(summary.get('Pending') or 0)
+    in_progress = int(summary.get('InProgress') or 0)
+    counts = {'succeeded': summary.get('Succeeded'), 'failed': failed, 'skipped': summary.get('Skipped'),
+              'cancelled': summary.get('Cancelled')}
+
+    if status in ('Active', 'Paused') and failed >= int(summary.get('MaxFailures') or 1):
+        row = set_maintenance_run_status(run_id, 'fail', f"{failed} host{'s' if failed != 1 else ''} failed, the most this run allows.")
+        audit('maintenance.run_stopped', 'maintenance', run_id, AUDIT_FAILURE, counts)
+        summary = row or summary
+    elif status == 'Active' and pending == 0 and in_progress == 0:
+        summary = set_maintenance_run_status(run_id, 'complete') or summary
+        audit('maintenance.run_completed', 'maintenance', run_id, AUDIT_SUCCESS, counts)
+    elif status == 'Stopping' and in_progress == 0:
+        summary = set_maintenance_run_status(run_id, 'finish') or summary
+        audit('maintenance.run_ended', 'maintenance', run_id, AUDIT_SUCCESS, dict(counts, status=summary.get('Status')))
+    tick.run.update({key: value for key, value in summary.items() if key != 'Result' and value is not None})
+
+
+def advance_maintenance_run(deadline):
+    """One scheduled advance: admit hosts, move each in-progress host on, and settle the run."""
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC BeginMaintenanceTick @LeaseSeconds = %s", (MAINTENANCE_TICK_LEASE_SECONDS,))
+            claim = cursor.fetchone() or {}
+        conn.commit()
+
+    result = claim.get('Result') or 'NoRun'
+    if result != 'Claimed':
+        return {'Result': result, 'RunID': claim.get('RunID'), 'Status': claim.get('Status'), 'Actions': []}
+
+    run = dict(claim)
+    run_id = run['RunID']
+    token = claim.get('TickToken')
+    tick = MaintenanceTick(run, deadline)
+    try:
+        if run.get('Status') == 'Active':
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute("EXEC ClaimMaintenanceAdmissions @RunID = %s", (run_id,))
+                    changes = cursor.fetchall() or []
+                conn.commit()
+            for change in changes:
+                admitted = change.get('Action') == 'Admitted'
+                audit('maintenance.host_admitted' if admitted else 'maintenance.host_skipped', 'vm', change.get('Hostname'),
+                      AUDIT_SUCCESS, {'runId': run_id, 'detail': change.get('Detail')})
+                tick.record(change, 'admitted' if admitted else 'skipped')
+
+            refreshed = fetch_maintenance_run(run_id) or {}
+            if refreshed.get('Status') == 'Paused' and refreshed.get('CanaryReached') and not run.get('CanaryReached'):
+                audit('maintenance.run_paused', 'maintenance', run_id, AUDIT_SUCCESS, {'reason': refreshed.get('StatusReason')})
+            run.update({key: value for key, value in refreshed.items() if value is not None or key in ('WaitReason',)})
+
+        for host in fetch_maintenance_hosts(run_id):
+            if not tick.time_left():
+                break
+            if host.get('State') in MAINTENANCE_HOST_IN_PROGRESS:
+                advance_maintenance_host(tick, host)
+
+        finish_maintenance_tick(tick)
+    finally:
+        try:
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute("EXEC EndMaintenanceTick @RunID = %s, @TickToken = %s", (run_id, token))
+                    cursor.fetchone()
+                conn.commit()
+        except Exception:
+            logger.exception("Could not release maintenance run %s; its claim lapses on its own.", run_id)
+
+    return {
+        'Result': 'Advanced',
+        'RunID': run_id,
+        'Status': tick.run.get('Status'),
+        'WaitReason': tick.run.get('WaitReason'),
+        'Actions': tick.actions,
+    }
+
+
+def _maintenance_int(body, field, minimum, maximum, default=None):
+    value = body.get(field)
+    if _is_blank(value):
+        if default is None:
+            return None
+        return default
+    try:
+        number = _rule_integer(value, field)
+    except RuleValidationError:
+        raise MaintenanceValidationError(f"{field} must be a whole number from {minimum} to {maximum}.")
+    if number < minimum or number > maximum:
+        raise MaintenanceValidationError(f"{field} must be a whole number from {minimum} to {maximum}.")
+    return number
+
+
+def parse_maintenance_run(body):
+    """The settings of a new run, validated. Raises MaintenanceValidationError naming the field."""
+    mode_key = re.sub(r'[\s_-]', '', str(body.get('patchMode') or '')).lower()
+    patch_mode = MAINTENANCE_PATCH_MODES.get(mode_key)
+    if not patch_mode:
+        raise MaintenanceValidationError("patchMode must be Security, All or RebootOnly.")
+
+    hostnames = body.get('hostnames')
+    if (not isinstance(hostnames, list) or not hostnames or len(hostnames) > MAINTENANCE_MAX_HOSTS
+            or not all(isinstance(name, str) and HEARTBEAT_HOSTNAME_RE.match(name) for name in hostnames)):
+        raise MaintenanceValidationError(f"hostnames must be a list of 1 to {MAINTENANCE_MAX_HOSTS} hostnames.")
+
+    deadline = _maintenance_int(body, 'signOutDeadlineMinutes', 5, 1440)
+    warning = _maintenance_int(body, 'warningMinutes', 1, 240, default=15)
+    if deadline is not None and warning >= deadline:
+        raise MaintenanceValidationError("warningMinutes must be less than signOutDeadlineMinutes.")
+
+    message = None
+    if not _is_blank(body.get('warningMessage')):
+        message, problem = normalize_session_message(body.get('warningMessage'))
+        if problem:
+            raise MaintenanceValidationError(problem.replace('The message', 'warningMessage'))
+
+    name = body.get('name')
+    if name is not None and not isinstance(name, str):
+        raise MaintenanceValidationError("name must be text.")
+    name = (name or '').strip()[:MAINTENANCE_NAME_MAX] or None
+
+    return {
+        'name': name,
+        'patchMode': patch_mode,
+        'hostnames': hostnames,
+        'batchSize': _maintenance_int(body, 'batchSize', 1, 50, default=1),
+        'minReady': _maintenance_int(body, 'minReady', 0, 1000),
+        'signOutDeadlineMinutes': deadline,
+        'warningMinutes': warning,
+        'warningMessage': message,
+        'includePoweredOff': body.get('includePoweredOff') is True,
+        'maxFailures': _maintenance_int(body, 'maxFailures', 1, 1000, default=1),
+        'canaryCount': _maintenance_int(body, 'canaryCount', 0, 50, default=0),
+    }
+
+
+def maintenance_order(vm):
+    """Patch order: hosts that are off first, then free ones, then those in use, which may wait."""
+    if vm.get('PowerState') == 'Off':
+        group = 0
+    elif vm.get('Username') or vm.get('LeaseId') or vm.get('CleanupPending') or vm.get('VmStatus') in ('CheckedOut', 'Released'):
+        group = 2
+    else:
+        group = 1
+    return group, str(vm.get('Hostname') or '').lower()
+
+
+def caller_display_name():
+    oid, name, _ = audit_actor()
+    return name or oid
+
+
+@app.route('/api/maintenance/runs', methods=['GET'])
+@token_required(READ_ROLES)
+def get_maintenance_runs():
+    """Recent maintenance runs, newest first, and the active one with what admission sees now."""
+    try:
+        limit = coerce_optional_int(request.args.get('limit'), default=MAINTENANCE_RUN_LIST_LIMIT, minimum=1, maximum=200)
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetMaintenanceRuns @Limit = %s", (limit,))
+                rows = cursor.fetchall() or []
+        active = fetch_maintenance_run(None)
+        return jsonify({
+            'Runs': [maintenance_run_item(row) for row in rows],
+            'Active': maintenance_run_item(active),
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while listing maintenance runs.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to list maintenance runs.")
+        return error_response("Unable to retrieve maintenance runs.", 500)
+
+
+@app.route('/api/maintenance/runs/<int:run_id>', methods=['GET'])
+@token_required(READ_ROLES)
+def get_maintenance_run(run_id):
+    """One run and every host in it, with its progress and live state."""
+    try:
+        run = fetch_maintenance_run(run_id)
+        if not run:
+            return error_response(f"Maintenance run {run_id} was not found.", 404)
+        return jsonify({
+            'Run': maintenance_run_item(run),
+            'Hosts': [maintenance_host_item(row) for row in fetch_maintenance_hosts(run_id)],
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading maintenance run %s.", run_id)
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to read maintenance run %s.", run_id)
+        return error_response("Unable to retrieve the maintenance run.", 500)
+
+
+@app.route('/api/maintenance/runs/create', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('maintenance.create', target_type='maintenance')
+def create_maintenance_run():
+    """Start a rolling maintenance run over the named hosts. Only one run is active at a time."""
+    try:
+        body = request.get_json(silent=True)
+        try:
+            settings = parse_maintenance_run(body if isinstance(body, dict) else {})
+        except MaintenanceValidationError as e:
+            return error_response(e.client_message, 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetVms")
+                vms = cursor.fetchall() or []
+
+        by_name = {str(vm.get('Hostname') or '').lower(): vm for vm in vms if vm.get('Hostname')}
+        unknown = sorted({name for name in settings['hostnames'] if name.lower() not in by_name}, key=str.lower)
+        if unknown:
+            return error_response(f"These hosts are not registered: {', '.join(unknown[:10])}.", 400)
+        chosen = sorted({name.lower(): by_name[name.lower()] for name in settings['hostnames']}.values(), key=maintenance_order)
+
+        g.audit_detail = {
+            field: settings[field] for field in (
+                'name', 'patchMode', 'batchSize', 'minReady', 'signOutDeadlineMinutes', 'warningMinutes',
+                'includePoweredOff', 'maxFailures', 'canaryCount',
+            )
+        }
+        g.audit_detail['hostCount'] = len(chosen)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC CreateMaintenanceRun @Name = %s, @PatchMode = %s, @BatchSize = %s, @MinReadyOverride = %s, "
+                    "@SignOutDeadlineMinutes = %s, @WarningMinutes = %s, @WarningMessage = %s, @IncludePoweredOff = %s, "
+                    "@MaxFailures = %s, @CanaryCount = %s, @HostsJson = %s, @CreatedBy = %s",
+                    (settings['name'], settings['patchMode'], settings['batchSize'], settings['minReady'],
+                     settings['signOutDeadlineMinutes'], settings['warningMinutes'], settings['warningMessage'],
+                     settings['includePoweredOff'], settings['maxFailures'], settings['canaryCount'],
+                     json.dumps([vm['VMID'] for vm in chosen]), caller_display_name())
+                )
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        result = row.get('Result')
+        if result == 'RunActive':
+            return error_response(f"Maintenance run {row.get('RunID')} is still active. Finish or cancel it first.", 409)
+        if result != 'Created':
+            return error_response("Some of those hosts are no longer registered. Refresh and try again.", 400)
+
+        g.audit_target_id = row.get('RunID')
+        g.audit_detail['runId'] = row.get('RunID')
+        count = row.get('HostCount') or len(chosen)
+        return jsonify({
+            'RunID': row.get('RunID'),
+            'HostCount': count,
+            'message': f"Maintenance run {row.get('RunID')} started for {count} host{'s' if count != 1 else ''}. "
+                       "Hosts are admitted on the next scheduled advance, within a minute.",
+        }), 201
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while starting a maintenance run.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to start a maintenance run.")
+        return error_response("Unable to start the maintenance run.", 500)
+
+
+MAINTENANCE_RUN_ACTIONS = {
+    'pause': ('paused', "Paused maintenance run {run}. Hosts already being patched or restarted finish."),
+    'resume': ('resumed', "Resumed maintenance run {run}."),
+    'cancel': ('cancelled', "Cancelling maintenance run {run}: hosts still waiting for their users are returned, "
+                            "and hosts being patched or restarted finish first."),
+}
+
+
+def change_maintenance_run(run_id, action):
+    verb, message = MAINTENANCE_RUN_ACTIONS[action]
+    try:
+        body = request.get_json(silent=True)
+        reason = body.get('reason') if isinstance(body, dict) else None
+        reason = (reason.strip()[:MAINTENANCE_REASON_MAX] if isinstance(reason, str) else '') or None
+        g.audit_target_id = run_id
+        g.audit_detail = {'reason': reason} if reason else {}
+
+        row = set_maintenance_run_status(run_id, action, reason, caller_display_name())
+        result = row.get('Result')
+        g.audit_detail['result'] = result
+        if result == 'NotFound':
+            return error_response(f"Maintenance run {run_id} was not found.", 404)
+        if result == 'InvalidState':
+            return error_response(f"Maintenance run {run_id} is {str(row.get('Status') or 'ended').lower()}, so it cannot be {verb}.", 409)
+
+        text = message.format(run=run_id) if result == 'Updated' else f"Maintenance run {run_id} is already {verb}."
+        return jsonify({'Run': maintenance_run_item(row), 'Result': result, 'message': text}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while changing maintenance run %s.", run_id)
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to change maintenance run %s.", run_id)
+        return error_response("Unable to change the maintenance run.", 500)
+
+
+@app.route('/api/maintenance/runs/<int:run_id>/pause', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('maintenance.pause', target_type='maintenance', target_param='run_id')
+def pause_maintenance_run(run_id):
+    return change_maintenance_run(run_id, 'pause')
+
+
+@app.route('/api/maintenance/runs/<int:run_id>/resume', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('maintenance.resume', target_type='maintenance', target_param='run_id')
+def resume_maintenance_run(run_id):
+    return change_maintenance_run(run_id, 'resume')
+
+
+@app.route('/api/maintenance/runs/<int:run_id>/cancel', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('maintenance.cancel', target_type='maintenance', target_param='run_id')
+def cancel_maintenance_run(run_id):
+    return change_maintenance_run(run_id, 'cancel')
+
+
+@app.route('/api/maintenance/advance', methods=['POST'])
+@token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
+@audited('maintenance.advance', target_type='maintenance')
+def advance_maintenance():
+    """Advance the active maintenance run, within a deadline. The scheduled task calls it every minute."""
+    try:
+        summary = advance_maintenance_run(time.monotonic() + MAINTENANCE_ADVANCE_DEADLINE_SECONDS)
+        g.audit_target_id = summary.get('RunID')
+        g.audit_detail = {'result': summary.get('Result'), 'actions': len(summary.get('Actions') or [])}
+        return jsonify(serialize_for_json(summary)), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while advancing maintenance.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to advance maintenance.")
+        return error_response("Unable to advance maintenance.", 500)
+
+# ===============================
 # Audit APIs
 
 
@@ -3960,10 +6877,45 @@ def get_audit_log():
         return error_response("Unable to retrieve the audit log.", 500)
 
 
+def purge_checkout_events(deadline):
+    """Remove checkout and host-start events older than CHECKOUT_EVENT_RETENTION_DAYS.
+
+    Runs after the audit purge, inside the same time budget, but always gets one batch so a
+    long audit backlog cannot starve it. Never raises: the dashboard's history must not fail
+    the audit purge. Returns what it removed, or None when the database has no events yet.
+    """
+    result = {'CheckoutEventsDeleted': 0, 'HostStartEventsDeleted': 0, 'MoreRemaining': True}
+    batches = 0
+    try:
+        with db_connection() as conn:
+            while result['MoreRemaining'] and batches < AUDIT_PURGE_MAX_BATCHES and (batches == 0 or time.monotonic() < deadline):
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute(
+                        "EXEC PurgeCheckoutEvents @RetentionDays = %s, @BatchSize = %s",
+                        (CHECKOUT_EVENT_RETENTION_DAYS, AUDIT_PURGE_BATCH_SIZE)
+                    )
+                    row = cursor.fetchone() or {}
+                conn.commit()
+
+                result['CheckoutEventsDeleted'] += int(row.get('CheckoutEventsDeleted') or 0)
+                result['HostStartEventsDeleted'] += int(row.get('HostStartEventsDeleted') or 0)
+                result['MoreRemaining'] = bool(row.get('MoreRemaining'))
+                batches += 1
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            logger.warning("PurgeCheckoutEvents is not deployed yet; there are no checkout events to purge.")
+            return None
+        logger.warning("Could not purge checkout events.", exc_info=True)
+        result['Failed'] = True
+    return result
+
+
 @app.route('/api/audit/purge', methods=['POST'])
 @token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
 def purge_audit_log():
-    """Remove audit entries older than AUDIT_RETENTION_DAYS. The scheduled task runs it daily.
+    """Remove audit entries older than AUDIT_RETENTION_DAYS, then checkout and host-start
+    events older than CHECKOUT_EVENT_RETENTION_DAYS. The scheduled task runs it daily, so an
+    older task build purges the events too.
 
     Not decorated with @audited: the purge is recorded below with what it removed, whoever
     called it.
@@ -4000,17 +6952,31 @@ def purge_audit_log():
                 })
             raise
 
-        audit('audit.purge', 'audit', None, AUDIT_SUCCESS, {
+        events = purge_checkout_events(deadline)
+        detail = {
             'deleted': deleted,
             'retentionDays': AUDIT_RETENTION_DAYS,
             'moreRemaining': more_remaining,
-        })
+        }
+        if events is not None:
+            detail.update({
+                'checkoutEventsDeleted': events['CheckoutEventsDeleted'],
+                'hostStartEventsDeleted': events['HostStartEventsDeleted'],
+                'eventRetentionDays': CHECKOUT_EVENT_RETENTION_DAYS,
+                'eventsMoreRemaining': events['MoreRemaining'],
+            })
+            if events.get('Failed'):
+                detail['eventsFailed'] = True
+        audit('audit.purge', 'audit', None, AUDIT_SUCCESS, detail)
 
-        return jsonify({
+        body = {
             'Deleted': deleted,
             'RetentionDays': AUDIT_RETENTION_DAYS,
             'MoreRemaining': more_remaining,
-        }), 200
+        }
+        if events is not None:
+            body['CheckoutEvents'] = dict(events, RetentionDays=CHECKOUT_EVENT_RETENTION_DAYS)
+        return jsonify(body), 200
 
     except DatabaseUnavailable as e:
         logger.error("Database connection failed while purging the audit log.")

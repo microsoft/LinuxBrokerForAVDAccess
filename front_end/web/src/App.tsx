@@ -14,6 +14,7 @@ import { Profile } from './pages/Profile';
 import { SignIn } from './pages/SignIn';
 import { AddVm } from './pages/vm/AddVm';
 import { CheckoutVm } from './pages/vm/CheckoutVm';
+import { ImportHosts } from './pages/vm/ImportHosts';
 import { FleetHealth } from './pages/vm/FleetHealth';
 import { UpdateVmAttributes } from './pages/vm/UpdateVmAttributes';
 import { VmDetails } from './pages/vm/VmDetails';
@@ -24,9 +25,16 @@ import { CreateRule } from './pages/scaling/CreateRule';
 import { RuleDetails } from './pages/scaling/RuleDetails';
 import { RuleHistory } from './pages/scaling/RuleHistory';
 import { RuleList } from './pages/scaling/RuleList';
+import { ScalingPolicy } from './pages/scaling/ScalingPolicy';
+import { ScheduleForm } from './pages/scaling/ScheduleForm';
 import { UpdateRule } from './pages/scaling/UpdateRule';
 import { HostSettingsPage } from './pages/settings/HostSettings';
 import { AuditLog } from './pages/audit/AuditLog';
+import { SessionList } from './pages/sessions/SessionList';
+import { UserDetails } from './pages/sessions/UserDetails';
+import { MaintenanceRunDetails } from './pages/maintenance/MaintenanceRunDetails';
+import { MaintenanceRuns } from './pages/maintenance/MaintenanceRuns';
+import { NewMaintenanceRun } from './pages/maintenance/NewMaintenanceRun';
 
 /**
  * Routes deliberately mirror the URLs the Jinja portal served, so existing
@@ -69,11 +77,18 @@ function AuthenticatedRoutes() {
       <Route path="/vms" element={<VmList />} />
       <Route path="/vms/add" element={<RequireAdmin><AddVm /></RequireAdmin>} />
       <Route path="/vms/checkout" element={<RequireAdmin><CheckoutVm /></RequireAdmin>} />
+      <Route path="/vms/import" element={<RequireAdmin><ImportHosts /></RequireAdmin>} />
       <Route path="/vms/history" element={<VmHistory />} />
       <Route path="/vms/health" element={<FleetHealth />} />
+      <Route path="/vms/maintenance" element={<MaintenanceRuns />} />
+      <Route path="/vms/maintenance/new" element={<RequireAdmin><NewMaintenanceRun /></RequireAdmin>} />
+      <Route path="/vms/maintenance/:runid" element={<MaintenanceRunDetails />} />
       <Route path="/vms/:vmid" element={<VmDetails />} />
       <Route path="/vms/:vmid/update" element={<RequireAdmin><UpdateVmAttributes /></RequireAdmin>} />
 
+      <Route path="/scaling" element={<ScalingPolicy />} />
+      <Route path="/scaling/schedules/new" element={<RequireAdmin><ScheduleForm /></RequireAdmin>} />
+      <Route path="/scaling/schedules/:scheduleid" element={<RequireAdmin><ScheduleForm /></RequireAdmin>} />
       <Route path="/scaling/rules" element={<RuleList />} />
       <Route path="/scaling/rules/create" element={<RequireAdmin><CreateRule /></RequireAdmin>} />
       <Route path="/scaling/rules/history" element={<RuleHistory />} />
@@ -82,6 +97,9 @@ function AuthenticatedRoutes() {
       <Route path="/scaling/log" element={<ActivityLog />} />
 
       <Route path="/settings/hosts" element={<HostSettingsPage />} />
+
+      <Route path="/sessions" element={<SessionList />} />
+      <Route path="/users/:username" element={<UserDetails />} />
 
       <Route path="/audit" element={<AuditLog />} />
 

@@ -433,6 +433,14 @@
   .lb-table tbody tr:last-child td {
     border-bottom: 0;
   }
+
+  /* Compact rows, chosen in Profile and set as data-density on <html>, fit more hosts on
+     a screen without shrinking the text. */
+  [data-density='compact'] .lb-table th,
+  [data-density='compact'] .lb-table td {
+    padding-top: 0.3rem;
+    padding-bottom: 0.3rem;
+  }
 }
 
 /* -------------------------------------------------- accessibility fallbacks */

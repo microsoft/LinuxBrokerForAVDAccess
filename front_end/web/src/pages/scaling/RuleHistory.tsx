@@ -2,6 +2,7 @@ import { HistoryView } from '../../components/data/HistoryView';
 import type { Column } from '../../components/data/DataTable';
 import { ButtonLink } from '../../components/ui/Button';
 import { PageHeader } from '../../components/ui/Feedback';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useRuleHistory } from '../../hooks/useBroker';
 import { useHistoryQuery } from '../../hooks/useHistoryQuery';
 import { errorMessage } from '../../lib/api';
@@ -84,7 +85,7 @@ export function RuleHistory() {
       sort: 'date',
       value: (row) => row.SysStartTime,
       className: MONO,
-      render: (row) => valueOrDash(row.SysStartTime),
+      render: (row) => <RelativeTime value={row.SysStartTime} showAbsolute />,
     },
     {
       key: 'to',
@@ -92,7 +93,7 @@ export function RuleHistory() {
       sort: 'date',
       value: (row) => row.SysEndTime,
       className: MONO,
-      render: (row) => valueOrDash(row.SysEndTime),
+      render: (row) => <RelativeTime value={row.SysEndTime} showAbsolute />,
     },
   ];
 
@@ -103,8 +104,8 @@ export function RuleHistory() {
         subtitle="Point-in-time record of every scaling rule change."
         icon="clock"
         actions={
-          <ButtonLink to="/scaling/rules" size="sm" icon="chevron-left">
-            Back to rules
+          <ButtonLink to="/scaling" size="sm" icon="chevron-left">
+            Back to the policy
           </ButtonLink>
         }
       />

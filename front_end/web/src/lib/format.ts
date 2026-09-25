@@ -13,23 +13,6 @@ export function isBlank(value: unknown): boolean {
   return value === null || value === undefined || String(value).trim() === '';
 }
 
-/*
- * Broker timestamps arrive as 'YYYY-MM-DD HH:MM:SS' in the database's own time
- * zone, with no offset. They are shown as sent rather than parsed into a Date,
- * because guessing a zone would silently shift every timestamp in the portal.
- */
-export function formatTimestamp(value: string | null | undefined): string {
-  return valueOrDash(value);
-}
-
-/** Sort key for a timestamp cell. Unparseable values sort last. */
-export function timestampSortValue(value: string | null | undefined): number {
-  if (isBlank(value)) {
-    return Number.NEGATIVE_INFINITY;
-  }
-  const parsed = Date.parse(String(value).replace(' ', 'T'));
-  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
-}
 
 export function formatNumber(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
@@ -111,4 +94,28 @@ export function formatMegabytes(value: number | null | undefined): string {
     return DASH;
   }
   return value >= 1024 ? `${(value / 1024).toFixed(1)} GB` : `${value} MB`;
+}
+
+/** A length of time, such as how long a session has been idle: "45 s", "12 min", "2 h 5 min". */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
+    return DASH;
+  }
+  const total = Math.max(0, Math.round(seconds));
+  if (total < 60) {
+    return `${total} s`;
+  }
+  const minutes = Math.round(total / 60);
+  if (minutes < 60) {
+    return `${minutes} min`;
+  }
+  if (minutes < 24 * 60) {
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return rest ? `${hours} h ${rest} min` : `${hours} h`;
+  }
+  const hours = Math.round(minutes / 60);
+  const days = Math.floor(hours / 24);
+  const rest = hours % 24;
+  return rest ? `${days} d ${rest} h` : `${days} d`;
 }

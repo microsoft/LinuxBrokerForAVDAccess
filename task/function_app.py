@@ -8,7 +8,7 @@ import requests
 import azure.functions as func
 from azure.identity import ManagedIdentityCredential
 
-# version  - 0.13
+# version  - 0.14
 
 app = func.FunctionApp()
 
@@ -19,6 +19,8 @@ credential = ManagedIdentityCredential()
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 LONG_REQUEST_TIMEOUT_SECONDS = 120
+# The API gives one maintenance advance at most 100 seconds.
+MAINTENANCE_REQUEST_TIMEOUT_SECONDS = 110
 DEFAULT_PROBE_CONCURRENCY = 16
 DEFAULT_PROBE_TIMEOUT_SECONDS = 3.0
 DEFAULT_PROBE_PORTS = (22,)
@@ -414,7 +416,60 @@ def PurgeAuditLog(mytimer: func.TimerRequest) -> None:
         logging.error(f"Error executing the audit log purge: {str(e)}")
 
 
+# ===============================
+# Maintenance Tasks
+# ===============================
+
+
+@app.function_name(name="AdvanceMaintenance")
+@app.timer_trigger(schedule="30 * * * * *", arg_name="mytimer", run_on_startup=False)
+def AdvanceMaintenance(mytimer: func.TimerRequest) -> None:
+    """Move the active rolling maintenance run on, every minute at :30, clear of the release sweep.
+
+    Each call admits hosts and takes every host in progress one step further. An API older than
+    maintenance answers 404, which is expected during an upgrade, so the task carries on.
+    """
+    if mytimer.past_due:
+        logging.info("The maintenance timer is past due.")
+
+    try:
+        if not API_BASE_URL:
+            logging.error("API_URL not set in environment variables.")
+            return
+
+        headers = get_headers()
+        if headers is None:
+            return
+
+        response = requests.post(
+            api_url("maintenance/advance"),
+            headers=headers,
+            timeout=MAINTENANCE_REQUEST_TIMEOUT_SECONDS,
+        )
+
+        if response.status_code == 200:
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            body = body if isinstance(body, dict) else {}
+            if body.get("Result") == "Advanced":
+                logging.info(
+                    f"Maintenance run {body.get('RunID')} advanced ({body.get('Status')}): "
+                    f"{len(body.get('Actions') or [])} action(s)."
+                )
+        elif response.status_code == 404:
+            logging.warning("The broker API does not support rolling maintenance yet; nothing to advance.")
+        else:
+            logging.error(
+                f"Failed to advance maintenance. Status code: {response.status_code}. Response: {response.text}"
+            )
+    except Exception as e:
+        logging.error(f"Error advancing maintenance: {str(e)}")
+
+
 trigger_return_released_vms = ReturnReleasedVMs
 test_vm_connectivity = TestVMConnectivity
 time_triggered_scaling = ScalingVMs
 purge_audit_log = PurgeAuditLog
+advance_maintenance = AdvanceMaintenance

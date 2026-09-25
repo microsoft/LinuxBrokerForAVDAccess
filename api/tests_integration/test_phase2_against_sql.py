@@ -147,17 +147,14 @@ def test_the_sweep_completes_drains_on_any_path(client, db, remote):
     assert audit_actions(db) == [("vm.drain_completed", "lnxhost-01")]
 
 
-def test_a_heartbeat_reaches_fleet_health(client, db):
+def test_a_heartbeat_reaches_fleet_health(app_module, client, db):
     db.add_vm("lnxhost-01")
     db.add_vm("lnxhost-02", power="Off", network="Unreachable")
     settings_version = db.one("SELECT SettingsVersion FROM dbo.LinuxHostSettings")["SettingsVersion"]
 
     heartbeat = {
-        "agentVersion": "1.0.0",
-        "scriptVersions": {name: "1.0.0" for name in (
-            "release-session.sh", "logind-session-watcher.sh", "xrdp-who-xorg.sh",
-            "create-user.sh", "manage-lease.sh", "apply-host-settings.sh",
-        )},
+        "agentVersion": app_module.HOST_AGENT_VERSION,
+        "scriptVersions": {name: app_module.HOST_AGENT_VERSION for name in app_module.HEARTBEAT_SCRIPTS},
         "settingsVersion": settings_version,
         "os": {"id": "rhel", "version": "9.4", "name": "Red Hat Enterprise Linux 9.4"},
         "desktop": "gnome",

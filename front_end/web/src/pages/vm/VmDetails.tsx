@@ -1,11 +1,13 @@
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { Breadcrumbs, DetailList } from '../../components/layout/Breadcrumbs';
 import { HostAgentCard } from '../../components/hosts/HostAgentCard';
+import { LifecycleExplainer } from '../../components/hosts/LifecycleExplainer';
 import { Badge, NetworkBadge, PowerBadge, VmStatusBadge } from '../../components/ui/Badge';
 import { Button, ButtonLink } from '../../components/ui/Button';
 import { ErrorPanel, LoadingPanel, Notice, PageHeader } from '../../components/ui/Feedback';
 import { GlassCard } from '../../components/ui/GlassCard';
+import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useToast } from '../../components/ui/Toast';
 import { useConfirm } from '../../hooks/useConfirm';
 import { useHostActions } from '../../hooks/useHostActions';
@@ -60,7 +62,7 @@ export function VmDetails() {
 
   return (
     <>
-      <Breadcrumbs items={[{ label: 'Virtual machines', to: '/vms' }, { label: vm.Hostname }]} />
+      <Breadcrumbs items={[{ label: 'Hosts', to: '/vms' }, { label: vm.Hostname }]} />
 
       <PageHeader
         title={vm.Hostname}
@@ -103,15 +105,24 @@ export function VmDetails() {
                 label: 'IP address',
                 value: <span className="font-mono">{valueOrDash(vm.IPAddress)}</span>,
               },
-              { label: 'Assigned to', value: valueOrDash(vm.Username) },
+              {
+                label: 'Assigned to',
+                value: vm.Username ? (
+                  <Link to={`/users/${encodeURIComponent(vm.Username)}`} className="no-underline hover:underline">
+                    {vm.Username}
+                  </Link>
+                ) : (
+                  valueOrDash(vm.Username)
+                ),
+              },
               { label: 'AVD host', value: valueOrDash(vm.AvdHost) },
-              { label: 'Released', value: valueOrDash(vm.ReleasedDate) },
-              ...(vm.DrainRequested ? [{ label: 'Drain requested', value: valueOrDash(vm.DrainRequestedDate) }] : []),
+              { label: 'Released', value: <RelativeTime value={vm.ReleasedDate} /> },
+              ...(vm.DrainRequested ? [{ label: 'Drain requested', value: <RelativeTime value={vm.DrainRequestedDate} /> }] : []),
               { label: 'Cleanup user', value: valueOrDash(vm.CleanupUsername) },
-              { label: 'Last power change', value: valueOrDash(vm.PowerStateChangedDate) },
+              { label: 'Last power change', value: <RelativeTime value={vm.PowerStateChangedDate} /> },
               {
                 label: 'Last updated',
-                value: <span className="font-mono">{valueOrDash(vm.LastUpdateDate)}</span>,
+                value: <RelativeTime value={vm.LastUpdateDate} />,
               },
               { label: 'Description', value: valueOrDash(vm.Description) },
             ]}
@@ -272,6 +283,8 @@ export function VmDetails() {
       <div className="mt-4">
         <HostAgentCard hostname={vm.Hostname} />
       </div>
+
+      <LifecycleExplainer className="mt-4" />
 
       {dialog}
       {hostActions.dialog}
