@@ -11,7 +11,9 @@
 # `start` detaches the package upgrade, through systemd-run or else setsid, so the broker's
 # SSH call returns at once, and `status` reports how it is going. A start that carries the
 # token of the run already recorded only reports it, so the broker can safely repeat a start
-# whose answer it never received. The broker restarts the host itself once the run succeeds.
+# whose answer it never received. The broker restarts the host itself once the run succeeds,
+# so a run only succeeds when the kernel the host boots next has a usable initramfs; when /boot
+# is too small for another kernel, the run keeps two kernels rather than the default three.
 #
 # The package manager is dnf on RHEL 8 and 9, yum on RHEL 7 and apt on Ubuntu. Output goes to
 # /var/log/linuxbroker-patch.log; the state of the last run is kept under
@@ -226,6 +228,115 @@ trim_log() {
     fi
 }
 
+boot_free_mb() {
+    df -Pm /boot 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+
+# What a kernel takes in /boot, judged by the running one: its image, its initramfs and any
+# kdump initramfs, rounded up to whole megabytes.
+kernel_footprint_mb() {
+    local running
+    local file
+    local bytes=0
+
+    running=$(uname -r)
+    for file in "/boot/vmlinuz-$running" "/boot/initramfs-$running.img" "/boot/initramfs-${running}kdump.img"; do
+        if [ -f "$file" ]; then
+            bytes=$((bytes + $(stat -c %s "$file" 2>/dev/null || echo 0)))
+        fi
+    done
+    echo $(((bytes + 1048575) / 1048576))
+}
+
+# dnf and yum keep three kernels by default, but the /boot of an Azure RHEL image holds two
+# at most: each initramfs is about 256 MB. When the next kernel would not fit, the run keeps
+# two, so the oldest kernel (never the running one) is removed in the same transaction,
+# before the new initramfs is written.
+kernel_limit_option() {
+    local free
+    local needed
+
+    free=$(boot_free_mb)
+    needed=$(($(kernel_footprint_mb) + 50))
+    if [ -n "$free" ] && [ "$free" -lt "$needed" ]; then
+        log "/boot has $free MB free and a kernel needs about $needed MB, so this run keeps two kernels: the running one and the newest."
+        echo "--setopt=installonly_limit=2"
+    fi
+}
+
+# The kernel the host boots next: the default on RHEL, the newest on Ubuntu.
+next_boot_kernel() {
+    local path
+
+    if command -v grubby >/dev/null 2>&1; then
+        path=$(grubby --default-kernel 2>/dev/null)
+        if [ -n "$path" ]; then
+            basename "$path" | sed 's/^vmlinuz-//'
+            return 0
+        fi
+    fi
+    find /boot -maxdepth 1 -name 'vmlinuz-*' ! -name '*rescue*' -printf '%f\n' 2>/dev/null \
+        | sed 's/^vmlinuz-//' | sort -V | tail -n 1
+}
+
+initramfs_path() {
+    if [ "$1" = "apt" ]; then
+        echo "/boot/initrd.img-$2"
+    else
+        echo "/boot/initramfs-$2.img"
+    fi
+}
+
+initramfs_is_valid() {
+    [ -s "$1" ] || return 1
+    if command -v lsinitrd >/dev/null 2>&1; then
+        lsinitrd "$1" >/dev/null 2>&1
+    elif command -v lsinitramfs >/dev/null 2>&1; then
+        lsinitramfs "$1" >/dev/null 2>&1
+    fi
+}
+
+# rpm does not fail a transaction when a scriptlet fails, so a full /boot can leave the new
+# default kernel without an initramfs while dnf reports success, and the next boot then stops
+# in GRUB. The broker restarts a host only after a successful run, so a run succeeds only when
+# the kernel the host boots next can start. Otherwise the running kernel stays the default.
+verify_next_boot() {
+    local manager="$1"
+    local version
+    local image
+    local running
+
+    version=$(next_boot_kernel)
+    [ -n "$version" ] || return 0
+    image=$(initramfs_path "$manager" "$version")
+    initramfs_is_valid "$image" && return 0
+
+    log "The kernel the host boots next, $version, has no usable initramfs at $image. Building it."
+    if [ "$manager" = "apt" ]; then
+        if [ -e "$image" ]; then
+            update-initramfs -u -k "$version" >> "$LOG_FILE" 2>&1
+        else
+            update-initramfs -c -k "$version" >> "$LOG_FILE" 2>&1
+        fi
+    else
+        dracut -f "$image" "$version" >> "$LOG_FILE" 2>&1
+    fi
+    if initramfs_is_valid "$image"; then
+        log "Built $image."
+        return 0
+    fi
+    rm -f "$image"
+
+    running=$(uname -r)
+    if [ "$version" != "$running" ] && command -v grubby >/dev/null 2>&1 && [ -s "/boot/vmlinuz-$running" ]; then
+        if grubby --set-default "/boot/vmlinuz-$running" >> "$LOG_FILE" 2>&1; then
+            log "Made the running kernel, $running, the default again, so the host still boots."
+        fi
+    fi
+    log "Could not build the initramfs for $version; /boot has $(boot_free_mb) MB free. Free space in /boot, for example by removing an old kernel, then patch again."
+    return 1
+}
+
 start() {
     local mode="$1"
     local token="$2"
@@ -301,6 +412,7 @@ run() {
     local mode="$1"
     local token="$2"
     local manager
+    local keep=""
     local code=0
 
     mkdir -p "$STATE_DIRECTORY"
@@ -327,17 +439,19 @@ run() {
     log "Patch run started: mode=$mode manager=${manager:-none}."
     case "$manager" in
         dnf)
+            keep=$(kernel_limit_option)
             if [ "$mode" = "security" ]; then
-                dnf -y upgrade --security --refresh >> "$LOG_FILE" 2>&1 || code=$?
+                dnf -y upgrade --security --refresh ${keep:+"$keep"} >> "$LOG_FILE" 2>&1 || code=$?
             else
-                dnf -y upgrade --refresh >> "$LOG_FILE" 2>&1 || code=$?
+                dnf -y upgrade --refresh ${keep:+"$keep"} >> "$LOG_FILE" 2>&1 || code=$?
             fi
             ;;
         yum)
+            keep=$(kernel_limit_option)
             if [ "$mode" = "security" ]; then
-                yum -y update --security >> "$LOG_FILE" 2>&1 || code=$?
+                yum -y update --security ${keep:+"$keep"} >> "$LOG_FILE" 2>&1 || code=$?
             else
-                yum -y update >> "$LOG_FILE" 2>&1 || code=$?
+                yum -y update ${keep:+"$keep"} >> "$LOG_FILE" 2>&1 || code=$?
             fi
             ;;
         apt)
@@ -362,6 +476,11 @@ run() {
             code=4
             ;;
     esac
+
+    # Checked whatever the upgrade returned: a failed one can leave a broken default too.
+    if [ -n "$manager" ] && ! verify_next_boot "$manager"; then
+        [ "$code" -eq 0 ] && code=5
+    fi
 
     with_lock
     load_state

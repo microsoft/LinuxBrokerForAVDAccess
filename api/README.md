@@ -171,7 +171,7 @@ A maintenance run patches or restarts hosts a batch at a time while users keep w
 
 1. **Pending**, until admitted. Admission holds the scaling application lock and takes a ready host only while more than the minimum are ready (the run's override, or the phase's `MinVMs`). When a ready host waits for a spare, scaling keeps one more host on, never past `MaxVMs`.
 2. **Draining**, waiting for the user to leave. With a sign-out deadline, the user is warned first and signed out at the deadline; without one the run waits.
-3. **Starting**, if it was powered off, then **Patching** with the allowlisted `patch-host.sh` over SSH (`Security`, `All`, or none for `RebootOnly`), within `MAINTENANCE_PATCH_TIMEOUT_MINUTES`.
+3. **Starting**, if it was powered off, then **Patching** with the allowlisted `patch-host.sh` over SSH (`Security`, `All`, or none for `RebootOnly`), within `MAINTENANCE_PATCH_TIMEOUT_MINUTES`. A patch only succeeds when the kernel the host boots next has its initramfs, so the restart never lands in GRUB; when `/boot` is too small for another kernel the run keeps two.
 4. **Restarting** through Azure, then **Verifying**: reachable, a heartbeat whose boot time is after the restart, and xrdp active.
 5. **Succeeded**, and put back the way it was found: in service, or still drained or in maintenance if it was, and stopped again if it was off.
 
