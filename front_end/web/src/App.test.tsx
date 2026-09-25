@@ -233,6 +233,55 @@ function utilizationFixture(hours: 24 | 168) {
   };
 }
 
+function maintenanceRun(overrides: Record<string, unknown> = {}) {
+  return {
+    RunID: 7, Name: 'October patching', Status: 'Active', EndStatus: null, PatchMode: 'Security', BatchSize: 1,
+    MinReadyOverride: null, SignOutDeadlineMinutes: 60, WarningMinutes: 15, WarningMessage: null, IncludePoweredOff: false,
+    MaxFailures: 1, CanaryCount: 0, CanaryReached: false, SurgeRequested: true,
+    WaitReason: 'Waiting for a spare ready host: taking linux-host-03 now would leave fewer than 2 ready. Scaling is keeping one more host on.',
+    StatusReason: null, CreatedBy: 'op@contoso.com', UpdatedBy: null, CreatedAtUtc: '2026-09-24T22:00:00.000Z',
+    UpdatedAtUtc: null, EndedAtUtc: null, LastTickAtUtc: '2026-09-24T22:10:00.000Z', LastTickAgeSeconds: 40,
+    Counts: { Total: 3, Pending: 1, InProgress: 1, Succeeded: 1, Failed: 0, Skipped: 0, Cancelled: 0 },
+    MinReadyInForce: 2, PhaseMinVMs: 2, ReadyNow: 2,
+    ...overrides,
+  };
+}
+
+function maintenanceHost(overrides: Record<string, unknown>) {
+  return {
+    RunHostID: 1, VMID: 1, Hostname: 'linux-host-01', Position: 1, State: 'Pending', Attempts: 0, Detail: null,
+    RebootRequired: null, AdmittedAtUtc: null, WarningSentAtUtc: null, SignOutRequestedAtUtc: null, PatchStartedAtUtc: null,
+    PatchFinishedAtUtc: null, RestartRequestedAtUtc: null, VerifiedAtUtc: null, CompletedAtUtc: null, StepAgeSeconds: null,
+    PowerState: 'On', NetworkStatus: 'Reachable', VmStatus: 'Maintenance', Username: null, AgentVersion: '1.1.0',
+    HeartbeatAgeSeconds: 20, WasDrained: false, WasMaintenance: false, WasPoweredOff: false, Registered: true,
+    DrainRequested: false, XrdpActive: true, AgentCanPatch: true,
+    ...overrides,
+  };
+}
+
+const MAINTENANCE_DETAILS = {
+  Run: maintenanceRun(),
+  Hosts: [
+    maintenanceHost({ State: 'Succeeded', Detail: 'Patched and restarted.', CompletedAtUtc: '2026-09-24T22:08:00.000Z' }),
+    maintenanceHost({ RunHostID: 2, VMID: 2, Hostname: 'linux-host-02', Position: 2, State: 'Draining', VmStatus: 'CheckedOut',
+                      Detail: 'Waiting for alice to sign out.', Username: 'alice', StepAgeSeconds: 300 }),
+    maintenanceHost({ RunHostID: 3, VMID: 3, Hostname: 'linux-host-03', Position: 3, State: 'Pending', VmStatus: 'Available',
+                      AgentVersion: '1.0.0', AgentCanPatch: false }),
+  ],
+};
+
+function maintenancePage(active: ReturnType<typeof maintenanceRun> | null = maintenanceRun()) {
+  return {
+    Available: true,
+    Active: active,
+    Runs: [
+      ...(active ? [active] : []),
+      maintenanceRun({ RunID: 6, Name: null, Status: 'Completed', EndStatus: 'Completed', SurgeRequested: false, WaitReason: null,
+                       EndedAtUtc: '2026-09-20T23:00:00.000Z', Counts: { Total: 4, Pending: 0, InProgress: 0, Succeeded: 4, Failed: 0, Skipped: 0, Cancelled: 0 } }),
+    ],
+  };
+}
+
 const NO_TRENDS = { Available: false, Hours: 24 };
 const NOTHING_NEEDS_ATTENTION = { Available: true, Items: [], Summary: { Total: 0 }, Incomplete: false };
 const ATTENTION = {
@@ -258,6 +307,7 @@ let session: typeof SESSION = SESSION;
 let dashboard: Omit<typeof DASHBOARD, 'stats'> & { stats: DashboardStats; fleetHealth?: unknown } = DASHBOARD;
 let trends: 'off' | 'on' = 'off';
 let attention: unknown = NOTHING_NEEDS_ATTENTION;
+let maintenance: unknown = maintenancePage();
 const requests: string[] = [];
 
 function stubFetch() {
@@ -272,6 +322,15 @@ function stubFetch() {
       return jsonResponse(trends === 'off' ? NO_TRENDS : utilizationFixture(url.includes('hours=168') ? 168 : 24));
     }
     if (url.startsWith('/api/ui/metrics/attention')) return jsonResponse(attention);
+    if (url === '/api/ui/maintenance/runs' && method === 'POST') {
+      return jsonResponse({ RunID: 8, HostCount: 1, message: 'Maintenance run 8 started for 1 host.' }, 201);
+    }
+    const runAction = /^\/api\/ui\/maintenance\/runs\/(\d+)\/(pause|resume|cancel)$/.exec(url);
+    if (runAction) {
+      return jsonResponse({ Run: maintenanceRun(), Result: 'Updated', message: `Done: ${runAction[2]} run ${runAction[1]}.` });
+    }
+    if (/^\/api\/ui\/maintenance\/runs\/\d+$/.test(url)) return jsonResponse(MAINTENANCE_DETAILS);
+    if (url.startsWith('/api/ui/maintenance/runs')) return jsonResponse(maintenance);
     if (url.startsWith('/api/ui/vms/history')) return jsonResponse(EMPTY_PAGE);
     const action = /^\/api\/ui\/vms\/(\d+)\/(start|stop|restart|drain|undrain)$/.exec(url);
     if (action) return jsonResponse({ VMID: Number(action[1]), Hostname: 'linux-host-02', message: `${action[2]} requested.` });
@@ -340,6 +399,7 @@ beforeEach(() => {
   dashboard = DASHBOARD;
   trends = 'off';
   attention = NOTHING_NEEDS_ATTENTION;
+  maintenance = maintenancePage();
   userDetails = freshUserDetails();
   scalingPolicy = SCALING_POLICY;
   requests.length = 0;
@@ -679,6 +739,105 @@ describe('App', () => {
 
     expect(await screen.findByText('75% of the hosts that can take a user are in use')).toBeInTheDocument();
     expect(screen.getByText('3 of 4 in use')).toBeInTheDocument();
+  });
+
+  it('shows the active maintenance run and pauses it', async () => {
+    renderApp('/vms/maintenance');
+
+    const [activeLink] = await screen.findAllByRole('link', { name: 'October patching (run 7)' });
+    expect(activeLink).toHaveAttribute('href', '/vms/maintenance/7');
+    expect(screen.getByText(/taking linux-host-03 now would leave fewer than 2 ready/)).toBeInTheDocument();
+    expect(screen.getByText(/hosts ready for users now; the run keeps at/)).toHaveTextContent(
+      '2 hosts ready for users now; the run keeps at least 2 (the scaling minimum). Last advanced just now.',
+    );
+    expect(screen.getByRole('link', { name: 'Maintenance run 6' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'New run' })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    await waitFor(() => expect(requests).toContain('/api/ui/maintenance/runs/7/pause'));
+    expect(await screen.findByText('Done: pause run 7.')).toBeInTheDocument();
+  });
+
+  it('cancels a maintenance run only after confirming', async () => {
+    renderApp('/vms/maintenance');
+    await userEvent.click(await screen.findByRole('button', { name: 'Cancel run' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Cancel October patching (run 7)?' });
+    expect(requests).not.toContain('/api/ui/maintenance/runs/7/cancel');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel the run' }));
+    await waitFor(() => expect(requests).toContain('/api/ui/maintenance/runs/7/cancel'));
+  });
+
+  it('warns when a run is not being advanced', async () => {
+    maintenance = maintenancePage(maintenanceRun({ LastTickAgeSeconds: 900 }));
+    renderApp('/vms/maintenance');
+    expect(await screen.findByText(/has not been advanced for 15 min/)).toBeInTheDocument();
+  });
+
+  it('shows each host of a maintenance run and what it is waiting for', async () => {
+    renderApp('/vms/maintenance/7');
+
+    const table = await screen.findByRole('table', { name: /Each host in October patching/ });
+    const rows = within(table).getAllByRole('row');
+    expect(rows[1]).toHaveTextContent('linux-host-01');
+    expect(rows[1]).toHaveTextContent('Done');
+    expect(rows[2]).toHaveTextContent('Waiting for alice to sign out.');
+    expect(within(rows[3]).getByText('Too old to patch')).toBeInTheDocument();
+    expect(screen.getByText(/linux-host-03 run a host agent older than 1.1.0 and will fail/)).toBeInTheDocument();
+    expect(screen.getByText('Warned, then signed out after 60 min')).toBeInTheDocument();
+  });
+
+  it('starts a maintenance run from the hosts chosen', async () => {
+    maintenance = maintenancePage(null);
+    renderApp('/vms/maintenance/new');
+
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Include linux-host-01' }));
+    expect(screen.getByText(/linux-host-01 run a host agent older than 1.1.0 and\s+cannot be patched/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('radio', { name: /Restart only/ }));
+    expect(screen.queryByText(/cannot be patched/)).not.toBeInTheDocument();
+
+    const batch = screen.getByLabelText('Hosts at a time');
+    await userEvent.clear(batch);
+    await userEvent.type(batch, '2');
+    await userEvent.click(screen.getByRole('switch', { name: /Sign users out after a deadline/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Start the run' }));
+
+    await waitFor(() => expect(requests).toContain('/api/ui/maintenance/runs/8'));
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([url, init]) => String(url) === '/api/ui/maintenance/runs' && init?.method === 'POST',
+    );
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      hostnames: ['linux-host-01'], patchMode: 'RebootOnly', batchSize: 2, minReady: null, signOutDeadlineMinutes: 60,
+      warningMinutes: 15, includePoweredOff: false, maxFailures: 1, canaryCount: 0,
+    });
+  });
+
+  it('asks for a host before starting a run', async () => {
+    maintenance = maintenancePage(null);
+    renderApp('/vms/maintenance/new');
+    await userEvent.click(await screen.findByRole('button', { name: 'Start the run' }));
+    expect(screen.getByText('Choose at least one host.')).toBeInTheDocument();
+    expect(requests).not.toContain('/api/ui/maintenance/runs/8');
+  });
+
+  it('allows one maintenance run at a time', async () => {
+    renderApp('/vms/maintenance/new');
+    expect(await screen.findByText('A run is already active')).toBeInTheDocument();
+  });
+
+  it('keeps maintenance read-only for readers', async () => {
+    session = { ...SESSION, roles: ['Reader'], permissions: { read: true, operate: false, admin: false } };
+    renderApp('/vms/maintenance');
+    await screen.findAllByRole('link', { name: 'October patching (run 7)' });
+    expect(screen.queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel run' })).not.toBeInTheDocument();
+  });
+
+  it('says when the broker has no rolling maintenance yet', async () => {
+    maintenance = { Available: false, Runs: [], Active: null };
+    renderApp('/vms/maintenance');
+    expect(await screen.findByText(/Rolling maintenance needs the broker API and database from this release/)).toBeInTheDocument();
   });
 
   it('filters fleet health by flag', async () => {

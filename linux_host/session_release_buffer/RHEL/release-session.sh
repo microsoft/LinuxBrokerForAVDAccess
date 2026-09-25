@@ -709,7 +709,7 @@ check_unmount_user_homes() {
 # reconciliation must never depend on it.
 # ---------------------------------------------------------------------------
 
-HEARTBEAT_SCRIPTS=(release-session.sh logind-session-watcher.sh xrdp-who-xorg.sh create-user.sh manage-lease.sh apply-host-settings.sh session-control.sh)
+HEARTBEAT_SCRIPTS=(release-session.sh logind-session-watcher.sh xrdp-who-xorg.sh create-user.sh manage-lease.sh apply-host-settings.sh session-control.sh patch-host.sh)
 HEARTBEAT_BACKOFF_SECONDS=900
 
 # The version an installed script declares, so a host that was only partly migrated shows up.

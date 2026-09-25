@@ -171,6 +171,7 @@ export function Dashboard() {
               links={[
                 { to: '/vms', label: 'All VMs', primary: true },
                 ...(can.admin ? [{ to: '/vms/add', label: 'Add VM' }] : []),
+                { to: '/vms/maintenance', label: 'Maintenance' },
                 { to: '/vms/history', label: 'History' },
               ]}
             />

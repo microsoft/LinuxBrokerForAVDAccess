@@ -141,6 +141,8 @@ def db(sql):
         "DELETE FROM dbo.HostHeartbeats",
         "DELETE FROM dbo.CheckoutEvents",
         "DELETE FROM dbo.HostStartEvents",
+        "DELETE FROM dbo.MaintenanceRunHosts",
+        "DELETE FROM dbo.MaintenanceRuns",
         "DELETE FROM dbo.VirtualMachines",
         "DELETE FROM dbo.VmScalingActivityLog",
         "DELETE FROM dbo.VmScalingRules",

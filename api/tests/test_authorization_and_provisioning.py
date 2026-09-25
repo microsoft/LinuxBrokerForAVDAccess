@@ -68,6 +68,13 @@ EXPECTED_ROLES = {
     "preview_scaling": READ,
     "get_utilization_metrics": READ,
     "get_attention_items": READ,
+    "get_maintenance_runs": READ,
+    "get_maintenance_run": READ,
+    "create_maintenance_run": ADMIN,
+    "pause_maintenance_run": ADMIN,
+    "resume_maintenance_run": ADMIN,
+    "cancel_maintenance_run": ADMIN,
+    "advance_maintenance": {"ScheduledTask", "FullAccess"},
 }
 
 EXPECTED_GROUPS = {

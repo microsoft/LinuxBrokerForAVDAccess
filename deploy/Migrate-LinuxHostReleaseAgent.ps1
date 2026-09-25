@@ -203,6 +203,7 @@ create_user_script="$output_directory/create-user.sh"
 manage_lease_script="$output_directory/manage-lease.sh"
 apply_settings_script="$output_directory/apply-host-settings.sh"
 session_control_script="$output_directory/session-control.sh"
+patch_host_script="$output_directory/patch-host.sh"
 release_service_name='linuxbroker-release-session.service'
 release_timer_name='linuxbroker-release-session.timer'
 watcher_service_name='linuxbroker-release-session-watcher.service'
@@ -300,6 +301,7 @@ create_user_script_url="$script_source_root/linux_host/create-user.sh"
 manage_lease_script_url="$script_source_root/linux_host/manage-lease.sh"
 apply_settings_script_url="$script_source_root/linux_host/apply-host-settings.sh"
 session_control_script_url="$script_source_root/linux_host/session-control.sh"
+patch_host_script_url="$script_source_root/linux_host/patch-host.sh"
 
 mkdir -p "$output_directory" "$state_directory" "$state_directory/leases"
 
@@ -310,8 +312,9 @@ download_file "$create_user_script_url" "$create_user_script"
 download_file "$manage_lease_script_url" "$manage_lease_script"
 download_file "$apply_settings_script_url" "$apply_settings_script"
 download_file "$session_control_script_url" "$session_control_script"
+download_file "$patch_host_script_url" "$patch_host_script"
 
-chmod +x "$release_script" "$xorg_script" "$watcher_script" "$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script"
+chmod +x "$release_script" "$xorg_script" "$watcher_script" "$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script" "$patch_host_script"
 
 sed -i "s|YOUR_LINUX_BROKER_API_CLIENT_ID|$api_client_id|g" "$release_script"
 sed -i "s|YOUR_LINUX_BROKER_API_BASE_URL|$api_base_url|g" "$release_script"
@@ -334,7 +337,7 @@ for command_name in userdel groupadd usermod chpasswd; do
         sudoers_commands+=("$resolved_command")
     fi
 done
-sudoers_commands+=("$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script")
+sudoers_commands+=("$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script" "$patch_host_script")
 
 sudoers_tmp="${sudoers_path}.tmp"
 (

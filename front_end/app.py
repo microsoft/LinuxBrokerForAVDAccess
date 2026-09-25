@@ -22,6 +22,7 @@ from route_host_settings import register_route_host_settings
 from route_audit import register_route_audit
 from route_sessions import register_route_sessions
 from route_metrics import register_route_metrics
+from route_maintenance import register_route_maintenance
 
 # ===============================
 # Flask App
@@ -311,6 +312,11 @@ register_route_sessions(app)
 # Dashboard metrics
 
 register_route_metrics(app)
+
+# ===============================
+# Rolling maintenance
+
+register_route_maintenance(app)
 
 # ===============================
 # Main

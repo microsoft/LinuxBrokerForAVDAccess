@@ -70,6 +70,7 @@ heartbeat_for_script() {
 
     [ "$LINUXBROKER_AGENT_VERSION" = "1.1.0" ] || fail "$label declares agent version $LINUXBROKER_AGENT_VERSION"
     [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" session-control.sh "* ]] || fail "$label does not report session-control.sh"
+    [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" patch-host.sh "* ]] || fail "$label does not report patch-host.sh"
 
     # One script is current and one predates the version constant.
     printf '#!/bin/bash\nLINUXBROKER_AGENT_VERSION="1.0.0"\n' > "$bin/release-session.sh"

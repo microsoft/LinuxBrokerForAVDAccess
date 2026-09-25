@@ -487,6 +487,7 @@ export type AttentionKind =
   | 'unreachable'
   | 'cleanup-stuck'
   | 'never-connected'
+  | 'maintenance-failed'
   | 'health';
 
 export interface AttentionItem {
@@ -500,6 +501,9 @@ export interface AttentionItem {
   /** For a health item: the flag, and the first hosts that have it. */
   Flag?: HealthFlag;
   Hostnames?: string[];
+  /** For a failed maintenance host: its run and why it failed. */
+  RunID?: number | null;
+  Detail?: string | null;
 }
 
 export interface AttentionItems {
@@ -508,6 +512,128 @@ export interface AttentionItems {
   Summary: { Total: number; Critical?: number; Warning?: number; Info?: number };
   /** True while the database cannot report the broker's own conditions yet. */
   Incomplete: boolean;
+}
+
+export type MaintenanceRunStatus = 'Active' | 'Paused' | 'Stopping' | 'Completed' | 'Cancelled' | 'Failed';
+export type MaintenancePatchMode = 'Security' | 'All' | 'RebootOnly';
+export type MaintenanceHostState =
+  | 'Pending'
+  | 'Draining'
+  | 'Starting'
+  | 'Patching'
+  | 'Restarting'
+  | 'Verifying'
+  | 'Succeeded'
+  | 'Failed'
+  | 'Skipped'
+  | 'Cancelled';
+
+export interface MaintenanceCounts {
+  Total: number;
+  Pending: number;
+  InProgress: number;
+  Succeeded: number;
+  Failed: number;
+  Skipped: number;
+  Cancelled: number;
+}
+
+export interface MaintenanceRun {
+  RunID: number;
+  Name: string | null;
+  Status: MaintenanceRunStatus;
+  EndStatus: MaintenanceRunStatus | null;
+  PatchMode: MaintenancePatchMode;
+  BatchSize: number;
+  MinReadyOverride: number | null;
+  SignOutDeadlineMinutes: number | null;
+  WarningMinutes: number;
+  WarningMessage: string | null;
+  IncludePoweredOff: boolean;
+  MaxFailures: number;
+  CanaryCount: number;
+  CanaryReached: boolean;
+  /** Scaling keeps one more host on while a ready host waits for a spare. */
+  SurgeRequested: boolean;
+  WaitReason: string | null;
+  StatusReason: string | null;
+  CreatedBy: string | null;
+  UpdatedBy: string | null;
+  CreatedAtUtc: string | null;
+  UpdatedAtUtc: string | null;
+  EndedAtUtc: string | null;
+  LastTickAtUtc: string | null;
+  LastTickAgeSeconds: number | null;
+  Counts: MaintenanceCounts;
+  /** Only for a single run: what admission works from now. */
+  MinReadyInForce?: number | null;
+  PhaseMinVMs?: number | null;
+  ReadyNow?: number | null;
+}
+
+export interface MaintenanceRunsPage {
+  /** False while the broker predates rolling maintenance. */
+  Available: boolean;
+  Runs: MaintenanceRun[];
+  Active: MaintenanceRun | null;
+}
+
+export interface MaintenanceHost {
+  RunHostID: number;
+  VMID: number;
+  Hostname: string;
+  Position: number;
+  State: MaintenanceHostState;
+  Attempts: number;
+  Detail: string | null;
+  RebootRequired: 'yes' | 'no' | 'unknown' | null;
+  AdmittedAtUtc: string | null;
+  WarningSentAtUtc: string | null;
+  SignOutRequestedAtUtc: string | null;
+  PatchStartedAtUtc: string | null;
+  PatchFinishedAtUtc: string | null;
+  RestartRequestedAtUtc: string | null;
+  VerifiedAtUtc: string | null;
+  CompletedAtUtc: string | null;
+  StepAgeSeconds: number | null;
+  PowerState: PowerState | null;
+  NetworkStatus: NetworkStatus | null;
+  VmStatus: VmStatus | null;
+  Username: string | null;
+  AgentVersion: string | null;
+  HeartbeatAgeSeconds: number | null;
+  WasDrained: boolean;
+  WasMaintenance: boolean;
+  WasPoweredOff: boolean;
+  Registered: boolean;
+  DrainRequested: boolean;
+  XrdpActive: boolean | null;
+  AgentCanPatch: boolean;
+}
+
+export interface MaintenanceRunDetails {
+  Run: MaintenanceRun;
+  Hosts: MaintenanceHost[];
+}
+
+export interface MaintenanceRunInput {
+  name?: string;
+  hostnames: string[];
+  patchMode: MaintenancePatchMode;
+  batchSize: number;
+  minReady: number | null;
+  signOutDeadlineMinutes: number | null;
+  warningMinutes: number;
+  warningMessage?: string;
+  includePoweredOff: boolean;
+  maxFailures: number;
+  canaryCount: number;
+}
+
+export interface MaintenanceRunChange {
+  Run: MaintenanceRun | null;
+  Result: string;
+  message: string;
 }
 
 export interface Paged<T> {
@@ -609,7 +735,10 @@ export interface ScalingPreview {
   Reason: string | null;
   RequestCount: number | null;
   Candidates: string[];
-  Phase: ScalingPhase;
+  Phase: ScalingPhase & {
+    /** A maintenance run waiting for a spare ready host has raised MinVMs by one. */
+    MaintenanceSurge?: boolean;
+  };
   Counts: { PoweredOn: number; Serviceable: number; InUse: number; Draining: number; Utilization: number | null };
   TimeZone: string | null;
   LocalTime: string | null;

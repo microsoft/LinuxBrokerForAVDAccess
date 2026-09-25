@@ -15,6 +15,10 @@ import type {
   HostSettings,
   HostSettingsPage,
   HostSettingsVersion,
+  MaintenanceRunChange,
+  MaintenanceRunDetails,
+  MaintenanceRunInput,
+  MaintenanceRunsPage,
   MessageResult,
   Paged,
   PowerActionResult,
@@ -356,6 +360,56 @@ export function useBroadcast() {
   return useMutation({
     mutationFn: ({ message, hostnames }: { message: string; hostnames?: string[] }) =>
       apiPost<BroadcastResult>('/sessions/broadcast', hostnames ? { message, hostnames } : { message }),
+  });
+}
+
+/* ------------------------------------------------------------ maintenance */
+
+export function useMaintenanceRuns(refreshMs: number | false = false) {
+  return useQuery({
+    queryKey: queryKeys.maintenance,
+    queryFn: ({ signal }) => apiGet<MaintenanceRunsPage>('/maintenance/runs', signal),
+    refetchInterval: refreshMs,
+  });
+}
+
+/** A run and its hosts, refreshed every ten seconds while the run is live. */
+export function useMaintenanceRun(runId: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.maintenanceRun(runId ?? ''),
+    queryFn: ({ signal }) => apiGet<MaintenanceRunDetails>(`/maintenance/runs/${runId}`, signal),
+    enabled: Boolean(runId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.Run.Status;
+      return status && !['Active', 'Paused', 'Stopping'].includes(status) ? false : 10_000;
+    },
+  });
+}
+
+function useMaintenanceInvalidation() {
+  const queryClient = useQueryClient();
+  const invalidateVms = useVmInvalidation();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.maintenance });
+    invalidateVms();
+  };
+}
+
+export function useCreateMaintenanceRun() {
+  const invalidate = useMaintenanceInvalidation();
+  return useMutation({
+    mutationFn: (input: MaintenanceRunInput) =>
+      apiPost<{ RunID: number; HostCount: number; message: string }>('/maintenance/runs', input),
+    onSuccess: invalidate,
+  });
+}
+
+export function useMaintenanceRunAction() {
+  const invalidate = useMaintenanceInvalidation();
+  return useMutation({
+    mutationFn: ({ runId, action, reason }: { runId: number; action: 'pause' | 'resume' | 'cancel'; reason?: string }) =>
+      apiPost<MaintenanceRunChange>(`/maintenance/runs/${runId}/${action}`, reason ? { reason } : {}),
+    onSuccess: invalidate,
   });
 }
 

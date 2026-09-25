@@ -252,6 +252,9 @@ export function VmList() {
             <ButtonLink to="/vms/health" size="sm" icon="activity">
               Fleet health
             </ButtonLink>
+            <ButtonLink to="/vms/maintenance" size="sm" icon="wrench">
+              Maintenance
+            </ButtonLink>
             <ButtonLink to="/vms/history" size="sm" icon="clock">
               History
             </ButtonLink>

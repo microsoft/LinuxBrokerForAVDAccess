@@ -232,3 +232,26 @@ BROADCAST_CONCURRENCY = env_int('BROADCAST_CONCURRENCY', 10, minimum=1, maximum=
 BROADCAST_HOST_TIMEOUT_SECONDS = env_int('BROADCAST_HOST_TIMEOUT_SECONDS', 20, minimum=5, maximum=60)
 BROADCAST_DEADLINE_SECONDS = env_int('BROADCAST_DEADLINE_SECONDS', 60, minimum=10, maximum=100)
 BROADCAST_MAX_HOSTNAMES = 500
+
+# ===============================
+# Rolling maintenance
+#
+# The scheduled task calls POST /api/maintenance/advance every minute. One advance works for
+# at most MAINTENANCE_ADVANCE_DEADLINE_SECONDS and leaves any host it did not reach for the
+# next; it holds the run for MAINTENANCE_TICK_LEASE_SECONDS so two advances never overlap.
+MAINTENANCE_ADVANCE_DEADLINE_SECONDS = env_int('MAINTENANCE_ADVANCE_DEADLINE_SECONDS', 45, minimum=15, maximum=100)
+MAINTENANCE_TICK_LEASE_SECONDS = 120
+# How long each step may take before its request is repeated, and how many requests a step
+# gets before the host fails. Patch start, patch status and the Azure restart are idempotent.
+MAINTENANCE_START_TIMEOUT_SECONDS = 15 * 60
+MAINTENANCE_PATCH_TIMEOUT_SECONDS = env_int('MAINTENANCE_PATCH_TIMEOUT_MINUTES', 90, minimum=10, maximum=600) * 60
+MAINTENANCE_PATCH_START_GRACE_SECONDS = 3 * 60
+MAINTENANCE_RESTART_GRACE_SECONDS = 2 * 60
+MAINTENANCE_VERIFY_TIMEOUT_SECONDS = 15 * 60
+MAINTENANCE_SIGNOUT_RETRY_SECONDS = 5 * 60
+MAINTENANCE_MAX_ATTEMPTS = 3
+MAINTENANCE_SSH_TIMEOUT_SECONDS = 30
+MAINTENANCE_MAX_HOSTS = 500
+MAINTENANCE_RUN_LIST_LIMIT = 20
+# Patching needs patch-host.sh, which host agent 1.1.0 ships. Restart-only runs work with 1.0.0.
+PATCH_MIN_AGENT_VERSION = '1.1.0'

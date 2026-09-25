@@ -68,6 +68,13 @@ export function ScalingPreviewCard({ preview, title, busy = false, error = null,
               Using <span className="font-medium text-ink">{preview.Phase.Name ?? 'the default rule'}</span>: keep{' '}
               {preview.Phase.MinVMs}–{preview.Phase.MaxVMs} hosts, scale up at {preview.Phase.ScaleUpRatio}% and down at{' '}
               {preview.Phase.ScaleDownRatio}%.
+              {preview.Phase.MaintenanceSurge ? (
+                <>
+                  {' '}
+                  The minimum includes one extra host while a{' '}
+                  <Link to="/vms/maintenance">maintenance run</Link> waits for a spare ready host.
+                </>
+              ) : null}
             </p>
           ) : (
             <p className="mt-4 mb-0 text-xs text-muted">

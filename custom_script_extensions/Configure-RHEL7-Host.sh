@@ -42,6 +42,8 @@ apply_settings_script_url="$script_source_root/linux_host/apply-host-settings.sh
 apply_settings_script="/usr/local/bin/apply-host-settings.sh"
 session_control_script_url="$script_source_root/linux_host/session-control.sh"
 session_control_script="/usr/local/bin/session-control.sh"
+patch_host_script_url="$script_source_root/linux_host/patch-host.sh"
+patch_host_script="/usr/local/bin/patch-host.sh"
 
 arch=$( /bin/arch )
 remoteAccessTool="both"  # Options: "xrdp", "xpra", or "both"
@@ -200,6 +202,9 @@ sudo wget -O "$apply_settings_script" "$apply_settings_script_url"
 echo "Downloading session-control.sh..."
 sudo wget -O "$session_control_script" "$session_control_script_url"
 
+echo "Downloading patch-host.sh..."
+sudo wget -O "$patch_host_script" "$patch_host_script_url"
+
 sudo chmod +x "$SCRIPT_PATH"
 sudo chmod +x "$output_directory/xrdp-who-xorg.sh"
 sudo chmod +x "$WATCHER_SCRIPT_PATH"
@@ -207,6 +212,7 @@ sudo chmod +x "$create_user_script"
 sudo chmod +x "$manage_lease_script"
 sudo chmod +x "$apply_settings_script"
 sudo chmod +x "$session_control_script"
+sudo chmod +x "$patch_host_script"
 echo "Downloaded scripts are now executable."
 
 sudo mkdir -p "$state_directory"
@@ -304,7 +310,7 @@ fi
 # Only the commands the broker API actually invokes with sudo. Privileged file work
 # (mount, chown, chmod, lease markers, host settings) happens inside the allowlisted
 # scripts, each of which validates its own input.
-cmds=(userdel groupadd usermod chpasswd "$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script")
+cmds=(userdel groupadd usermod chpasswd "$create_user_script" "$manage_lease_script" "$apply_settings_script" "$session_control_script" "$patch_host_script")
 full_paths=$(for cmd in "${cmds[@]}"; do command -v "$cmd"; done | paste -sd ',' -)
 sudoers_tmp="/etc/sudoers.d/avdadmin.tmp"
 echo "avdadmin ALL=(ALL) NOPASSWD: $full_paths" | sudo tee "$sudoers_tmp" >/dev/null

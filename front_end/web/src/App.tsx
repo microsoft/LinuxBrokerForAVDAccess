@@ -31,6 +31,9 @@ import { HostSettingsPage } from './pages/settings/HostSettings';
 import { AuditLog } from './pages/audit/AuditLog';
 import { SessionList } from './pages/sessions/SessionList';
 import { UserDetails } from './pages/sessions/UserDetails';
+import { MaintenanceRunDetails } from './pages/maintenance/MaintenanceRunDetails';
+import { MaintenanceRuns } from './pages/maintenance/MaintenanceRuns';
+import { NewMaintenanceRun } from './pages/maintenance/NewMaintenanceRun';
 
 /**
  * Routes deliberately mirror the URLs the Jinja portal served, so existing
@@ -75,6 +78,9 @@ function AuthenticatedRoutes() {
       <Route path="/vms/checkout" element={<RequireAdmin><CheckoutVm /></RequireAdmin>} />
       <Route path="/vms/history" element={<VmHistory />} />
       <Route path="/vms/health" element={<FleetHealth />} />
+      <Route path="/vms/maintenance" element={<MaintenanceRuns />} />
+      <Route path="/vms/maintenance/new" element={<RequireAdmin><NewMaintenanceRun /></RequireAdmin>} />
+      <Route path="/vms/maintenance/:runid" element={<MaintenanceRunDetails />} />
       <Route path="/vms/:vmid" element={<VmDetails />} />
       <Route path="/vms/:vmid/update" element={<RequireAdmin><UpdateVmAttributes /></RequireAdmin>} />
 

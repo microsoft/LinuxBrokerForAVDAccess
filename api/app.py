@@ -52,6 +52,7 @@ REMOTE_CREATE_USER_SCRIPT = '/usr/local/bin/create-user.sh'
 REMOTE_MANAGE_LEASE_SCRIPT = '/usr/local/bin/manage-lease.sh'
 REMOTE_APPLY_SETTINGS_SCRIPT = '/usr/local/bin/apply-host-settings.sh'
 REMOTE_SESSION_CONTROL_SCRIPT = '/usr/local/bin/session-control.sh'
+REMOTE_PATCH_HOST_SCRIPT = '/usr/local/bin/patch-host.sh'
 
 # Output markers shared with linux_host/manage-lease.sh, linux_host/create-user.sh and the
 # delete command below. manage-lease.sh printed cleared-in-use before it learned to keep the
@@ -1957,6 +1958,8 @@ def set_vm_maintenance(vmid):
             return error_response(f"VM {hostname} is assigned to a user. Return it before changing maintenance.", 409)
 
         if result == 'InvalidState':
+            if (row or {}).get('Reason') == 'InMaintenanceRun':
+                return error_response(maintenance_refusal(hostname, row.get('MaintenanceRunID')), 409)
             return error_response(f"VM {hostname} is in a state maintenance cannot change. Repair its status first.", 409)
 
         return error_response(f"VM with VMID {vmid} was not found.", 404)
@@ -2609,6 +2612,8 @@ def set_vm_drain(vmid, enabled):
         g.audit_detail = {'result': result, 'username': row.get('Username')}
 
         if result == 'InvalidState':
+            if row.get('Reason') == 'InMaintenanceRun':
+                return error_response(maintenance_refusal(hostname, row.get('MaintenanceRunID')), 409)
             return error_response(f"{hostname} is in a state drain cannot change. Repair its status first.", 409)
 
         template = DRAIN_MESSAGES.get(result)
@@ -3729,6 +3734,8 @@ def preview_scaling():
                 'ScaleDownRatio': float(row['ScaleDownRatio']) if row.get('ScaleDownRatio') is not None else None,
                 'ScaleDownIncrement': row.get('ScaleDownIncrement'),
                 'StopMode': row.get('StopMode'),
+                # A maintenance run waiting for a spare ready host raises MinVMs by one.
+                'MaintenanceSurge': bool(row.get('MaintenanceSurge')),
             },
             'Counts': {
                 'PoweredOn': row.get('PoweredOn'),
@@ -4047,6 +4054,7 @@ HEARTBEAT_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
 HEARTBEAT_SCRIPTS = (
     'release-session.sh', 'logind-session-watcher.sh', 'xrdp-who-xorg.sh',
     'create-user.sh', 'manage-lease.sh', 'apply-host-settings.sh', 'session-control.sh',
+    'patch-host.sh',
 )
 HEARTBEAT_DESKTOPS = ('gnome', 'xfce', 'mate', 'kde', 'other', 'none', 'unknown')
 HEARTBEAT_SESSION_STATES = ('active', 'disconnected', 'unknown')
@@ -4456,6 +4464,7 @@ ATTENTION_SEVERITY = {
     'unreachable': 'warning',
     'cleanup-stuck': 'warning',
     'never-connected': 'warning',
+    'maintenance-failed': 'warning',
 }
 HEALTH_FLAG_SEVERITY = {
     'no-heartbeat': 'warning',
@@ -4587,6 +4596,33 @@ def attention_item(row):
     }
 
 
+def maintenance_attention_items():
+    """Hosts a maintenance run could not patch that are still out of rotation. Never raises."""
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetMaintenanceAttention")
+                rows = cursor.fetchall() or []
+    except DatabaseUnavailable:
+        raise
+    except Exception as e:
+        if not is_missing_procedure_error(e):
+            logger.exception("Could not read failed maintenance hosts.")
+        return []
+
+    return [{
+        'Kind': 'maintenance-failed',
+        'Severity': ATTENTION_SEVERITY['maintenance-failed'],
+        'VMID': row.get('VMID'),
+        'Hostname': row.get('Hostname'),
+        'Username': None,
+        'AgeSeconds': max(0, row['AgeSeconds']) if isinstance(row.get('AgeSeconds'), int) else None,
+        'Count': None,
+        'RunID': row.get('RunID'),
+        'Detail': row.get('Detail'),
+    } for row in rows]
+
+
 def health_attention_items(hosts, already_listed=()):
     """One item per health flag, with the hosts that have it.
 
@@ -4650,6 +4686,7 @@ def get_attention_items():
                 cursor.execute("EXEC GetHostHealth @Hostname = %s", (None,))
                 health_rows = cursor.fetchall() or []
 
+        items.extend(maintenance_attention_items())
         unreachable = [item['Hostname'] for item in items if item['Kind'] == 'unreachable']
         items.extend(health_attention_items(
             [host_health(row, EXPECTED_HOST_AGENT_VERSION) for row in health_rows], unreachable
@@ -5437,6 +5474,1012 @@ def apply_pending_profile_reset(vmid, hostname, username):
     except Exception:
         logger.exception("Could not apply the profile reset for %s on %s; it stays pending.", username, hostname)
         return 'Failed'
+
+# ===============================
+# Maintenance APIs
+#
+# Rolling maintenance patches or restarts hosts a batch at a time while keeping enough hosts
+# ready for users. The run lives in SQL (dbo.MaintenanceRuns and dbo.MaintenanceRunHosts) and
+# the scheduled task advances it every minute through POST /api/maintenance/advance. Each step
+# is recorded in SQL before its action is taken and confirmed once its effect is seen, and
+# every change is a compare-and-set, so an advance that dies part way is picked up by the next.
+
+MAINTENANCE_PATCH_MODES = {'security': 'Security', 'all': 'All', 'rebootonly': 'RebootOnly'}
+MAINTENANCE_HOST_IN_PROGRESS = ('Draining', 'Starting', 'Patching', 'Restarting', 'Verifying')
+MAINTENANCE_NAME_MAX = 100
+MAINTENANCE_REASON_MAX = 400
+DEFAULT_MAINTENANCE_WARNING = (
+    "This host restarts for maintenance in {minutes} minutes. Save your work and sign out. "
+    "When you reconnect you get another host."
+)
+_PATCH_HOST_LINE_RE = re.compile(r'^__PATCH_HOST_([A-Z_]+)=(.*)$')
+
+
+class MaintenanceValidationError(Exception):
+    """A maintenance run setting the operator must correct. The message names the field."""
+
+    def __init__(self, client_message):
+        super().__init__(client_message)
+        self.client_message = client_message
+
+
+class MaintenanceConflict(Exception):
+    """Another advance changed the host first, so this one leaves it alone."""
+
+
+def maintenance_refusal(hostname, run_id):
+    run = f"maintenance run {run_id}" if run_id else "a maintenance run"
+    return (f"{hostname} is being patched or restarted by {run}. It returns to service when the run "
+            "is done with it; cancel the run to stop sooner.")
+
+
+def patch_agent_outdated_message(hostname):
+    return (f"{hostname} runs a host agent older than {PATCH_MIN_AGENT_VERSION}, which cannot patch it. Update it with "
+            "deploy/Migrate-LinuxHostReleaseAgent.ps1, or use a restart-only run.")
+
+
+def run_patch_host(hostname, arguments):
+    """Run patch-host.sh on a host and return what it reported.
+
+    As with run_session_control, `sudo -n` fails at once on a host whose agent does not have the
+    script or does not allow it yet; that is raised as HostAgentOutdated.
+    """
+    command = "sudo -n {script} {arguments}".format(
+        script=REMOTE_PATCH_HOST_SCRIPT,
+        arguments=' '.join(shlex.quote(str(argument)) for argument in arguments),
+    )
+    result, host_fqdn = run_remote_command(hostname, command, timeout=MAINTENANCE_SSH_TIMEOUT_SECONDS)
+    values = {}
+    for line in (result.stdout or '').splitlines():
+        match = _PATCH_HOST_LINE_RE.match(line.strip())
+        if match:
+            values[match.group(1)] = match.group(2).strip()
+
+    if not values and result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        if any(line.strip().startswith('sudo:') for line in stderr.splitlines()):
+            raise HostAgentOutdated(hostname)
+        logger.error("patch-host.sh %s failed on %s (exit %s): %s",
+                     arguments[0] if arguments else '', host_fqdn, result.returncode, stderr)
+    return values
+
+
+def agent_can_patch(agent_version):
+    reported = version_tuple(agent_version)
+    return reported is not None and reported >= version_tuple(PATCH_MIN_AGENT_VERSION)
+
+
+def maintenance_run_item(row):
+    if not row or row.get('RunID') is None:
+        return None
+    item = {
+        field: row.get(field) for field in (
+            'RunID', 'Name', 'Status', 'EndStatus', 'PatchMode', 'BatchSize', 'MinReadyOverride',
+            'SignOutDeadlineMinutes', 'WarningMinutes', 'WarningMessage', 'MaxFailures', 'CanaryCount',
+            'WaitReason', 'StatusReason', 'CreatedBy', 'UpdatedBy', 'CreatedAtUtc', 'UpdatedAtUtc',
+            'EndedAtUtc', 'LastTickAtUtc', 'LastTickAgeSeconds',
+        )
+    }
+    item.update({
+        'IncludePoweredOff': bool(row.get('IncludePoweredOff')),
+        'CanaryReached': bool(row.get('CanaryReached')),
+        'SurgeRequested': bool(row.get('SurgeRequested')),
+        'Counts': {
+            field: int(row.get(field) or 0)
+            for field in ('Total', 'Pending', 'InProgress', 'Succeeded', 'Failed', 'Skipped', 'Cancelled')
+        },
+    })
+    for field in ('MinReadyInForce', 'PhaseMinVMs', 'ReadyNow'):
+        if field in row:
+            item[field] = row.get(field)
+    return serialize_for_json(item)
+
+
+def maintenance_host_item(row):
+    item = {
+        field: row.get(field) for field in (
+            'RunHostID', 'VMID', 'Hostname', 'Position', 'State', 'Attempts', 'Detail', 'RebootRequired',
+            'AdmittedAtUtc', 'WarningSentAtUtc', 'SignOutRequestedAtUtc', 'PatchStartedAtUtc', 'PatchFinishedAtUtc',
+            'RestartRequestedAtUtc', 'VerifiedAtUtc', 'CompletedAtUtc', 'StepAgeSeconds', 'PowerState',
+            'NetworkStatus', 'VmStatus', 'Username', 'AgentVersion', 'HeartbeatAgeSeconds',
+        )
+    }
+    item.update({
+        'WasDrained': bool(row.get('WasDrained')),
+        'WasMaintenance': bool(row.get('WasMaintenance')),
+        'WasPoweredOff': bool(row.get('WasPoweredOff')),
+        'Registered': bool(row.get('Registered')),
+        'DrainRequested': bool(row.get('DrainRequested')),
+        'XrdpActive': None if row.get('XrdpActive') is None else bool(row.get('XrdpActive')),
+        'AgentCanPatch': agent_can_patch(row.get('AgentVersion')),
+    })
+    return serialize_for_json(item)
+
+
+def fetch_maintenance_run(run_id=None):
+    """A run with what admission works from now; the active run when run_id is None."""
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetMaintenanceRun @RunID = %s", (run_id,))
+            return cursor.fetchone()
+
+
+def fetch_maintenance_hosts(run_id):
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC GetMaintenanceRunHosts @RunID = %s", (run_id,))
+            return cursor.fetchall() or []
+
+
+def set_maintenance_run_status(run_id, action, reason=None, updated_by=None):
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute(
+                "EXEC SetMaintenanceRunStatus @RunID = %s, @Action = %s, @Reason = %s, @UpdatedBy = %s",
+                (run_id, action, reason, updated_by)
+            )
+            row = cursor.fetchone() or {}
+        conn.commit()
+    return row
+
+
+_HOST_STATE_FLAGS = (
+    'MarkAction', 'MarkWarning', 'MarkSignOut', 'MarkPatchStarted', 'MarkPatchFinished', 'MarkRestart',
+    'RestartFromAction', 'MarkVerified',
+)
+
+
+def store_maintenance_host_state(host, changes):
+    """The compare-and-set itself, in SQL. Returns SetMaintenanceHostState's row."""
+    params = (
+        host['RunHostID'], host['Version'], changes.get('State'), changes.get('Detail'), 'Detail' in changes,
+        *(bool(changes.get(flag)) for flag in _HOST_STATE_FLAGS[:3]),
+        changes.get('PatchToken'),
+        *(bool(changes.get(flag)) for flag in _HOST_STATE_FLAGS[3:]),
+        changes.get('RebootRequired'),
+    )
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute(
+                "EXEC SetMaintenanceHostState @RunHostID = %s, @ExpectedVersion = %s, @State = %s, @Detail = %s, "
+                "@SetDetail = %s, @MarkAction = %s, @MarkWarning = %s, @MarkSignOut = %s, @PatchToken = %s, "
+                "@MarkPatchStarted = %s, @MarkPatchFinished = %s, @MarkRestart = %s, @RestartFromAction = %s, "
+                "@MarkVerified = %s, @RebootRequired = %s",
+                params
+            )
+            row = cursor.fetchone() or {}
+        conn.commit()
+    return row
+
+
+def set_maintenance_host(host, **changes):
+    """Record a host's progress as a compare-and-set, and keep `host` current.
+
+    Raises MaintenanceConflict when the row moved on since it was read: another advance got
+    there first, so this one does nothing more with the host.
+    """
+    row = store_maintenance_host_state(host, changes)
+    if row.get('Result') != 'Updated':
+        raise MaintenanceConflict(row.get('Result'))
+
+    previous_state = host.get('State')
+    host.update(Version=row.get('Version'), State=row.get('State'), Attempts=row.get('Attempts'), Detail=row.get('Detail'))
+    if host['State'] != previous_state:
+        host.update(StepAgeSeconds=0, ActionAgeSeconds=None)
+    if changes.get('MarkAction'):
+        host['ActionAgeSeconds'] = 0
+    if changes.get('MarkWarning'):
+        host['WarningAgeSeconds'] = 0
+    if changes.get('MarkSignOut'):
+        host['SignOutAgeSeconds'] = 0
+    if changes.get('PatchToken'):
+        host['PatchToken'] = changes['PatchToken']
+    if changes.get('MarkPatchStarted'):
+        host['PatchStartedAtUtc'] = host.get('PatchStartedAtUtc') or 'recorded'
+    if changes.get('MarkRestart') or changes.get('RestartFromAction'):
+        host.update(RestartAgeSeconds=0, HeartbeatAfterRestart=False, BootedAfterRestart=False)
+    return host
+
+
+def note_maintenance_host(host, text):
+    """Show what a host is waiting for, without writing the same words every minute."""
+    if host.get('Detail') != text:
+        set_maintenance_host(host, Detail=text)
+
+
+def return_maintenance_host(host):
+    """Put a host back the way the run found it. Returns ReturnMaintenanceHost's result."""
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC ReturnMaintenanceHost @RunHostID = %s", (host['RunHostID'],))
+            row = cursor.fetchone() or {}
+        conn.commit()
+    return row.get('Result')
+
+
+MAINTENANCE_POWER_VERBS = {'Start': 'start', 'Stop': 'stop', 'Restart': 'restart'}
+
+
+def maintenance_power(host, action):
+    """Record and request a power action for a host the run holds, as run_power_action does.
+
+    Returns None once Azure accepted the request, or what went wrong. The host is out of
+    rotation, so no assignment is ever ended; a host someone was just given is refused.
+    """
+    verb = MAINTENANCE_POWER_VERBS[action]
+    hostname = host['Hostname']
+    if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
+        return "The Azure subscription or resource group is not configured."
+
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC BeginVmPowerAction @VMID = %s, @Action = %s, @AllowAssigned = %s", (host['VMID'], action, False))
+            row = cursor.fetchone() or {}
+        conn.commit()
+
+    result = row.get('Result')
+    if result != 'Requested':
+        return f"The broker would not {verb} {hostname} ({result or 'no answer'})."
+
+    try:
+        virtual_machines = get_compute_client().virtual_machines
+        if action == 'Start':
+            virtual_machines.begin_start(VM_RESOURCE_GROUP, hostname)
+        elif action == 'Restart':
+            virtual_machines.begin_restart(VM_RESOURCE_GROUP, hostname)
+        elif (row.get('StopMode') or 'PowerOff') == 'Deallocate':
+            virtual_machines.begin_deallocate(VM_RESOURCE_GROUP, hostname)
+        else:
+            virtual_machines.begin_power_off(VM_RESOURCE_GROUP, hostname)
+    except Exception:
+        logger.exception("Azure refused to %s %s for maintenance.", verb, hostname)
+        revert_refused_power_action(host['VMID'], hostname, row)
+        return f"Azure refused to {verb} {hostname}."
+    return None
+
+
+class MaintenanceTick:
+    """One scheduled advance of a run: its deadline, and what it did, for the task's log."""
+
+    def __init__(self, run, deadline):
+        self.run = run
+        self.deadline = deadline
+        self.actions = []
+
+    def time_left(self):
+        return time.monotonic() < self.deadline
+
+    def record(self, host, action):
+        self.actions.append({'Hostname': host.get('Hostname'), 'State': host.get('State'), 'Action': action})
+
+
+def maintenance_audit(tick, action, host, outcome=AUDIT_SUCCESS, **detail):
+    audit(action, 'vm', host.get('Hostname'), outcome, dict(detail, runId=tick.run.get('RunID')))
+
+
+def maintenance_fail(tick, host, detail):
+    """The host stays out of rotation for an operator to look at."""
+    set_maintenance_host(host, State='Failed', Detail=detail)
+    maintenance_audit(tick, 'maintenance.host_failed', host, AUDIT_FAILURE, detail=detail)
+    tick.record(host, 'failed')
+    return False
+
+
+def maintenance_host_is_free(host):
+    return (not host.get('Username') and not host.get('LeaseId') and not host.get('CleanupPending')
+            and host.get('VmStatus') in ('Available', 'Maintenance'))
+
+
+def maintenance_session_users(host):
+    """The users the host's current heartbeat reports signed in, or None when it is not current."""
+    age = host.get('HeartbeatAgeSeconds')
+    if age is None or age > heartbeat_stale_after(host.get('ReconcileIntervalSeconds')):
+        return None
+    return {
+        str(session.get('username')).lower()
+        for session in (_json_column(host.get('SessionsJson'), list) or [])
+        if isinstance(session, dict) and session.get('username')
+    }
+
+
+def maintenance_warning_text(run):
+    custom = (run.get('WarningMessage') or '').strip()
+    return custom or DEFAULT_MAINTENANCE_WARNING.format(minutes=run.get('WarningMinutes') or 15)
+
+
+def maintenance_warn(tick, host, user):
+    hostname = host['Hostname']
+    try:
+        values, _ = run_session_control(
+            hostname, ['message-all'], stdin_input=maintenance_warning_text(tick.run), timeout=MAINTENANCE_SSH_TIMEOUT_SECONDS
+        )
+    except HostAgentOutdated:
+        return maintenance_fail(tick, host, (f"{hostname} runs a host agent older than 1.1.0, so {user} cannot be warned or "
+                                            "signed out. Update it with deploy/Migrate-LinuxHostReleaseAgent.ps1."))
+    except Exception:
+        logger.exception("Could not warn the users of %s about maintenance.", hostname)
+        note_maintenance_host(host, f"Could not reach {hostname} to warn {user}; retrying.")
+        return False
+
+    if values.get('RESULT') not in ('delivered', 'no-session'):
+        note_maintenance_host(host, f"Could not show the warning on {hostname}; retrying.")
+        return False
+
+    minutes = tick.run.get('WarningMinutes') or 15
+    set_maintenance_host(host, MarkWarning=True,
+                         Detail=f"Warned {user}; they are signed out in {minutes} minutes unless they leave first.")
+    maintenance_audit(tick, 'maintenance.user_warned', host, user=user, delivered=values.get('DELIVERED'))
+    tick.record(host, 'warned')
+    return False
+
+
+def maintenance_sign_out(tick, host, user, has_session=True):
+    """Sign the user out (when they have a desktop) and end the assignment, so the host frees up."""
+    hostname = host['Hostname']
+    if (host.get('Attempts') or 0) >= MAINTENANCE_MAX_ATTEMPTS:
+        return maintenance_fail(tick, host, f"Could not sign {user} out of {hostname} after {MAINTENANCE_MAX_ATTEMPTS} attempts.")
+
+    set_maintenance_host(host, MarkAction=True, MarkSignOut=True)
+    if has_session:
+        try:
+            values, _ = run_session_control(hostname, ['signout', user])
+        except HostAgentOutdated:
+            return maintenance_fail(tick, host, (f"{hostname} runs a host agent older than 1.1.0, so {user} cannot be signed "
+                                                "out. Update it with deploy/Migrate-LinuxHostReleaseAgent.ps1."))
+        except Exception:
+            logger.exception("Could not sign %s out of %s for maintenance.", user, hostname)
+            note_maintenance_host(host, f"Could not reach {hostname} to sign {user} out; retrying in five minutes.")
+            return False
+        if values.get('RESULT') not in ('signed-out', 'no-session'):
+            note_maintenance_host(host, f"Could not sign {user} out of {hostname}; retrying in five minutes.")
+            return False
+
+    cleanup = None
+    if host.get('Username'):
+        vm = {'VMID': host['VMID'], 'Hostname': hostname, 'Username': host['Username'], 'LeaseId': host.get('LeaseId')}
+        cleanup = return_after_signout(vm, host['Username'])
+
+    note_maintenance_host(host, f"Signed {user} out for maintenance." if has_session
+                          else f"{user} had no session, so the host was returned.")
+    maintenance_audit(tick, 'maintenance.user_signed_out', host, user=user, hadSession=has_session, cleanupResult=cleanup)
+    tick.record(host, 'signed-out')
+    return False
+
+
+def advance_draining(tick, host):
+    """Wait for the user to leave, warning and then signing them out when the run has a deadline."""
+    run = tick.run
+    if run.get('Status') == 'Stopping':
+        return_maintenance_host(host)
+        set_maintenance_host(host, State='Cancelled', Detail="The run stopped before this host was patched, so it was returned.")
+        maintenance_audit(tick, 'maintenance.host_returned', host)
+        tick.record(host, 'returned')
+        return False
+    if run.get('Status') != 'Active':
+        return False
+
+    if maintenance_host_is_free(host):
+        if host.get('PowerState') == 'Off':
+            next_state = 'Starting'
+        elif run.get('PatchMode') == 'RebootOnly':
+            next_state = 'Restarting'
+        else:
+            next_state = 'Patching'
+        set_maintenance_host(host, State=next_state, Detail=None)
+        return True
+
+    user = host.get('Username') or host.get('CleanupUsername') or 'the user'
+    if not host.get('Username'):
+        note_maintenance_host(host, f"Waiting for the broker to remove {user} from the host.")
+        return False
+
+    deadline_minutes = run.get('SignOutDeadlineMinutes')
+    if not deadline_minutes:
+        note_maintenance_host(host, f"Waiting for {user} to sign out.")
+        return False
+
+    deadline_seconds = deadline_minutes * 60
+    warning_seconds = (run.get('WarningMinutes') or 15) * 60
+    admitted = host.get('AdmittedAgeSeconds') or 0
+    sessions = maintenance_session_users(host)
+    last_checkout = host.get('LastCheckoutAgeSeconds')
+    connecting = last_checkout is not None and last_checkout < SESSION_CONNECTING_SECONDS
+
+    # No desktop to warn, and not just connecting: there is nothing to wait for.
+    if sessions is not None and user.lower() not in sessions and not connecting:
+        return maintenance_sign_out(tick, host, user, has_session=False)
+
+    if host.get('WarningAgeSeconds') is None:
+        if admitted >= deadline_seconds - warning_seconds:
+            return maintenance_warn(tick, host, user)
+        note_maintenance_host(host, f"Waiting for {user} to sign out; they are warned before the {deadline_minutes}-minute deadline.")
+        return False
+
+    if host['WarningAgeSeconds'] >= warning_seconds and admitted >= deadline_seconds:
+        if host.get('SignOutAgeSeconds') is None or host['SignOutAgeSeconds'] >= MAINTENANCE_SIGNOUT_RETRY_SECONDS:
+            return maintenance_sign_out(tick, host, user)
+    return False
+
+
+def advance_starting(tick, host):
+    """Start a host that was off before the run, then patch it, or verify it for a restart-only run."""
+    hostname = host['Hostname']
+    if host.get('ActionAgeSeconds') is None and host.get('PowerState') == 'On':
+        # Started some other way since it was admitted.
+        set_maintenance_host(host, State='Restarting' if tick.run.get('PatchMode') == 'RebootOnly' else 'Patching', Detail=None)
+        return True
+    if host.get('ActionAgeSeconds') is not None and host.get('PowerState') == 'On' and host.get('NetworkStatus') == 'Reachable':
+        if tick.run.get('PatchMode') == 'RebootOnly':
+            # A fresh start is the restart.
+            set_maintenance_host(host, State='Verifying', RestartFromAction=True, Detail=None)
+        else:
+            set_maintenance_host(host, State='Patching', Detail=None)
+        return True
+
+    if host.get('ActionAgeSeconds') is not None and host['ActionAgeSeconds'] < MAINTENANCE_START_TIMEOUT_SECONDS:
+        return False
+    if (host.get('Attempts') or 0) >= MAINTENANCE_MAX_ATTEMPTS:
+        return maintenance_fail(tick, host, f"{hostname} did not become reachable within 15 minutes of starting, "
+                                            f"{MAINTENANCE_MAX_ATTEMPTS} times.")
+
+    set_maintenance_host(host, MarkAction=True)
+    error = maintenance_power(host, 'Start')
+    note_maintenance_host(host, f"{error} Retrying." if error else f"Starting {hostname} to patch it.")
+    tick.record(host, 'start')
+    return False
+
+
+def maintenance_patch_mode(run):
+    return 'security' if run.get('PatchMode') == 'Security' else 'all'
+
+
+def maintenance_start_patch(tick, host, retry_reason=None):
+    """Ask patch-host.sh to start a run, under a token unique to this attempt."""
+    hostname = host['Hostname']
+    attempts = host.get('Attempts') or 0
+    if retry_reason and attempts >= MAINTENANCE_MAX_ATTEMPTS:
+        return maintenance_fail(tick, host, f"{retry_reason}, {MAINTENANCE_MAX_ATTEMPTS} times.")
+
+    mode = maintenance_patch_mode(tick.run)
+    token = f"lb{tick.run['RunID']}-{host['RunHostID']}-{attempts + 1}"
+    set_maintenance_host(host, MarkAction=True, PatchToken=token)
+    try:
+        values = run_patch_host(hostname, ['start', mode, token])
+    except HostAgentOutdated:
+        return maintenance_fail(tick, host, patch_agent_outdated_message(hostname))
+    except Exception:
+        logger.exception("Could not start patching %s.", hostname)
+        note_maintenance_host(host, f"Could not reach {hostname} to start patching; retrying.")
+        return False
+
+    result = values.get('RESULT')
+    if result == 'unsupported':
+        return maintenance_fail(tick, host, "No supported package manager (dnf, yum or apt-get) was found on the host.")
+    if result == 'busy':
+        note_maintenance_host(host, "Another patch run is already going on the host; waiting for it.")
+    elif result in ('started', 'already-started'):
+        note_maintenance_host(host, f"Installing {'security updates' if mode == 'security' else 'all updates'}.")
+    else:
+        note_maintenance_host(host, "patch-host.sh did not start the run; retrying.")
+    tick.record(host, 'patch-start')
+    return False
+
+
+def advance_patching(tick, host):
+    """Start patch-host.sh, then follow it until it succeeds, fails or runs out of time."""
+    hostname = host['Hostname']
+    if host.get('ActionAgeSeconds') is None:
+        return maintenance_start_patch(tick, host)
+
+    try:
+        values = run_patch_host(hostname, ['status'])
+    except HostAgentOutdated:
+        return maintenance_fail(tick, host, patch_agent_outdated_message(hostname))
+    except Exception:
+        logger.exception("Could not read the patch status of %s.", hostname)
+        values = None
+
+    timed_out = host['ActionAgeSeconds'] >= MAINTENANCE_PATCH_TIMEOUT_SECONDS
+    if values is None:
+        if timed_out:
+            return maintenance_fail(tick, host, f"Patching did not finish within {MAINTENANCE_PATCH_TIMEOUT_SECONDS // 60} minutes.")
+        note_maintenance_host(host, f"Could not reach {hostname} for the patch status; retrying.")
+        return False
+
+    state = values.get('STATE')
+    if values.get('TOKEN') and values.get('TOKEN') == host.get('PatchToken'):
+        if state == 'running':
+            if not host.get('PatchStartedAtUtc'):
+                set_maintenance_host(host, MarkPatchStarted=True)
+            if timed_out:
+                return maintenance_fail(tick, host, f"Patching did not finish within {MAINTENANCE_PATCH_TIMEOUT_SECONDS // 60} minutes.")
+            return False
+        if state == 'succeeded':
+            reboot = values.get('REBOOT_REQUIRED')
+            set_maintenance_host(host, State='Restarting', MarkPatchStarted=True, MarkPatchFinished=True,
+                                 RebootRequired=reboot if reboot in ('yes', 'no', 'unknown') else None, Detail=None)
+            maintenance_audit(tick, 'maintenance.host_patched', host, rebootRequired=reboot, manager=values.get('MANAGER'))
+            tick.record(host, 'patched')
+            return True
+        if state == 'failed':
+            summary = (values.get('SUMMARY') or '').strip()
+            code = values.get('EXIT_CODE') or '?'
+            return maintenance_fail(tick, host, f"Patching failed (exit {code})" + (f": {summary}" if summary else "."))
+        if state == 'interrupted':
+            return maintenance_start_patch(tick, host, retry_reason="The patch run was interrupted")
+
+    # The host has no record of this attempt: its start never arrived.
+    if host['ActionAgeSeconds'] >= MAINTENANCE_PATCH_START_GRACE_SECONDS:
+        return maintenance_start_patch(tick, host, retry_reason="The patch run did not start")
+    return False
+
+
+def advance_restarting(tick, host):
+    """Restart the host through Azure, recording when, and move on once the restart is under way."""
+    hostname = host['Hostname']
+    if host.get('ActionAgeSeconds') is not None:
+        # BeginVmPowerAction marks the host unreachable until the probe reaches it again.
+        if host.get('NetworkStatus') != 'Reachable' or host.get('BootedAfterRestart'):
+            set_maintenance_host(host, State='Verifying', Detail=None)
+            return True
+        if host['ActionAgeSeconds'] < MAINTENANCE_RESTART_GRACE_SECONDS:
+            return False
+        if (host.get('Attempts') or 0) >= MAINTENANCE_MAX_ATTEMPTS:
+            return maintenance_fail(tick, host, f"Azure did not restart {hostname} after {MAINTENANCE_MAX_ATTEMPTS} requests.")
+
+    set_maintenance_host(host, MarkAction=True, MarkRestart=True)
+    error = maintenance_power(host, 'Restart')
+    tick.record(host, 'restart')
+    if error:
+        note_maintenance_host(host, f"{error} Retrying.")
+        return False
+    set_maintenance_host(host, State='Verifying', Detail=None)
+    return True
+
+
+def maintenance_health_problem(host):
+    """What still stops the host counting as back, or None once it is healthy."""
+    if host.get('PowerState') != 'On' or host.get('NetworkStatus') != 'Reachable':
+        return "it is not reachable"
+    if not host.get('HeartbeatAfterRestart'):
+        return "its agent has not reported since the restart"
+    if not host.get('BootedAfterRestart'):
+        return "its agent does not show that it restarted"
+    if host.get('XrdpActive') is not True:
+        return "xrdp is not running"
+    return None
+
+
+def advance_verifying(tick, host):
+    """Wait for proof the restart happened and the host is healthy, restarting again if needed."""
+    problem = maintenance_health_problem(host)
+    if problem is None:
+        return maintenance_complete_host(tick, host)
+
+    if (host.get('RestartAgeSeconds') or 0) < MAINTENANCE_VERIFY_TIMEOUT_SECONDS:
+        return False
+    if (host.get('Attempts') or 0) >= MAINTENANCE_MAX_ATTEMPTS - 1:
+        return maintenance_fail(tick, host, f"{host['Hostname']} did not come back healthy after restarting: {problem}.")
+
+    set_maintenance_host(host, MarkAction=True, MarkRestart=True,
+                         Detail=f"Restarting again: 15 minutes after the restart, {problem}.")
+    error = maintenance_power(host, 'Restart')
+    if error:
+        note_maintenance_host(host, f"{error} Retrying.")
+    tick.record(host, 'restart')
+    return False
+
+
+def maintenance_complete_host(tick, host):
+    """Leave the host the way the run found it: stopped again if it was off, then back in service."""
+    stopped = ''
+    if host.get('WasPoweredOff'):
+        # Stopped while still out of rotation, so no one can be given it in between.
+        error = maintenance_power(host, 'Stop')
+        stopped = ' It was powered off again.' if not error else f' It could not be powered off again: {error}'
+    returned = return_maintenance_host(host)
+
+    detail = 'Restarted.' if tick.run.get('PatchMode') == 'RebootOnly' else 'Patched and restarted.'
+    if returned == 'LeftOutOfService':
+        detail += ' Left out of rotation, as it was before the run.'
+    set_maintenance_host(host, State='Succeeded', MarkVerified=True, Detail=detail + stopped)
+    maintenance_audit(tick, 'maintenance.host_completed', host, patchMode=tick.run.get('PatchMode'),
+                      rebootRequired=host.get('RebootRequired'), returned=returned)
+    tick.record(host, 'succeeded')
+    return False
+
+
+MAINTENANCE_HANDLERS = {
+    'Draining': advance_draining,
+    'Starting': advance_starting,
+    'Patching': advance_patching,
+    'Restarting': advance_restarting,
+    'Verifying': advance_verifying,
+}
+
+
+def advance_maintenance_host(tick, host):
+    """Take one host as far as it can go this tick: a step, or a step and the next one's request."""
+    for _ in range(4):
+        handler = MAINTENANCE_HANDLERS.get(host.get('State'))
+        if handler is None or not tick.time_left():
+            return
+        try:
+            if not host.get('Registered'):
+                maintenance_fail(tick, host, f"{host.get('Hostname')} is no longer registered with the broker.")
+                return
+            if not handler(tick, host):
+                return
+        except MaintenanceConflict:
+            return
+        except DatabaseUnavailable:
+            raise
+        except Exception:
+            logger.exception("Maintenance could not advance %s.", host.get('Hostname'))
+            return
+
+
+def finish_maintenance_tick(tick):
+    """Stop the run after too many failures, and end it once every host is done."""
+    run_id = tick.run['RunID']
+    summary = fetch_maintenance_run(run_id) or {}
+    status = summary.get('Status')
+    failed = int(summary.get('Failed') or 0)
+    pending = int(summary.get('Pending') or 0)
+    in_progress = int(summary.get('InProgress') or 0)
+    counts = {'succeeded': summary.get('Succeeded'), 'failed': failed, 'skipped': summary.get('Skipped'),
+              'cancelled': summary.get('Cancelled')}
+
+    if status in ('Active', 'Paused') and failed >= int(summary.get('MaxFailures') or 1):
+        row = set_maintenance_run_status(run_id, 'fail', f"{failed} host{'s' if failed != 1 else ''} failed, the most this run allows.")
+        audit('maintenance.run_stopped', 'maintenance', run_id, AUDIT_FAILURE, counts)
+        summary = row or summary
+    elif status == 'Active' and pending == 0 and in_progress == 0:
+        summary = set_maintenance_run_status(run_id, 'complete') or summary
+        audit('maintenance.run_completed', 'maintenance', run_id, AUDIT_SUCCESS, counts)
+    elif status == 'Stopping' and in_progress == 0:
+        summary = set_maintenance_run_status(run_id, 'finish') or summary
+        audit('maintenance.run_ended', 'maintenance', run_id, AUDIT_SUCCESS, dict(counts, status=summary.get('Status')))
+    tick.run.update({key: value for key, value in summary.items() if key != 'Result' and value is not None})
+
+
+def advance_maintenance_run(deadline):
+    """One scheduled advance: admit hosts, move each in-progress host on, and settle the run."""
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.execute("EXEC BeginMaintenanceTick @LeaseSeconds = %s", (MAINTENANCE_TICK_LEASE_SECONDS,))
+            claim = cursor.fetchone() or {}
+        conn.commit()
+
+    result = claim.get('Result') or 'NoRun'
+    if result != 'Claimed':
+        return {'Result': result, 'RunID': claim.get('RunID'), 'Status': claim.get('Status'), 'Actions': []}
+
+    run = dict(claim)
+    run_id = run['RunID']
+    token = claim.get('TickToken')
+    tick = MaintenanceTick(run, deadline)
+    try:
+        if run.get('Status') == 'Active':
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute("EXEC ClaimMaintenanceAdmissions @RunID = %s", (run_id,))
+                    changes = cursor.fetchall() or []
+                conn.commit()
+            for change in changes:
+                admitted = change.get('Action') == 'Admitted'
+                audit('maintenance.host_admitted' if admitted else 'maintenance.host_skipped', 'vm', change.get('Hostname'),
+                      AUDIT_SUCCESS, {'runId': run_id, 'detail': change.get('Detail')})
+                tick.record(change, 'admitted' if admitted else 'skipped')
+
+            refreshed = fetch_maintenance_run(run_id) or {}
+            if refreshed.get('Status') == 'Paused' and refreshed.get('CanaryReached') and not run.get('CanaryReached'):
+                audit('maintenance.run_paused', 'maintenance', run_id, AUDIT_SUCCESS, {'reason': refreshed.get('StatusReason')})
+            run.update({key: value for key, value in refreshed.items() if value is not None or key in ('WaitReason',)})
+
+        for host in fetch_maintenance_hosts(run_id):
+            if not tick.time_left():
+                break
+            if host.get('State') in MAINTENANCE_HOST_IN_PROGRESS:
+                advance_maintenance_host(tick, host)
+
+        finish_maintenance_tick(tick)
+    finally:
+        try:
+            with db_connection() as conn:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute("EXEC EndMaintenanceTick @RunID = %s, @TickToken = %s", (run_id, token))
+                    cursor.fetchone()
+                conn.commit()
+        except Exception:
+            logger.exception("Could not release maintenance run %s; its claim lapses on its own.", run_id)
+
+    return {
+        'Result': 'Advanced',
+        'RunID': run_id,
+        'Status': tick.run.get('Status'),
+        'WaitReason': tick.run.get('WaitReason'),
+        'Actions': tick.actions,
+    }
+
+
+def _maintenance_int(body, field, minimum, maximum, default=None):
+    value = body.get(field)
+    if _is_blank(value):
+        if default is None:
+            return None
+        return default
+    try:
+        number = _rule_integer(value, field)
+    except RuleValidationError:
+        raise MaintenanceValidationError(f"{field} must be a whole number from {minimum} to {maximum}.")
+    if number < minimum or number > maximum:
+        raise MaintenanceValidationError(f"{field} must be a whole number from {minimum} to {maximum}.")
+    return number
+
+
+def parse_maintenance_run(body):
+    """The settings of a new run, validated. Raises MaintenanceValidationError naming the field."""
+    mode_key = re.sub(r'[\s_-]', '', str(body.get('patchMode') or '')).lower()
+    patch_mode = MAINTENANCE_PATCH_MODES.get(mode_key)
+    if not patch_mode:
+        raise MaintenanceValidationError("patchMode must be Security, All or RebootOnly.")
+
+    hostnames = body.get('hostnames')
+    if (not isinstance(hostnames, list) or not hostnames or len(hostnames) > MAINTENANCE_MAX_HOSTS
+            or not all(isinstance(name, str) and HEARTBEAT_HOSTNAME_RE.match(name) for name in hostnames)):
+        raise MaintenanceValidationError(f"hostnames must be a list of 1 to {MAINTENANCE_MAX_HOSTS} hostnames.")
+
+    deadline = _maintenance_int(body, 'signOutDeadlineMinutes', 5, 1440)
+    warning = _maintenance_int(body, 'warningMinutes', 1, 240, default=15)
+    if deadline is not None and warning >= deadline:
+        raise MaintenanceValidationError("warningMinutes must be less than signOutDeadlineMinutes.")
+
+    message = None
+    if not _is_blank(body.get('warningMessage')):
+        message, problem = normalize_session_message(body.get('warningMessage'))
+        if problem:
+            raise MaintenanceValidationError(problem.replace('The message', 'warningMessage'))
+
+    name = body.get('name')
+    if name is not None and not isinstance(name, str):
+        raise MaintenanceValidationError("name must be text.")
+    name = (name or '').strip()[:MAINTENANCE_NAME_MAX] or None
+
+    return {
+        'name': name,
+        'patchMode': patch_mode,
+        'hostnames': hostnames,
+        'batchSize': _maintenance_int(body, 'batchSize', 1, 50, default=1),
+        'minReady': _maintenance_int(body, 'minReady', 0, 1000),
+        'signOutDeadlineMinutes': deadline,
+        'warningMinutes': warning,
+        'warningMessage': message,
+        'includePoweredOff': body.get('includePoweredOff') is True,
+        'maxFailures': _maintenance_int(body, 'maxFailures', 1, 1000, default=1),
+        'canaryCount': _maintenance_int(body, 'canaryCount', 0, 50, default=0),
+    }
+
+
+def maintenance_order(vm):
+    """Patch order: hosts that are off first, then free ones, then those in use, which may wait."""
+    if vm.get('PowerState') == 'Off':
+        group = 0
+    elif vm.get('Username') or vm.get('LeaseId') or vm.get('CleanupPending') or vm.get('VmStatus') in ('CheckedOut', 'Released'):
+        group = 2
+    else:
+        group = 1
+    return group, str(vm.get('Hostname') or '').lower()
+
+
+def caller_display_name():
+    oid, name, _ = audit_actor()
+    return name or oid
+
+
+@app.route('/api/maintenance/runs', methods=['GET'])
+@token_required(READ_ROLES)
+def get_maintenance_runs():
+    """Recent maintenance runs, newest first, and the active one with what admission sees now."""
+    try:
+        limit = coerce_optional_int(request.args.get('limit'), default=MAINTENANCE_RUN_LIST_LIMIT, minimum=1, maximum=200)
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetMaintenanceRuns @Limit = %s", (limit,))
+                rows = cursor.fetchall() or []
+        active = fetch_maintenance_run(None)
+        return jsonify({
+            'Runs': [maintenance_run_item(row) for row in rows],
+            'Active': maintenance_run_item(active),
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while listing maintenance runs.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to list maintenance runs.")
+        return error_response("Unable to retrieve maintenance runs.", 500)
+
+
+@app.route('/api/maintenance/runs/<int:run_id>', methods=['GET'])
+@token_required(READ_ROLES)
+def get_maintenance_run(run_id):
+    """One run and every host in it, with its progress and live state."""
+    try:
+        run = fetch_maintenance_run(run_id)
+        if not run:
+            return error_response(f"Maintenance run {run_id} was not found.", 404)
+        return jsonify({
+            'Run': maintenance_run_item(run),
+            'Hosts': [maintenance_host_item(row) for row in fetch_maintenance_hosts(run_id)],
+        }), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while reading maintenance run %s.", run_id)
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to read maintenance run %s.", run_id)
+        return error_response("Unable to retrieve the maintenance run.", 500)
+
+
+@app.route('/api/maintenance/runs/create', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('maintenance.create', target_type='maintenance')
+def create_maintenance_run():
+    """Start a rolling maintenance run over the named hosts. Only one run is active at a time."""
+    try:
+        body = request.get_json(silent=True)
+        try:
+            settings = parse_maintenance_run(body if isinstance(body, dict) else {})
+        except MaintenanceValidationError as e:
+            return error_response(e.client_message, 400)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetVms")
+                vms = cursor.fetchall() or []
+
+        by_name = {str(vm.get('Hostname') or '').lower(): vm for vm in vms if vm.get('Hostname')}
+        unknown = sorted({name for name in settings['hostnames'] if name.lower() not in by_name}, key=str.lower)
+        if unknown:
+            return error_response(f"These hosts are not registered: {', '.join(unknown[:10])}.", 400)
+        chosen = sorted({name.lower(): by_name[name.lower()] for name in settings['hostnames']}.values(), key=maintenance_order)
+
+        g.audit_detail = {
+            field: settings[field] for field in (
+                'name', 'patchMode', 'batchSize', 'minReady', 'signOutDeadlineMinutes', 'warningMinutes',
+                'includePoweredOff', 'maxFailures', 'canaryCount',
+            )
+        }
+        g.audit_detail['hostCount'] = len(chosen)
+
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute(
+                    "EXEC CreateMaintenanceRun @Name = %s, @PatchMode = %s, @BatchSize = %s, @MinReadyOverride = %s, "
+                    "@SignOutDeadlineMinutes = %s, @WarningMinutes = %s, @WarningMessage = %s, @IncludePoweredOff = %s, "
+                    "@MaxFailures = %s, @CanaryCount = %s, @HostsJson = %s, @CreatedBy = %s",
+                    (settings['name'], settings['patchMode'], settings['batchSize'], settings['minReady'],
+                     settings['signOutDeadlineMinutes'], settings['warningMinutes'], settings['warningMessage'],
+                     settings['includePoweredOff'], settings['maxFailures'], settings['canaryCount'],
+                     json.dumps([vm['VMID'] for vm in chosen]), caller_display_name())
+                )
+                row = cursor.fetchone() or {}
+            conn.commit()
+
+        result = row.get('Result')
+        if result == 'RunActive':
+            return error_response(f"Maintenance run {row.get('RunID')} is still active. Finish or cancel it first.", 409)
+        if result != 'Created':
+            return error_response("Some of those hosts are no longer registered. Refresh and try again.", 400)
+
+        g.audit_target_id = row.get('RunID')
+        g.audit_detail['runId'] = row.get('RunID')
+        count = row.get('HostCount') or len(chosen)
+        return jsonify({
+            'RunID': row.get('RunID'),
+            'HostCount': count,
+            'message': f"Maintenance run {row.get('RunID')} started for {count} host{'s' if count != 1 else ''}. "
+                       "Hosts are admitted on the next scheduled advance, within a minute.",
+        }), 201
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while starting a maintenance run.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to start a maintenance run.")
+        return error_response("Unable to start the maintenance run.", 500)
+
+
+MAINTENANCE_RUN_ACTIONS = {
+    'pause': ('paused', "Paused maintenance run {run}. Hosts already being patched or restarted finish."),
+    'resume': ('resumed', "Resumed maintenance run {run}."),
+    'cancel': ('cancelled', "Cancelling maintenance run {run}: hosts still waiting for their users are returned, "
+                            "and hosts being patched or restarted finish first."),
+}
+
+
+def change_maintenance_run(run_id, action):
+    verb, message = MAINTENANCE_RUN_ACTIONS[action]
+    try:
+        body = request.get_json(silent=True)
+        reason = body.get('reason') if isinstance(body, dict) else None
+        reason = (reason.strip()[:MAINTENANCE_REASON_MAX] if isinstance(reason, str) else '') or None
+        g.audit_target_id = run_id
+        g.audit_detail = {'reason': reason} if reason else {}
+
+        row = set_maintenance_run_status(run_id, action, reason, caller_display_name())
+        result = row.get('Result')
+        g.audit_detail['result'] = result
+        if result == 'NotFound':
+            return error_response(f"Maintenance run {run_id} was not found.", 404)
+        if result == 'InvalidState':
+            return error_response(f"Maintenance run {run_id} is {str(row.get('Status') or 'ended').lower()}, so it cannot be {verb}.", 409)
+
+        text = message.format(run=run_id) if result == 'Updated' else f"Maintenance run {run_id} is already {verb}."
+        return jsonify({'Run': maintenance_run_item(row), 'Result': result, 'message': text}), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while changing maintenance run %s.", run_id)
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to change maintenance run %s.", run_id)
+        return error_response("Unable to change the maintenance run.", 500)
+
+
+@app.route('/api/maintenance/runs/<int:run_id>/pause', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('maintenance.pause', target_type='maintenance', target_param='run_id')
+def pause_maintenance_run(run_id):
+    return change_maintenance_run(run_id, 'pause')
+
+
+@app.route('/api/maintenance/runs/<int:run_id>/resume', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('maintenance.resume', target_type='maintenance', target_param='run_id')
+def resume_maintenance_run(run_id):
+    return change_maintenance_run(run_id, 'resume')
+
+
+@app.route('/api/maintenance/runs/<int:run_id>/cancel', methods=['POST'])
+@token_required(ADMIN_ROLES)
+@audited('maintenance.cancel', target_type='maintenance', target_param='run_id')
+def cancel_maintenance_run(run_id):
+    return change_maintenance_run(run_id, 'cancel')
+
+
+@app.route('/api/maintenance/advance', methods=['POST'])
+@token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
+@audited('maintenance.advance', target_type='maintenance')
+def advance_maintenance():
+    """Advance the active maintenance run, within a deadline. The scheduled task calls it every minute."""
+    try:
+        summary = advance_maintenance_run(time.monotonic() + MAINTENANCE_ADVANCE_DEADLINE_SECONDS)
+        g.audit_target_id = summary.get('RunID')
+        g.audit_detail = {'result': summary.get('Result'), 'actions': len(summary.get('Actions') or [])}
+        return jsonify(serialize_for_json(summary)), 200
+
+    except DatabaseUnavailable as e:
+        logger.error("Database connection failed while advancing maintenance.")
+        return database_unavailable_response(e)
+
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return error_response("Maintenance runs are not available until the database is upgraded.", 404)
+        logger.exception("Failed to advance maintenance.")
+        return error_response("Unable to advance maintenance.", 500)
 
 # ===============================
 # Audit APIs

@@ -83,6 +83,17 @@ export function describeAttention(item: AttentionItem): Described {
         to: item.Username ? `/users/${encodeURIComponent(item.Username)}` : '/sessions',
         action: 'Open user',
       };
+    case 'maintenance-failed':
+      return {
+        text: (
+          <>
+            Maintenance could not finish <strong>{host}</strong>, so it is out of rotation
+            {item.Detail ? `: ${item.Detail.replace(/\.$/, '')}` : ''}.
+          </>
+        ),
+        to: item.RunID ? `/vms/maintenance/${item.RunID}` : '/vms/maintenance',
+        action: 'Open run',
+      };
     case 'health': {
       const flag = item.Flag ? HEALTH_FLAGS[item.Flag] : undefined;
       const count = item.Count ?? item.Hostnames?.length ?? 0;

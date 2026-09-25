@@ -109,6 +109,16 @@ describe('AttentionPanel', () => {
     expect(screen.getByText(/after 20 min/)).toHaveTextContent('h7 has not removed dave after 20 min');
     expect(describeAttention({ Kind: 'denied-checkouts', Severity: 'critical', Count: 1, AgeSeconds: 30 }).to).toBe('/scaling');
   });
+
+  it('links a host maintenance could not finish to its run', () => {
+    const failed = describeAttention({ Kind: 'maintenance-failed', Severity: 'warning', VMID: 5, Hostname: 'h5', RunID: 7,
+                                       Detail: 'Patching failed (exit 1).' });
+    render(<p>{failed.text}</p>);
+    expect(screen.getByText(/Maintenance could not finish/)).toHaveTextContent(
+      'Maintenance could not finish h5, so it is out of rotation: Patching failed (exit 1).',
+    );
+    expect(failed.to).toBe('/vms/maintenance/7');
+  });
 });
 
 describe('TimeSeriesChart', () => {

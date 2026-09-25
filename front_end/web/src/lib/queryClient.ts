@@ -52,4 +52,6 @@ export const queryKeys = {
   metrics: ['metrics'] as const,
   utilization: (hours: number) => ['metrics', 'utilization', hours] as const,
   attention: ['metrics', 'attention'] as const,
+  maintenance: ['maintenance'] as const,
+  maintenanceRun: (runId: number | string) => ['maintenance', String(runId)] as const,
 };
