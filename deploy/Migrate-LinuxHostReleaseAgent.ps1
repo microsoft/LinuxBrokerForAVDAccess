@@ -89,32 +89,43 @@ function Invoke-RunCommandWithRetry {
 
     $lastError = ''
 
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        $message = az vm run-command invoke `
-            --resource-group $ResourceGroupName `
-            --name $VmName `
-            --command-id RunShellScript `
-            --scripts $Script `
-            --query 'value[0].message' `
-            --output tsv `
-            --only-show-errors 2>&1 | Out-String
+    # The script reaches az as @file. Passed inline, on Windows it goes through az.cmd, where
+    # cmd.exe ends the command at the first newline: the host runs only the first line and the
+    # call still succeeds. Bash also needs LF line endings, which a Windows checkout lacks.
+    $scriptFile = Join-Path ([System.IO.Path]::GetTempPath()) ('linuxbroker-migrate-{0}.sh' -f [guid]::NewGuid().ToString('N'))
+    [System.IO.File]::WriteAllText($scriptFile, $Script.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
 
-        if ($LASTEXITCODE -eq 0) {
-            return $message.Trim()
+    try {
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            $message = az vm run-command invoke `
+                --resource-group $ResourceGroupName `
+                --name $VmName `
+                --command-id RunShellScript `
+                --scripts "@$scriptFile" `
+                --query 'value[0].message' `
+                --output tsv `
+                --only-show-errors 2>&1 | Out-String
+
+            if ($LASTEXITCODE -eq 0) {
+                return $message.Trim()
+            }
+
+            $lastError = $message.Trim()
+            if ($attempt -ge $MaxAttempts) {
+                break
+            }
+
+            $delaySeconds = [Math]::Min($InitialDelaySeconds * [Math]::Pow(2, $attempt - 1), 30)
+            Write-Warning "Linux host migration failed on '$VmName' attempt $attempt of $MaxAttempts. Retrying in $([int]$delaySeconds) seconds."
+            if (-not [string]::IsNullOrWhiteSpace($lastError)) {
+                Write-Warning $lastError
+            }
+
+            Start-Sleep -Seconds ([int]$delaySeconds)
         }
-
-        $lastError = $message.Trim()
-        if ($attempt -ge $MaxAttempts) {
-            break
-        }
-
-        $delaySeconds = [Math]::Min($InitialDelaySeconds * [Math]::Pow(2, $attempt - 1), 30)
-        Write-Warning "Linux host migration failed on '$VmName' attempt $attempt of $MaxAttempts. Retrying in $([int]$delaySeconds) seconds."
-        if (-not [string]::IsNullOrWhiteSpace($lastError)) {
-            Write-Warning $lastError
-        }
-
-        Start-Sleep -Seconds ([int]$delaySeconds)
+    }
+    finally {
+        Remove-Item -LiteralPath $scriptFile -Force -ErrorAction SilentlyContinue
     }
 
     if ([string]::IsNullOrWhiteSpace($lastError)) {
@@ -478,6 +489,11 @@ foreach ($linuxHost in $linuxHosts) {
         $message = Invoke-RunCommandWithRetry -VmName $linuxHost.name -Script $remoteScript
         if (-not [string]::IsNullOrWhiteSpace($message)) {
             Write-Host $message
+        }
+        # Run Command reports success whatever the script did, so the script's own closing line
+        # is the only evidence that it ran to the end.
+        if ($message -notmatch 'Migrated release agent on') {
+            throw "The migration script did not run to completion on '$($linuxHost.name)'."
         }
     }
     catch {
