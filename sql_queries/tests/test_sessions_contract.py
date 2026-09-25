@@ -163,6 +163,10 @@ def test_user_host_history_comes_from_the_temporal_table(conn):
     second = add_vm(conn, "hist-2", power="Off", net="Unreachable")
 
     checkout(conn, "gina")
+    # A temporal query leaves out a row version whose period starts and ends at the same
+    # instant. The period comes from each transaction's start time, so a checkout and a return
+    # within one clock tick, as on a fast CI runner, would erase hist-1 from the history.
+    time.sleep(0.05)
     returned = exec_sql(conn, "EXEC dbo.ReturnVm @VMID=%s", (first,))
     assert returned and returned[0].get("ReturnedUsername") == "gina"
     exec_sql(conn, "EXEC dbo.CompleteVmCleanup @VMID=%s, @LeaseId=%s, @Username=%s",
