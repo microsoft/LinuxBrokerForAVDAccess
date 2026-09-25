@@ -36,6 +36,14 @@ DCONF_LOCKS_DIRECTORY="$DCONF_LOCAL_DIRECTORY/locks"
 DCONF_SCREENSAVER_FILE="$DCONF_LOCAL_DIRECTORY/00-screensaver"
 DCONF_SCREENSAVER_LOCKS_FILE="$DCONF_LOCKS_DIRECTORY/screensaver"
 
+# Xfce reads its settings from xfconf rather than dconf.
+XFCE_CONFIG_DIRECTORY="/etc/xdg/xfce4"
+XFCE_SCREENSAVER_FILE="$XFCE_CONFIG_DIRECTORY/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml"
+
+# MATE and xfce4-screensaver count their delays in whole minutes, and both screensavers treat
+# more than eight hours as eight hours.
+DESKTOP_DELAY_MAXIMUM_MINUTES=480
+
 RELEASE_TIMER_NAME="linuxbroker-release-session.timer"
 WATCHER_SERVICE_NAME="linuxbroker-release-session-watcher.service"
 RELEASE_TIMER_DROPIN_DIRECTORY="/etc/systemd/system/$RELEASE_TIMER_NAME.d"
@@ -289,8 +297,26 @@ write_settings_file() {
     fi
 }
 
+# A delay in seconds as the whole minutes MATE and xfce4-screensaver count in, rounded up or
+# to the nearest minute, and at most what the screensavers accept. 0 stays 0.
+delay_minutes() {
+    # Base 10, as a validated value can still carry a sign or leading zeros ("-0", "08").
+    local seconds=$((10#${1#-})) rounding="$2" minutes
+
+    if [ "$rounding" = "up" ]; then
+        minutes=$(( (seconds + 59) / 60 ))
+    else
+        minutes=$(( (seconds + 30) / 60 ))
+    fi
+    if [ "$minutes" -gt "$DESKTOP_DELAY_MAXIMUM_MINUTES" ]; then
+        minutes=$DESKTOP_DELAY_MAXIMUM_MINUTES
+    fi
+    printf '%s\n' "$minutes"
+}
+
 apply_dconf_settings() {
     local content locks_content dconf_changed=1
+    local blank_minutes lock_minutes idle_activation=false
 
     if [ ! -d /etc/dconf ]; then
         log "dconf is not present on this host. Skipping screen lock policy."
@@ -318,11 +344,16 @@ apply_dconf_settings() {
 
     mkdir -p "$DCONF_LOCAL_DIRECTORY" "$DCONF_LOCKS_DIRECTORY"
 
+    blank_minutes=$(delay_minutes "${SETTING_VALUES[ScreenIdleDelaySeconds]}" up)
+    lock_minutes=$(delay_minutes "${SETTING_VALUES[ScreenLockDelaySeconds]}" nearest)
+    [ "$blank_minutes" -gt 0 ] && idle_activation=true
+
     content="# Managed by apply-host-settings.sh. Manual edits are overwritten."$'\n'
     content+="#"$'\n'
-    content+="# A locked GNOME greeter inside an xrdp/xpra session frequently cannot be unlocked"$'\n'
-    content+="# after a reconnect, which strands the host's lease. That is why the shipped defaults"$'\n'
-    content+="# disable the lock screen entirely rather than merely deferring it."$'\n'
+    content+="# A locked GNOME greeter inside an xrdp session frequently cannot be unlocked after a"$'\n'
+    content+="# reconnect, which strands the host's lease. That is why the shipped defaults disable"$'\n'
+    content+="# the lock screen entirely, on every desktop, rather than merely deferring it. GNOME"$'\n'
+    content+="# counts the delays below in seconds and MATE in minutes."$'\n'
     content+=$'\n'
     content+="[org/gnome/desktop/session]"$'\n'
     content+="idle-delay=uint32 ${SETTING_VALUES[ScreenIdleDelaySeconds]}"$'\n'
@@ -334,6 +365,20 @@ apply_dconf_settings() {
     # Removes the lock screen entirely, including the Super+L shortcut and the Lock entry in
     # the system menu. Without this a user can still lock manually.
     content+="[org/gnome/desktop/lockdown]"$'\n'
+    content+="disable-lock-screen=${SETTING_VALUES[DisableLockScreen]}"$'\n'
+    content+=$'\n'
+    content+="[org/mate/desktop/session]"$'\n'
+    content+="idle-delay=$blank_minutes"$'\n'
+    content+=$'\n'
+    # An animated screensaver would keep sending screen updates to the client, so MATE only
+    # ever blanks the screen.
+    content+="[org/mate/screensaver]"$'\n'
+    content+="idle-activation-enabled=$idle_activation"$'\n'
+    content+="lock-enabled=${SETTING_VALUES[ScreenLockEnabled]}"$'\n'
+    content+="lock-delay=$lock_minutes"$'\n'
+    content+="mode='blank-only'"$'\n'
+    content+=$'\n'
+    content+="[org/mate/desktop/lockdown]"$'\n'
     content+="disable-lock-screen=${SETTING_VALUES[DisableLockScreen]}"
     if write_if_changed "$DCONF_SCREENSAVER_FILE" "$content" 644; then
         log "Updated screen lock policy in $DCONF_SCREENSAVER_FILE."
@@ -346,7 +391,13 @@ apply_dconf_settings() {
         locks_content+="/org/gnome/desktop/session/idle-delay"$'\n'
         locks_content+="/org/gnome/desktop/screensaver/lock-enabled"$'\n'
         locks_content+="/org/gnome/desktop/screensaver/lock-delay"$'\n'
-        locks_content+="/org/gnome/desktop/lockdown/disable-lock-screen"
+        locks_content+="/org/gnome/desktop/lockdown/disable-lock-screen"$'\n'
+        locks_content+="/org/mate/desktop/session/idle-delay"$'\n'
+        locks_content+="/org/mate/screensaver/idle-activation-enabled"$'\n'
+        locks_content+="/org/mate/screensaver/lock-enabled"$'\n'
+        locks_content+="/org/mate/screensaver/lock-delay"$'\n'
+        locks_content+="/org/mate/screensaver/mode"$'\n'
+        locks_content+="/org/mate/desktop/lockdown/disable-lock-screen"
         if write_if_changed "$DCONF_SCREENSAVER_LOCKS_FILE" "$locks_content" 644; then
             log "Locked screen lock keys so users cannot override them."
             dconf_changed=0
@@ -368,6 +419,51 @@ apply_dconf_settings() {
         else
             log "WARNING: the dconf CLI is unavailable, so the policy was written but not compiled."
         fi
+    fi
+}
+
+apply_xfconf_settings() {
+    local content blank_minutes lock_minutes saver_enabled=false lock_screen_enabled=true lock=""
+
+    [ -d "$XFCE_CONFIG_DIRECTORY" ] || return 0
+
+    blank_minutes=$(delay_minutes "${SETTING_VALUES[ScreenIdleDelaySeconds]}" up)
+    lock_minutes=$(delay_minutes "${SETTING_VALUES[ScreenLockDelaySeconds]}" nearest)
+    [ "$blank_minutes" -gt 0 ] && saver_enabled=true
+    [ "${SETTING_VALUES[DisableLockScreen]}" = "true" ] && lock_screen_enabled=false
+    # A property in a system-wide channel file that only root may change is locked for every
+    # user: xfconf has no wildcard for everyone.
+    [ "${SETTING_VALUES[ScreenLockSettingsLocked]}" = "true" ] && lock=' unlocked="root"'
+
+    content='<?xml version="1.0" encoding="UTF-8"?>'$'\n'
+    content+='<!-- Managed by apply-host-settings.sh. Manual edits are overwritten. -->'$'\n'
+    content+='<!-- The xfce4-screensaver settings every user starts with. Delays are in minutes. -->'$'\n'
+    content+=$'\n'
+    content+='<channel name="xfce4-screensaver" version="1.0">'$'\n'
+    content+='  <property name="saver" type="empty">'$'\n'
+    content+="    <property name=\"enabled\" type=\"bool\" value=\"$saver_enabled\"$lock/>"$'\n'
+    content+="    <property name=\"mode\" type=\"int\" value=\"0\"$lock/>"$'\n'
+    content+='    <property name="idle-activation" type="empty">'$'\n'
+    content+="      <property name=\"enabled\" type=\"bool\" value=\"$saver_enabled\"$lock/>"$'\n'
+    # xfce4-screensaver turns a delay under a minute into ten minutes, so none is given when
+    # blanking is off.
+    if [ "$saver_enabled" = "true" ]; then
+        content+="      <property name=\"delay\" type=\"int\" value=\"$blank_minutes\"$lock/>"$'\n'
+    fi
+    content+='    </property>'$'\n'
+    content+='  </property>'$'\n'
+    content+='  <property name="lock" type="empty">'$'\n'
+    content+="    <property name=\"enabled\" type=\"bool\" value=\"$lock_screen_enabled\"$lock/>"$'\n'
+    content+='    <property name="saver-activation" type="empty">'$'\n'
+    content+="      <property name=\"enabled\" type=\"bool\" value=\"${SETTING_VALUES[ScreenLockEnabled]}\"$lock/>"$'\n'
+    content+="      <property name=\"delay\" type=\"int\" value=\"$lock_minutes\"$lock/>"$'\n'
+    content+='    </property>'$'\n'
+    content+='  </property>'$'\n'
+    content+='</channel>'
+
+    # xfconfd reads the file once per session, so a change reaches sessions started after it.
+    if write_if_changed "$XFCE_SCREENSAVER_FILE" "$content" 644; then
+        log "Updated Xfce screen lock policy in $XFCE_SCREENSAVER_FILE for sessions that start from now on."
     fi
 }
 
@@ -464,6 +560,7 @@ main() {
 
     write_settings_file
     apply_dconf_settings
+    apply_xfconf_settings
     apply_systemd_settings
 
     log "Applied settings version $SETTINGS_VERSION."

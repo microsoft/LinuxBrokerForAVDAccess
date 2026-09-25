@@ -101,7 +101,8 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `linuxHostVmSize`: Linux host VM size.
 - `avdVmSize`: AVD host VM size.
 - `linuxHostOsVersion`: Linux image SKU. Defaults to `9-LVM` (RHEL 9). The RHEL options (`8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires. `24_04-lts` deploys Canonical's Ubuntu 24.04 server image and adds the Ubuntu desktop, which xrdp sessions run as Ubuntu on Xorg.
-- `linuxHostDisableScreenLock`: `true` or `false`. Disables the GNOME screen saver and screen lock on the Linux hosts. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
+- `linuxHostDesktop`: `gnome`, `xfce` or `mate`. The desktop the Linux hosts run in xrdp sessions. Defaults to `gnome`, which is the `Server with GUI` group on RHEL and the Ubuntu desktop on Ubuntu. Xfce and MATE come from EPEL on RHEL and from Ubuntu's own packages on Ubuntu. Changing it on existing hosts runs their bootstrap again at the next `azd provision`, so drain them first. See [Upgrading To Distribution And Desktop Support](#upgrading-to-distribution-and-desktop-support).
+- `linuxHostDisableScreenLock`: `true` or `false`. Disables the screen saver and screen lock on the Linux hosts, whichever desktop they run. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - `azureCloudName`: `AzurePublic`, `AzureUSGovernment`, or `AzureCustom`. See [Choosing The Target Azure Cloud](#choosing-the-target-azure-cloud).
 - `scriptSourceRoot`: root URL the Linux host and AVD host bootstrap scripts are downloaded from.
 - `domainName`: DNS suffix the broker appends to Linux host names when it connects over SSH. Leave empty to use the deployment's private DNS zone, `linuxbroker.internal`. If you set it, you are responsible for DNS records that resolve `<hostname>.<domainName>` from the API's virtual network.
@@ -237,31 +238,45 @@ If you prefer to be prompted locally, leave both values unset and run `azd up` f
 
 ## Linux Host Screen Lock
 
-RHEL hosts install the `Server with GUI` group and Ubuntu hosts install the Ubuntu desktop, so
-both run a GNOME desktop. By default the bootstrap script disables the GNOME screen saver and
-screen lock on those hosts.
+Linux hosts run GNOME unless `linuxHostDesktop` chooses Xfce or MATE. By default the bootstrap
+script disables the screen saver and screen lock on those hosts, whichever desktop they run.
 
 This is on by default because a locked GNOME greeter inside an xrdp or xpra session frequently
 cannot be unlocked after a reconnect. When that happens the user cannot get back into the
-desktop, and the host stays leased until the lease is released manually.
+desktop, and the host stays leased until the lease is released manually. Xfce and MATE hosts get
+the same default, so the posture does not depend on the desktop a deployment chose.
 
-The configuration is applied through a dconf system database:
+The configuration is applied through a dconf system database, which GNOME and MATE read, and on
+Xfce hosts through a system xfconf file:
 
 | File on the host | Written by |
 | --- | --- |
 | `/etc/dconf/db/local.d/00-screensaver` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
 | `/etc/dconf/db/local.d/locks/screensaver` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
 | `/etc/dconf/profile/user` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
+| `/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml`, on Xfce hosts | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
 
 These files were previously static and downloaded during bootstrap. They are now generated from
 the fleet-wide host settings profile, which is what makes the values editable in the portal after
 deployment. The bootstrap seeds that profile once, and the release agent keeps each host converged
 to it from then on. See [Linux Host Settings](../README.md#linux-host-settings).
 
-It sets `idle-delay` to `0` so the session never goes idle, sets `lock-enabled` to `false` so
-the screen saver never locks, and sets `disable-lock-screen` to `true` so the lock screen is
-removed entirely, including the `Super+L` shortcut and the `Lock` entry in the system menu. The
-lock list prevents users from changing any of those keys back.
+On GNOME it sets `idle-delay` to `0` so the session never goes idle, sets `lock-enabled` to
+`false` so the screen saver never locks, and sets `disable-lock-screen` to `true` so the lock
+screen is removed entirely, including the `Super+L` shortcut and the `Lock` entry in the system
+menu. The same database sets the matching MATE keys under `org/mate`, where
+`disable-lock-screen` in `org/mate/desktop/lockdown` stops MATE from locking the screen. On Xfce
+the xfconf file turns off xfce4-screensaver's blanking and locking; Xfce keeps its `Lock Screen`
+entry, which does nothing while locking is disabled. While **Prevent users from changing these
+screen lock settings** is on in **Host Settings**, as it is by default, the lock list stops users
+from changing any of the GNOME and MATE keys back, and each property in the xfconf file is marked
+`unlocked="root"`, so Xfce ignores the values users set for themselves.
+
+GNOME counts the blank and lock delays in seconds, as the portal does. MATE and Xfce count them
+in whole minutes, up to 8 hours, so the delays are converted for them: the blank delay rounds up,
+so a delay of a few seconds does not turn blanking off, and the lock delay rounds to the nearest
+minute. Xfce reads the file when a session starts, so a change reaches the Xfce sessions that
+start after it.
 
 RHEL does not ship `/etc/dconf/profile/user`, and a system dconf database is only read when a
 profile references it, so the bootstrap creates that file with `system-db:local`. An existing
@@ -290,14 +305,24 @@ deployment from **Host Settings** in the portal, without redeploying anything.
 ls -l /etc/dconf/db/local
 grep system-db /etc/dconf/profile/user
 
-# The effective values, from inside a desktop session.
+# The effective values, from inside a GNOME session.
 gsettings get org.gnome.desktop.session idle-delay
 gsettings get org.gnome.desktop.screensaver lock-enabled
 gsettings get org.gnome.desktop.lockdown disable-lock-screen
+
+# From inside a MATE session.
+gsettings get org.mate.session idle-delay
+gsettings get org.mate.screensaver lock-enabled
+gsettings get org.mate.lockdown disable-lock-screen
+
+# From inside an Xfce session.
+xfconf-query -c xfce4-screensaver -p /saver/enabled
+xfconf-query -c xfce4-screensaver -p /lock/enabled
 ```
 
-Expect `uint32 0`, `false`, and `true`. If `gsettings` still reports the distribution defaults,
-check that `/etc/dconf/profile/user` contains `system-db:local` and rerun `sudo dconf update`.
+Expect `uint32 0`, `false`, and `true` on GNOME, `0`, `false`, and `true` on MATE, and `false`
+twice on Xfce. If `gsettings` still reports the distribution defaults, check that
+`/etc/dconf/profile/user` contains `system-db:local` and rerun `sudo dconf update`.
 
 ## Quick Start
 
@@ -366,7 +391,7 @@ Important deployment characteristics:
 - The API's `NFS_SHARE` setting points at the provisioned Azure Files share unless `nfsShare` is set. The storage account disables public network access and shared key access, and it allows non-HTTPS traffic because NFS does not use HTTPS; the private endpoint is the only path to it.
 - RHEL hosts use Generation 2 images so they can run with Trusted Launch.
 - The AVD host pool prefers RemoteApp and sets RDP properties that enable Microsoft Entra single sign-on to the Microsoft Entra joined session hosts.
-- Linux hosts have the GNOME screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
+- Linux hosts run the desktop that `linuxHostDesktop` names, GNOME by default, with the screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - Key Vault stores `db-password` and `linux-host`.
 - The API app receives Key Vault Secrets User access so it can read those secrets at runtime.
 
@@ -568,6 +593,8 @@ This release changes which Linux distributions and desktops the deployment offer
   $clientId = azd env get-value apiClientId
   az vm run-command invoke -g <resource-group> -n <vm-name> --command-id RunShellScript --scripts "curl -fsSL -o /tmp/linuxbroker-bootstrap.sh $root/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh && LINUXBROKER_SCRIPT_SOURCE_ROOT=$root bash /tmp/linuxbroker-bootstrap.sh $api $clientId"
   ```
+
+- **Hosts can run Xfce or MATE.** The new `linuxHostDesktop` parameter chooses the desktop: `gnome`, the default and the only desktop until now, `xfce` or `mate`. The bootstrap installs it, from EPEL on RHEL and from Ubuntu's own packages on Ubuntu, and records it in `/etc/linuxbroker/desktop.conf`. `xrdp-startwm.sh` starts the desktop named there, and the heartbeat reports it in **Fleet health**. The host settings apply to all three desktops; see [Linux Host Screen Lock](#linux-host-screen-lock) for how MATE and Xfce count the screen delays in minutes and when Xfce sessions pick up a change. With `gnome` the extension command is unchanged, so an environment that keeps the default sees no change to its hosts. Changing the value changes the extension command, so the next `azd provision` runs the bootstrap again on existing hosts. It adds the new desktop next to the old one, and the sessions that start afterwards use the new desktop. Drain the hosts first, because the bootstrap also updates every package and reinstalls the release agent, and on Ubuntu it restarts xrdp. To choose Xfce or MATE when you run a bootstrap script by hand, set `LINUXBROKER_DESKTOP=xfce` or `LINUXBROKER_DESKTOP=mate` in its environment.
 
 ## Manual Steps After `azd up`
 
@@ -806,6 +833,15 @@ The system proxy service installed by the upstream xpra 6.5 packages exits durin
 ### A RHEL session is stuck on a lock screen that will not accept the password
 
 The GNOME lock screen inside an xrdp or xpra session often cannot be unlocked after a reconnect. Confirm the screen lock configuration actually applied on the host using the commands in [Linux Host Screen Lock](#linux-host-screen-lock). The most common cause is a missing `system-db:local` line in `/etc/dconf/profile/user`, which makes GNOME ignore the settings even though the files under `/etc/dconf/db/local.d/` are present.
+
+### A session starts a different desktop than `linuxHostDesktop` names
+
+`xrdp-startwm.sh` starts the desktop named in `/etc/linuxbroker/desktop.conf` and logs each start under the `linuxbroker-startwm` tag. When that desktop is not installed, it runs the distribution's own session script instead and logs that too. A host that was migrated rather than bootstrapped has no `desktop.conf`, so it always runs the distribution's session script. Drain such a host and run its bootstrap again, which installs the desktop and writes the file:
+
+```bash
+cat /etc/linuxbroker/desktop.conf
+sudo journalctl -t linuxbroker-startwm -n 20
+```
 
 ### The Custom Script Extension failed on the screen lock step
 

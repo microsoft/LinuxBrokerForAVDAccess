@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "5357812922203999908"
+      "templateHash": "7494438435876162804"
     }
   },
   "parameters": {
@@ -326,7 +326,19 @@
       "type": "bool",
       "defaultValue": true,
       "metadata": {
-        "description": "Disable the GNOME screen saver and screen lock on the Linux hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
+        "description": "Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
+      }
+    },
+    "linuxHostDesktop": {
+      "type": "string",
+      "defaultValue": "gnome",
+      "allowedValues": [
+        "gnome",
+        "xfce",
+        "mate"
+      ],
+      "metadata": {
+        "description": "Desktop the Linux hosts run in xrdp sessions: gnome (the RHEL Server with GUI group, or the Ubuntu desktop), xfce or mate. Changing it on existing hosts runs their bootstrap again at the next provision, so drain them first."
       }
     },
     "avdHostPoolName": {
@@ -527,6 +539,9 @@
           "linuxHostDisableScreenLock": {
             "value": "[parameters('linuxHostDisableScreenLock')]"
           },
+          "linuxHostDesktop": {
+            "value": "[parameters('linuxHostDesktop')]"
+          },
           "avdHostPoolName": {
             "value": "[parameters('avdHostPoolName')]"
           },
@@ -550,7 +565,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "13893275988389033575"
+              "templateHash": "1459326504640237068"
             }
           },
           "parameters": {
@@ -766,7 +781,19 @@
               "type": "bool",
               "defaultValue": true,
               "metadata": {
-                "description": "Disable the GNOME screen saver and screen lock on the Linux hosts. Set to false to keep the lock screen."
+                "description": "Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Set to false to keep the lock screen."
+              }
+            },
+            "linuxHostDesktop": {
+              "type": "string",
+              "defaultValue": "gnome",
+              "allowedValues": [
+                "gnome",
+                "xfce",
+                "mate"
+              ],
+              "metadata": {
+                "description": "Desktop the Linux hosts run in xrdp sessions."
               }
             },
             "avdHostPoolName": {
@@ -2830,6 +2857,9 @@
                   },
                   "disableScreenLock": {
                     "value": "[parameters('linuxHostDisableScreenLock')]"
+                  },
+                  "desktop": {
+                    "value": "[parameters('linuxHostDesktop')]"
                   }
                 },
                 "template": {
@@ -2839,7 +2869,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "9444761510623079381"
+                      "templateHash": "8451551061526823506"
                     }
                   },
                   "parameters": {
@@ -2913,7 +2943,19 @@
                       "type": "bool",
                       "defaultValue": true,
                       "metadata": {
-                        "description": "Disable the GNOME screen saver and screen lock on the Linux hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
+                        "description": "Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control."
+                      }
+                    },
+                    "desktop": {
+                      "type": "string",
+                      "defaultValue": "gnome",
+                      "allowedValues": [
+                        "gnome",
+                        "xfce",
+                        "mate"
+                      ],
+                      "metadata": {
+                        "description": "Desktop the hosts run in xrdp sessions. Changing it changes the extension command, which runs the bootstrap again on existing hosts."
                       }
                     }
                   },
@@ -2927,7 +2969,8 @@
                     ],
                     "normalizedScriptSourceRoot": "[if(endsWith(parameters('scriptSourceRoot'), '/'), take(parameters('scriptSourceRoot'), sub(length(parameters('scriptSourceRoot')), 1)), parameters('scriptSourceRoot'))]",
                     "bootstrapArgs": "[format('\"{0}\" \"{1}\"', parameters('linuxBrokerApiBaseUrl'), parameters('linuxBrokerApiClientId'))]",
-                    "bootstrapEnv": "[format('LINUXBROKER_SCRIPT_SOURCE_ROOT=\"{0}\" LINUXBROKER_DISABLE_SCREEN_LOCK=\"{1}\"', variables('normalizedScriptSourceRoot'), if(parameters('disableScreenLock'), 'true', 'false'))]",
+                    "desktopEnv": "[if(equals(parameters('desktop'), 'gnome'), '', format(' LINUXBROKER_DESKTOP=\"{0}\"', parameters('desktop')))]",
+                    "bootstrapEnv": "[format('LINUXBROKER_SCRIPT_SOURCE_ROOT=\"{0}\" LINUXBROKER_DISABLE_SCREEN_LOCK=\"{1}\"{2}', variables('normalizedScriptSourceRoot'), if(parameters('disableScreenLock'), 'true', 'false'), variables('desktopEnv'))]",
                     "adminCredentials": "[if(equals(parameters('authType'), 'Password'), createObject('adminPassword', parameters('adminPassword')), createObject())]",
                     "linuxConfiguration": "[if(equals(parameters('authType'), 'SSH'), createObject('disablePasswordAuthentication', true(), 'ssh', createObject('publicKeys', createArray(createObject('path', format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername')), 'keyData', parameters('sshPublicKey'))))), createObject('disablePasswordAuthentication', false()))]",
                     "imageConfigs": {

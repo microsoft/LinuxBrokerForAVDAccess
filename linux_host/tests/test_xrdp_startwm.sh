@@ -14,7 +14,8 @@ FAKE_SESMAN_PID=""
 
 # Everything the tests create. Whatever was there before is set aside and put back.
 TOUCHED=(/etc/xrdp /usr/libexec/xrdp /etc/polkit-1 /etc/X11 /usr/share/gnome-session /etc/linuxbroker
-    "$LAUNCHER" "$SHIM_DIR/systemctl" "$SHIM_DIR/gnome-session" "$SHIM_DIR/logger")
+    "$LAUNCHER" "$SHIM_DIR/systemctl" "$SHIM_DIR/gnome-session" "$SHIM_DIR/startxfce4" "$SHIM_DIR/mate-session"
+    "$SHIM_DIR/logger")
 
 stop_fake_sesman() {
     if [ -n "$FAKE_SESMAN_PID" ]; then
@@ -326,10 +327,15 @@ setup_debian_session() {
     mkdir -p /etc/X11/Xsession.d /usr/share/gnome-session/sessions /etc/linuxbroker "$WORK_DIR/home"
     fake_session_script /etc/xrdp/startwm.sh debian-startwm
     printf 'ORIGINAL_WM=/etc/xrdp/startwm.sh\n' > "$STATE_FILE"
-    printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/gnome-session"
-    chmod 755 "$SHIM_DIR/gnome-session"
+    install_desktop_shim gnome-session
     : > /usr/share/gnome-session/sessions/ubuntu.session
     printf 'LBTEST_PROFILE=sourced\nexport LBTEST_PROFILE\n' > "$WORK_DIR/home/.profile"
+}
+
+# A stand-in for the command that starts a desktop, so the desktop counts as installed.
+install_desktop_shim() {
+    printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/$1"
+    chmod 755 "$SHIM_DIR/$1"
 }
 
 # Starts a session the way xrdp-sesman does: as the user, in their home, with no arguments.
@@ -405,18 +411,97 @@ test_otherwise_the_distribution_script_runs() {
     assert_file_contains "$FAKE_CALLS" "gnome is not installed"
 }
 
-test_rhel_runs_its_own_script() {
+test_xfce_and_mate_on_debian() {
     setup_case
+    setup_debian_session
+    install_desktop_shim startxfce4
+    install_desktop_shim mate-session
+
+    printf 'DESKTOP=xfce\n' > "$DESKTOP_FILE"
+    run_session
+    assert_eq "$(session_value ran)" "xsession"
+    assert_eq "$(session_value args)" "startxfce4"
+    assert_eq "$(session_value DESKTOP_SESSION)" "xfce"
+    assert_eq "$(session_value XDG_SESSION_DESKTOP)" "xfce"
+    assert_eq "$(session_value XDG_CURRENT_DESKTOP)" "XFCE"
+    assert_eq "$(session_value GNOME_SHELL_SESSION_MODE)" ""
+    assert_eq "$(session_value XDG_SESSION_TYPE)" "x11"
+    assert_eq "$(session_value LBTEST_PROFILE)" "sourced"
+    assert_file_contains "$FAKE_CALLS" "logger -t linuxbroker-startwm -- Starting xfce"
+
+    printf 'DESKTOP=MATE\n' > "$DESKTOP_FILE"
+    run_session
+    assert_eq "$(session_value ran)" "xsession"
+    assert_eq "$(session_value args)" "mate-session"
+    assert_eq "$(session_value DESKTOP_SESSION)" "mate"
+    assert_eq "$(session_value XDG_SESSION_DESKTOP)" "mate"
+    assert_eq "$(session_value XDG_CURRENT_DESKTOP)" "MATE"
+    assert_eq "$(session_value XDG_SESSION_TYPE)" "x11"
+
+    # Another desktop installed alongside is not started in its place.
+    rm -f "$SHIM_DIR/mate-session"
+    run_session
+    assert_eq "$(session_value ran)" "debian-startwm" "MATE is not installed"
+    assert_eq "$(session_value DESKTOP_SESSION)" ""
+    assert_file_contains "$FAKE_CALLS" "mate is not installed"
+}
+
+# A RHEL host: xorg-x11-xinit's Xsession and xrdp's startwm-bash.sh, recorded.
+setup_rhel_session() {
     fake_session_script /etc/X11/xinit/Xsession rhel-xsession
     fake_session_script /usr/libexec/xrdp/startwm-bash.sh rhel-startwm
     mkdir -p /etc/linuxbroker "$WORK_DIR/home"
     printf 'ORIGINAL_WM=/usr/libexec/xrdp/startwm-bash.sh\n' > "$STATE_FILE"
+    install_desktop_shim gnome-session
+    printf 'LBTEST_PROFILE=sourced\nexport LBTEST_PROFILE\n' > "$WORK_DIR/home/.bash_profile"
+}
+
+test_rhel_runs_its_own_script_for_gnome() {
+    setup_case
+    setup_rhel_session
     printf 'DESKTOP=gnome\n' > "$DESKTOP_FILE"
-    printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/gnome-session"
-    chmod 755 "$SHIM_DIR/gnome-session"
 
     run_session
     assert_eq "$(session_value ran)" "rhel-startwm"
+    assert_eq "$(session_value DESKTOP_SESSION)" ""
+    assert_not_contains_file "$FAKE_CALLS" "is not installed"
+}
+
+test_xfce_and_mate_on_rhel() {
+    setup_case
+    setup_rhel_session
+    install_desktop_shim startxfce4
+    install_desktop_shim mate-session
+
+    printf 'DESKTOP=xfce\n' > "$DESKTOP_FILE"
+    run_session
+    assert_eq "$(session_value ran)" "rhel-xsession"
+    assert_eq "$(session_value args)" "startxfce4"
+    assert_eq "$(session_value DESKTOP_SESSION)" "xfce"
+    assert_eq "$(session_value XDG_SESSION_DESKTOP)" "xfce"
+    assert_eq "$(session_value XDG_CURRENT_DESKTOP)" "XFCE"
+    assert_eq "$(session_value XDG_SESSION_TYPE)" "x11"
+    assert_eq "$(session_value LBTEST_PROFILE)" "sourced" "a login shell reads the profiles, as startwm-bash.sh does"
+    assert_file_contains "$FAKE_CALLS" "logger -t linuxbroker-startwm -- Starting xfce"
+
+    printf 'DESKTOP=mate\n' > "$DESKTOP_FILE"
+    run_session
+    assert_eq "$(session_value ran)" "rhel-xsession"
+    assert_eq "$(session_value args)" "mate-session"
+    assert_eq "$(session_value DESKTOP_SESSION)" "mate"
+    assert_eq "$(session_value XDG_CURRENT_DESKTOP)" "MATE"
+
+    # Without the desktop, GNOME through the distribution's script.
+    rm -f "$SHIM_DIR/mate-session"
+    run_session
+    assert_eq "$(session_value ran)" "rhel-startwm" "MATE is not installed"
+    assert_file_contains "$FAKE_CALLS" "mate is not installed"
+
+    # Without xinit's Xsession, too.
+    printf 'DESKTOP=xfce\n' > "$DESKTOP_FILE"
+    rm -f /etc/X11/xinit/Xsession
+    run_session
+    assert_eq "$(session_value ran)" "rhel-startwm" "no xinit Xsession"
 }
 
 test_an_unusable_record_falls_back() {
@@ -448,7 +533,9 @@ test_install_reads_sesman_ini_as_xrdp_does
 test_install_refusals
 test_ubuntu_on_xorg
 test_otherwise_the_distribution_script_runs
-test_rhel_runs_its_own_script
+test_xfce_and_mate_on_debian
+test_rhel_runs_its_own_script_for_gnome
+test_xfce_and_mate_on_rhel
 test_an_unusable_record_falls_back
 
 echo "xrdp-startwm.sh tests passed"

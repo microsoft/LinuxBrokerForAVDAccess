@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Installs and configures the necessary packages for Linux Broker for AVD Access on Ubuntu
-# 24.04: the Ubuntu desktop, which xrdp sessions run as "Ubuntu on Xorg", and the Linux
-# Broker host agent. The Custom Script Extension runs it as root.
+# 24.04: the desktop, by default the Ubuntu desktop, which xrdp sessions run as "Ubuntu on
+# Xorg", and the Linux Broker host agent. The Custom Script Extension runs it as root.
 
 LINUXBROKER_API_BASE_URL="${1:-}"
 LINUXBROKER_API_CLIENT_ID="${2:-}"
@@ -47,7 +47,7 @@ patch_host_script="/usr/local/bin/patch-host.sh"
 xrdp_startwm_script_url="$script_source_root/linux_host/xrdp-startwm.sh"
 xrdp_startwm_script="/usr/local/bin/xrdp-startwm.sh"
 
-# Disable the GNOME screen saver and screen lock on this host. Enabled by default because a
+# Disable the screen saver and screen lock on this host. Enabled by default because a
 # locked greeter inside an xrdp session often cannot be unlocked after a reconnect, which
 # strands the host's lease. Set LINUXBROKER_DISABLE_SCREEN_LOCK=false to keep the lock screen.
 disableScreenLock="${LINUXBROKER_DISABLE_SCREEN_LOCK:-true}"
@@ -58,6 +58,19 @@ case "$disableScreenLock" in
     false|0|no|n) disableScreenLock="false" ;;
     *)
         echo "Unsupported LINUXBROKER_DISABLE_SCREEN_LOCK value: $disableScreenLock (expected true or false)"
+        exit 1
+        ;;
+esac
+
+# The desktop xrdp sessions run: gnome, the Ubuntu desktop, xfce or mate. Bicep sets
+# LINUXBROKER_DESKTOP only for xfce and mate.
+desktop="${LINUXBROKER_DESKTOP:-gnome}"
+desktop=$(printf '%s' "$desktop" | tr '[:upper:]' '[:lower:]')
+
+case "$desktop" in
+    gnome|xfce|mate) ;;
+    *)
+        echo "Unsupported LINUXBROKER_DESKTOP value: $desktop (expected gnome, xfce or mate)"
         exit 1
         ;;
 esac
@@ -117,15 +130,29 @@ apt_update
 apt_get -y --with-new-pkgs upgrade
 
 # The first-login wizard would greet every broker user, and crash reports are not collected
-# (see apport below), so gnome-initial-setup and whoopsie are left out. Firefox is a snap on
-# Ubuntu, and a snap store that cannot be reached would fail the whole install, so it is
-# installed on its own afterwards.
-desktop_packages=(ubuntu-desktop-minimal gnome-initial-setup- whoopsie-)
+# (see apport below), so gnome-initial-setup and whoopsie are left out. xrdp needs no display
+# manager, so Xfce and MATE come without LightDM, and without light-locker, which locks the
+# screen through it. xfce4-screensaver is the screen saver the host settings configure, and
+# GNOME Keyring keeps passwords for applications as it does on the other desktops. Firefox is
+# a snap on Ubuntu, and a snap store that cannot be reached would fail the whole install, so
+# it is installed on its own afterwards.
+case "$desktop" in
+    gnome)
+        desktop_packages=(ubuntu-desktop-minimal gnome-initial-setup- whoopsie-)
+        ;;
+    xfce)
+        desktop_packages=(xfce4 xfce4-goodies xfce4-screensaver xfce4-notifyd gnome-keyring libpam-gnome-keyring
+            lightdm- light-locker-)
+        ;;
+    mate)
+        desktop_packages=(mate-desktop-environment-core mate-screensaver mate-notification-daemon lightdm-)
+        ;;
+esac
 if ! dpkg-query -W -f='${Status}' firefox 2>/dev/null | grep -q 'install ok installed'; then
     desktop_packages+=(firefox-)
 fi
 
-echo "Installing the Ubuntu desktop, xrdp and the Linux Broker dependencies..."
+echo "Installing the desktop, xrdp and the Linux Broker dependencies..."
 apt_get -y install jq nfs-common dconf-cli curl wget ufw libnotify-bin x11-utils dbus-user-session \
     xrdp xorgxrdp "${desktop_packages[@]}"
 
@@ -230,13 +257,13 @@ chmod +x "$xrdp_startwm_script"
 echo "Downloaded scripts are now executable."
 
 # xrdp starts every session through xrdp-startwm.sh, which starts the desktop named here.
-echo "Configuring xrdp to start the Ubuntu desktop..."
+echo "Configuring xrdp to start the desktop..."
 mkdir -p "$(dirname "$desktop_file")"
 chmod 755 "$(dirname "$desktop_file")"
-cat > "$desktop_file" <<'EOF'
+cat > "$desktop_file" <<EOF
 # Written by the Linux Broker host bootstrap: the desktop xrdp-startwm.sh starts in every
 # xrdp session. gnome is Ubuntu on Xorg.
-DESKTOP=gnome
+DESKTOP=$desktop
 EOF
 chmod 644 "$desktop_file"
 
@@ -360,16 +387,16 @@ else
 fi
 echo "avdadmin user is created and permissioned"
 
-# Seed the Linux Broker host settings profile. This writes the dconf screen lock policy,
-# the dconf profile that makes it take effect, the release agent's settings file, and the
-# systemd drop-ins, then compiles the dconf database. LINUXBROKER_DISABLE_SCREEN_LOCK still
-# chooses the screen lock posture; from here on the values are managed from the portal and
-# the release agent converges the host to the configured profile on its next run.
+# Seed the Linux Broker host settings profile. This writes the screen lock policy for each
+# desktop, the dconf profile that makes it take effect, the release agent's settings file,
+# and the systemd drop-ins, then compiles the dconf database. LINUXBROKER_DISABLE_SCREEN_LOCK
+# still chooses the screen lock posture; from here on the values are managed from the portal
+# and the release agent converges the host to the configured profile on its next run.
 if [ "$disableScreenLock" = "true" ]; then
-    echo "Seeding host settings with the Gnome Desktop screen saver and screen lock disabled..."
+    echo "Seeding host settings with the screen saver and screen lock disabled..."
     settings_seed='{"ScreenLockEnabled":false,"DisableLockScreen":true}'
 else
-    echo "Seeding host settings with the Gnome Desktop screen lock left enabled (LINUXBROKER_DISABLE_SCREEN_LOCK=false)."
+    echo "Seeding host settings with the screen lock left enabled (LINUXBROKER_DISABLE_SCREEN_LOCK=false)."
     settings_seed='{"ScreenLockEnabled":true,"DisableLockScreen":false}'
 fi
 

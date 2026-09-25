@@ -87,8 +87,16 @@ param linuxHostSshPublicKey string = ''
 ])
 param linuxHostOsVersion string = '9-LVM'
 
-@description('Disable the GNOME screen saver and screen lock on the Linux hosts. Set to false to keep the lock screen.')
+@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Set to false to keep the lock screen.')
 param linuxHostDisableScreenLock bool = true
+
+@allowed([
+  'gnome'
+  'xfce'
+  'mate'
+])
+@description('Desktop the Linux hosts run in xrdp sessions.')
+param linuxHostDesktop string = 'gnome'
 
 param avdHostPoolName string = ''
 param avdSessionHostCount int = 0
@@ -539,6 +547,7 @@ module linuxHosts 'modules/Linux/main.bicep' = if (deployLinuxHosts && linuxHost
     linuxBrokerApiClientId: apiClientId
     scriptSourceRoot: scriptSourceRoot
     disableScreenLock: linuxHostDisableScreenLock
+    desktop: linuxHostDesktop
   }
 }
 

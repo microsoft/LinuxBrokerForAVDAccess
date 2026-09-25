@@ -186,12 +186,20 @@ The custom script extension for the AVD host:
 The custom script extensions support the following Linux distributions:
 
 - **Red Hat Enterprise Linux (RHEL) 8 and 9**
-- **Ubuntu 24.04**: Canonical's server image with the Ubuntu desktop added, which xrdp sessions run as Ubuntu on Xorg
+- **Ubuntu 24.04**: Canonical's server image, with a desktop added
+
+Each deployment chooses the desktop its hosts run with `linuxHostDesktop`:
+
+- **GNOME**, the default: the `Server with GUI` group on RHEL, and on Ubuntu the Ubuntu desktop, which xrdp sessions run as Ubuntu on Xorg
+- **Xfce**
+- **MATE**
+
+On RHEL, Xfce and MATE come from EPEL.
 
 These scripts:
 
 - **Install XRDP and xpra**: Set up XRDP for full desktop access (RDP) and xpra for application virtualization, enabling users to connect via AVD.
-- **Start the desktop**: xrdp starts every session through `xrdp-startwm.sh`, which runs the host's GNOME desktop, as Ubuntu on Xorg on Ubuntu.
+- **Start the desktop**: xrdp starts every session through `xrdp-startwm.sh`, which runs the desktop the deployment chose.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the timer-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.
 - **Install the Host Settings Agent**: Installs `apply-host-settings.sh` and seeds the settings profile, so screen lock policy and session timings are applied consistently on every supported distribution rather than only on RHEL 8. `LINUXBROKER_DISABLE_SCREEN_LOCK` still chooses the screen lock posture that is seeded; from then on the values are managed from the portal.
@@ -233,15 +241,17 @@ Administrators manage host behavior from the **Host Settings** page in the Servi
 | Watcher settle | 2 s | 0–60 | Pause after a `logind` signal before reconciling |
 | Idle timeout | 0 (disabled) | 0, or 300–86400 | Inactivity before a connected user is disconnected |
 | Idle warning lead time | 120 s | 0–900 | On-screen warning before the idle timeout, must be less than the timeout |
-| Remove the lock screen | true | boolean | Disables the Super+L shortcut and the Lock menu entry |
+| Remove the lock screen | true | boolean | Stops the screen from locking at all. On GNOME it also removes the Super+L shortcut and the Lock menu entry |
 | Screen lock enabled | false | boolean | Whether the screen locks when the screensaver activates |
 | Screen blank delay | 0 (never) | 0–86400 | Inactivity before the screen blanks |
 | Screen lock delay | 0 (immediate) | 0–86400 | Delay between blanking and locking |
-| Lock screen settings | true | boolean | Applies dconf locks so users cannot override the screen lock values |
+| Lock screen settings | true | boolean | Locks the screen lock values in dconf, and in xfconf on Xfce hosts, so users cannot override them |
 
 The session lifecycle defaults match the values that were previously hardcoded, so adopting this feature changes no behavior until an administrator edits the profile.
 
 The screen lock defaults preserve the posture set by `LINUXBROKER_DISABLE_SCREEN_LOCK`: the lock screen is removed, because a locked GNOME greeter inside an xrdp session frequently cannot be unlocked after a reconnect, which strands the host's lease. That environment variable still chooses the posture seeded at provisioning time; from then on the values are managed from the portal. Set **Screen lock enabled** on and **Remove the lock screen** off to satisfy a STIG or CIS idle-lock control.
+
+The same values apply to every desktop. Xfce and MATE count the screen blank and lock delays in whole minutes, up to 8 hours, so the blank delay is rounded up and the lock delay to the nearest minute, and Xfce sessions pick up a change when they start. **Host Settings** notes this when the fleet has Xfce or MATE hosts. See [Linux Host Screen Lock](deploy/DEPLOYMENT.md#linux-host-screen-lock) for the files each desktop reads.
 
 **Keep sessions alive during the grace period** and **Screen lock enabled** are mutually exclusive: a resumed session behind a lock screen cannot be unlocked, because users never know the password the broker sets at each checkout. Hosts that have not been updated with `deploy/Migrate-LinuxHostReleaseAgent.ps1` keep closing desktops at disconnect and show as pending in the drift table once the setting is on.
 

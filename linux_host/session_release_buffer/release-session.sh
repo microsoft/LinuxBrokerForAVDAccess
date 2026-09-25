@@ -14,6 +14,7 @@ LOCATION_PATH="/usr/local/bin"
 XORG_USERS_INFO_SCRIPT="$LOCATION_PATH/xrdp-who-xorg.sh"
 APPLY_SETTINGS_SCRIPT="$LOCATION_PATH/apply-host-settings.sh"
 SETTINGS_FILE="/etc/linuxbroker/host-settings.conf"
+DESKTOP_FILE="/etc/linuxbroker/desktop.conf"
 STATE_DIRECTORY="/var/lib/linuxbroker-release-session"
 LEASE_DIRECTORY="$STATE_DIRECTORY/leases"
 CURRENT_USERS_DETAILS="$STATE_DIRECTORY/current_users.txt"
@@ -770,18 +771,28 @@ collect_script_versions() {
     echo "$versions"
 }
 
+# The desktop sessions start, which the host bootstrap records in desktop.conf, when it is
+# installed; otherwise the first desktop found. The file is read, never sourced.
 detect_desktop() {
-    if command -v gnome-shell >/dev/null 2>&1; then
-        echo "gnome"
-    elif command -v xfce4-session >/dev/null 2>&1; then
-        echo "xfce"
-    elif command -v mate-session >/dev/null 2>&1; then
-        echo "mate"
-    elif command -v startplasma-x11 >/dev/null 2>&1; then
-        echo "kde"
-    else
-        echo "none"
+    local configured candidate
+    local -a candidates=(gnome xfce mate kde)
+    local -A commands=([gnome]=gnome-shell [xfce]=xfce4-session [mate]=mate-session [kde]=startplasma-x11)
+
+    if [ -r "$DESKTOP_FILE" ]; then
+        configured=$(sed -n 's/^[[:space:]]*DESKTOP[[:space:]]*=//p' "$DESKTOP_FILE" 2>/dev/null | tail -n 1)
+        configured=$(printf '%s' "$configured" | tr -d "\"' \t\r" | tr '[:upper:]' '[:lower:]')
+        case "$configured" in
+            gnome|xfce|mate) candidates=("$configured" "${candidates[@]}") ;;
+        esac
     fi
+
+    for candidate in "${candidates[@]}"; do
+        if command -v "${commands[$candidate]}" >/dev/null 2>&1; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "none"
 }
 
 detect_xrdp_version() {

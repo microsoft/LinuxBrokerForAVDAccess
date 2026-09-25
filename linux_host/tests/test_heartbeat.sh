@@ -65,6 +65,7 @@ heartbeat_for_script() {
     hostname="testhost"
     SETTINGS_VERSION=7
     RUN_MODE="systemd-timer"
+    DESKTOP_FILE="$WORK_DIR/desktop-$label.conf"
     mkdir -p "$STATE_DIRECTORY" "$bin"
     : > "$LOG_FILE"
 
@@ -91,6 +92,22 @@ heartbeat_for_script() {
     assert_json "$payload" '.memoryTotalMb > 0 and .cpuCount >= 1 and (.loadAverage | type) == "number"' "$label resources"
     assert_json "$payload" '.rootDiskFreePct >= 0 and .rootDiskFreePct <= 100 and .uptimeSeconds >= 0' "$label disk and uptime"
     assert_json "$payload" '.sessions | length == 1' "$label sessions"
+
+    # The desktop desktop.conf names is reported when it is installed. The file is never
+    # sourced.
+    printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/gnome-shell"
+    printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/xfce4-session"
+    chmod 755 "$SHIM_DIR/gnome-shell" "$SHIM_DIR/xfce4-session"
+    assert_eq "$(detect_desktop)" "gnome" "$label without desktop.conf"
+    printf '# Written by the bootstrap.\nDESKTOP="XFCE"\n' > "$DESKTOP_FILE"
+    assert_eq "$(detect_desktop)" "xfce" "$label desktop.conf"
+    printf 'DESKTOP=mate\n' > "$DESKTOP_FILE"
+    assert_eq "$(detect_desktop)" "gnome" "$label desktop.conf names a desktop that is not installed"
+    # shellcheck disable=SC2016 # the command must reach the file unexpanded
+    printf 'DESKTOP=$(touch %s/pwned)\n' "$WORK_DIR" > "$DESKTOP_FILE"
+    assert_eq "$(detect_desktop)" "gnome" "$label unusable desktop.conf"
+    assert_not_exists "$WORK_DIR/pwned"
+    rm -f "$SHIM_DIR/gnome-shell" "$SHIM_DIR/xfce4-session" "$DESKTOP_FILE"
 
     # A wedged X server cannot stall the run: the idle lookup gives up after the probe timeout
     # and the session is reported without an idle time.

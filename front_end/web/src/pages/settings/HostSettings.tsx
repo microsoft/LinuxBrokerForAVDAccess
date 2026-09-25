@@ -16,9 +16,16 @@ import {
 import { GlassCard } from '../../components/ui/GlassCard';
 import { RelativeTime } from '../../components/ui/RelativeTime';
 import { useToast } from '../../components/ui/Toast';
-import { useApplyHostSettings, useHostSettings, useHostSettingsHistory, useSaveHostSettings } from '../../hooks/useBroker';
+import {
+  useApplyHostSettings,
+  useFleetHealth,
+  useHostSettings,
+  useHostSettingsHistory,
+  useSaveHostSettings,
+} from '../../hooks/useBroker';
 import { useCan } from '../../hooks/useSession';
 import { errorMessage } from '../../lib/api';
+import { minuteDesktops } from '../../lib/desktops';
 import { valueOrDash } from '../../lib/format';
 import { settingsHistoryChanges } from '../../lib/settingsDiff';
 import type { HostSettings, Vm } from '../../types/broker';
@@ -107,6 +114,8 @@ export function HostSettingsPage() {
   const { data, isPending, error } = useHostSettings();
   const saveSettings = useSaveHostSettings();
   const applySettings = useApplyHostSettings();
+  // Only for the note on desktops that count in minutes, so a failure just leaves it out.
+  const fleetHealth = useFleetHealth();
   const can = useCan();
 
   const [form, setForm] = useState<FormState | null>(null);
@@ -128,6 +137,7 @@ export function HostSettingsPage() {
   }
 
   const settings = data.settings;
+  const minuteDesktopNames = minuteDesktops(fleetHealth.data?.Hosts ?? []);
 
   function setValue(key: string, value: string | boolean) {
     setForm((current) => (current ? { ...current, [key]: value } : current));
@@ -277,9 +287,19 @@ export function HostSettingsPage() {
               {SCREEN_FIELDS.map(numberField)}
             </div>
 
+            {minuteDesktopNames.length > 0 ? (
+              <Notice tone="info">
+                {minuteDesktopNames.join(' and ')} hosts count these delays in whole minutes, up to 8
+                hours: the blank delay rounds up and the lock delay rounds to the nearest minute.
+                {minuteDesktopNames.includes('Xfce')
+                  ? ' On Xfce, a change reaches the sessions that start after it.'
+                  : null}
+              </Notice>
+            ) : null}
+
             <Checkbox
               label="Prevent users from changing these screen lock settings"
-              help="Applies dconf locks so the values above cannot be overridden inside a session."
+              help="Locks the values above so they cannot be overridden inside a session."
               checked={boolValue('ScreenLockSettingsLocked')}
               onChange={(checked) => setValue('ScreenLockSettingsLocked', checked)}
             />

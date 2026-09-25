@@ -332,22 +332,32 @@ configured_desktop() {
     esac
 }
 
-# Starts the desktop through Debian's Xsession, after the same profiles xrdp's own script
-# reads. Returns when the desktop is not installed.
-start_debian_desktop() {
-    local startup
+DESKTOP_STARTUP=""
 
+# Exports what a display manager sets for the desktop and keeps the command that starts it in
+# DESKTOP_STARTUP. Fails, changing nothing, when the desktop is not installed.
+prepare_desktop() {
     case "$1" in
         gnome)
             command -v gnome-session >/dev/null 2>&1 || return 1
             if [ -f "$UBUNTU_SESSION_FILE" ]; then
                 # What GDM sets for "Ubuntu on Xorg": Ubuntu's session, theme and dock.
                 export DESKTOP_SESSION=ubuntu XDG_SESSION_DESKTOP=ubuntu XDG_CURRENT_DESKTOP=ubuntu:GNOME GNOME_SHELL_SESSION_MODE=ubuntu
-                startup="gnome-session --session=ubuntu"
+                DESKTOP_STARTUP="gnome-session --session=ubuntu"
             else
                 export DESKTOP_SESSION=gnome XDG_SESSION_DESKTOP=gnome XDG_CURRENT_DESKTOP=GNOME
-                startup="gnome-session"
+                DESKTOP_STARTUP="gnome-session"
             fi
+            ;;
+        xfce)
+            command -v startxfce4 >/dev/null 2>&1 || return 1
+            export DESKTOP_SESSION=xfce XDG_SESSION_DESKTOP=xfce XDG_CURRENT_DESKTOP=XFCE
+            DESKTOP_STARTUP="startxfce4"
+            ;;
+        mate)
+            command -v mate-session >/dev/null 2>&1 || return 1
+            export DESKTOP_SESSION=mate XDG_SESSION_DESKTOP=mate XDG_CURRENT_DESKTOP=MATE
+            DESKTOP_STARTUP="mate-session"
             ;;
         *)
             return 1
@@ -356,12 +366,24 @@ start_debian_desktop() {
 
     # gnome-session starts the X11 flavor of its systemd units from this.
     export XDG_SESSION_TYPE=x11
-    log_session "Starting $1 for $(id -un 2>/dev/null) with: $startup"
+    log_session "Starting $1 for $(id -un 2>/dev/null) with: $DESKTOP_STARTUP"
+}
+
+# Starts the desktop through Debian's Xsession, after the same profiles xrdp's own script
+# reads.
+start_debian_desktop() {
     # shellcheck disable=SC2016 # expanded by the inner shell
     exec /bin/sh -c 'linuxbroker_startup=$1
 if test -r /etc/profile; then . /etc/profile; fi
 if test -r "$HOME/.profile"; then . "$HOME/.profile"; fi
-exec /etc/X11/Xsession "$linuxbroker_startup"' linuxbroker-startwm "$startup"
+exec /etc/X11/Xsession "$linuxbroker_startup"' linuxbroker-startwm "$DESKTOP_STARTUP"
+}
+
+# Starts the desktop through the xinit Xsession of RHEL and its rebuilds, from a login shell as
+# xrdp's own startwm-bash.sh does, so the same profiles are read.
+start_xinit_desktop() {
+    # shellcheck disable=SC2016 # expanded by the inner shell
+    exec /bin/bash -l -c 'exec /etc/X11/xinit/Xsession "$1"' linuxbroker-startwm "$DESKTOP_STARTUP"
 }
 
 run_original() {
@@ -384,11 +406,19 @@ run_original() {
 }
 
 start_session() {
-    local desktop
+    local desktop starter=""
 
     desktop=$(configured_desktop)
-    if [ -n "$desktop" ] && [ -d /etc/X11/Xsession.d ] && [ -x /etc/X11/Xsession ]; then
-        start_debian_desktop "$desktop"
+    if [ -n "$desktop" ]; then
+        if [ -d /etc/X11/Xsession.d ] && [ -x /etc/X11/Xsession ]; then
+            starter=start_debian_desktop
+        elif [ "$desktop" != "gnome" ] && [ -x /etc/X11/xinit/Xsession ]; then
+            # GNOME is what the distribution's own script starts on RHEL.
+            starter=start_xinit_desktop
+        fi
+    fi
+    if [ -n "$starter" ]; then
+        prepare_desktop "$desktop" && "$starter"
         log_session "$desktop is not installed, so the distribution's session script is used."
     fi
     run_original

@@ -1056,6 +1056,7 @@ Ensure-DefaultEnvValue -Key 'linuxHostSshPublicKey' -ValueFactory { Get-AzdEnvVa
 Ensure-DefaultEnvValue -Key 'linuxHostSshPrivateKey' -ValueFactory { Get-AzdEnvValue -Key 'LINUX_HOST_SSH_PRIVATE_KEY' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostOsVersion' -ValueFactory { '9-LVM' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostDisableScreenLock' -ValueFactory { 'true' } | Out-Null
+Ensure-DefaultEnvValue -Key 'linuxHostDesktop' -ValueFactory { 'gnome' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostVmSize' -ValueFactory { 'Standard_D2s_v5' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdVmSize' -ValueFactory { 'Standard_D8s_v5' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdMaxSessionLimit' -ValueFactory { '5' } | Out-Null
@@ -1236,6 +1237,7 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostAuthType' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostAuthType')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostOsVersion' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostOsVersion')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostDisableScreenLock' -Value (ConvertTo-BoolParameterValue -Key 'linuxHostDisableScreenLock' -DefaultValue $true)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostDesktop' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostDesktop').Trim().ToLowerInvariant()
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdHostPoolName' -Value (Get-RequiredAzdEnvValue -Key 'avdHostPoolName')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdSessionHostCount' -Value (ConvertTo-IntParameterValue -Key 'avdSessionHostCount')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdMaxSessionLimit' -Value (ConvertTo-IntParameterValue -Key 'avdMaxSessionLimit' -DefaultValue 5)

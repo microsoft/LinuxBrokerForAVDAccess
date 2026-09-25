@@ -33,12 +33,23 @@ param OSVersion string
 @description('Root URL the host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds.')
 param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
 
-@description('Disable the GNOME screen saver and screen lock on the Linux hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
+@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
 param disableScreenLock bool = true
+
+@allowed([
+  'gnome'
+  'xfce'
+  'mate'
+])
+@description('Desktop the hosts run in xrdp sessions. Changing it changes the extension command, which runs the bootstrap again on existing hosts.')
+param desktop string = 'gnome'
 
 var normalizedScriptSourceRoot = endsWith(scriptSourceRoot, '/') ? take(scriptSourceRoot, length(scriptSourceRoot) - 1) : scriptSourceRoot
 var bootstrapArgs = '"${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
-var bootstrapEnv = 'LINUXBROKER_SCRIPT_SOURCE_ROOT="${normalizedScriptSourceRoot}" LINUXBROKER_DISABLE_SCREEN_LOCK="${disableScreenLock ? 'true' : 'false'}"'
+// GNOME is what the bootstrap installs without LINUXBROKER_DESKTOP, so leaving the variable out
+// keeps the extension command, and with it existing hosts, unchanged.
+var desktopEnv = desktop == 'gnome' ? '' : ' LINUXBROKER_DESKTOP="${desktop}"'
+var bootstrapEnv = 'LINUXBROKER_SCRIPT_SOURCE_ROOT="${normalizedScriptSourceRoot}" LINUXBROKER_DISABLE_SCREEN_LOCK="${disableScreenLock ? 'true' : 'false'}"${desktopEnv}'
 
 var vmNames = [for i in range(1, numberOfVMs): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
 var adminCredentials = authType == 'Password' ? {

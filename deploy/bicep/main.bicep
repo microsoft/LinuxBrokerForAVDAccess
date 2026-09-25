@@ -150,8 +150,16 @@ param linuxHostSshPublicKey string = ''
 @description('Linux host OS image SKU.')
 param linuxHostOsVersion string = '9-LVM'
 
-@description('Disable the GNOME screen saver and screen lock on the Linux hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
+@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
 param linuxHostDisableScreenLock bool = true
+
+@allowed([
+  'gnome'
+  'xfce'
+  'mate'
+])
+@description('Desktop the Linux hosts run in xrdp sessions: gnome (the RHEL Server with GUI group, or the Ubuntu desktop), xfce or mate. Changing it on existing hosts runs their bootstrap again at the next provision, so drain them first.')
+param linuxHostDesktop string = 'gnome'
 
 @description('AVD host pool name.')
 param avdHostPoolName string = ''
@@ -235,6 +243,7 @@ module resources 'main.resources.bicep' = {
     linuxHostSshPublicKey: linuxHostSshPublicKey
     linuxHostOsVersion: linuxHostOsVersion
     linuxHostDisableScreenLock: linuxHostDisableScreenLock
+    linuxHostDesktop: linuxHostDesktop
     avdHostPoolName: avdHostPoolName
     avdSessionHostCount: avdSessionHostCount
     avdMaxSessionLimit: avdMaxSessionLimit

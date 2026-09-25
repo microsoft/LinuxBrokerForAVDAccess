@@ -48,7 +48,7 @@ xrdp_startwm_script="/usr/local/bin/xrdp-startwm.sh"
 arch=$( /bin/arch )
 remoteAccessTool="both"  # Options: "xrdp", "xpra", or "both"
 
-# Disable the GNOME screen saver and screen lock on this host. Enabled by default because a
+# Disable the screen saver and screen lock on this host. Enabled by default because a
 # locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which
 # strands the host's lease. Set LINUXBROKER_DISABLE_SCREEN_LOCK=false to keep the lock screen.
 disableScreenLock="${LINUXBROKER_DISABLE_SCREEN_LOCK:-true}"
@@ -59,6 +59,19 @@ case "$disableScreenLock" in
     false|0|no|n) disableScreenLock="false" ;;
     *)
         echo "Unsupported LINUXBROKER_DISABLE_SCREEN_LOCK value: $disableScreenLock (expected true or false)"
+        exit 1
+        ;;
+esac
+
+# The desktop xrdp sessions run: gnome, the Server with GUI group, or xfce or mate, both from
+# EPEL. Bicep sets LINUXBROKER_DESKTOP only for xfce and mate.
+desktop="${LINUXBROKER_DESKTOP:-gnome}"
+desktop=$(printf '%s' "$desktop" | tr '[:upper:]' '[:lower:]')
+
+case "$desktop" in
+    gnome|xfce|mate) ;;
+    *)
+        echo "Unsupported LINUXBROKER_DESKTOP value: $desktop (expected gnome, xfce or mate)"
         exit 1
         ;;
 esac
@@ -124,8 +137,27 @@ sudo dnf install -y wget util-linux azure-cli xorgxrdp nfs-utils curl jq dconf
 echo "Installing idle detection support..."
 sudo dnf install -y xprintidle || echo "xprintidle is unavailable. Idle session enforcement will be skipped on this host."
 
-echo "Installing 'Server with GUI' group..."
-sudo dnf groupinstall -y "Server with GUI"
+case "$desktop" in
+    gnome)
+        echo "Installing 'Server with GUI' group..."
+        sudo dnf groupinstall -y "Server with GUI"
+        ;;
+    xfce)
+        # GDM is left out, as it brings GNOME Shell with it and xrdp needs no display manager.
+        # xfce4-screensaver is the screen saver the host settings configure, and GNOME Keyring
+        # keeps passwords for applications as it does on the other desktops.
+        echo "Installing the Xfce desktop..."
+        sudo dnf install -y --exclude=gdm @base-x @xfce-desktop xfce4-screensaver xfce4-notifyd \
+            gnome-keyring gnome-keyring-pam
+        ;;
+    mate)
+        echo "Installing the MATE desktop..."
+        sudo dnf install -y @base-x mate-session-manager mate-panel marco caja mate-settings-daemon \
+            mate-control-center mate-terminal mate-screensaver mate-notification-daemon mate-polkit \
+            mate-power-manager mate-desktop mate-menus mate-themes mate-icon-theme mate-backgrounds \
+            mate-media pluma atril eom engrampa
+        ;;
+esac
 
 case "$remoteAccessTool" in
     "xrdp"|"xpra"|"both")
@@ -259,15 +291,15 @@ sudo chmod +x "$patch_host_script"
 sudo chmod +x "$xrdp_startwm_script"
 echo "Downloaded scripts are now executable."
 
-# xrdp starts every session through xrdp-startwm.sh, which starts the desktop named here.
-# On RHEL that is the distribution's own session script, as before.
+# xrdp starts every session through xrdp-startwm.sh, which starts the desktop named here. For
+# GNOME that is the distribution's own session script, as before.
 echo "Configuring xrdp to start sessions through xrdp-startwm.sh..."
 sudo mkdir -p "$(dirname "$desktop_file")"
 sudo chmod 755 "$(dirname "$desktop_file")"
-cat <<'EOF' | sudo tee "$desktop_file" >/dev/null
+cat <<EOF | sudo tee "$desktop_file" >/dev/null
 # Written by the Linux Broker host bootstrap: the desktop xrdp-startwm.sh starts in every
 # xrdp session.
-DESKTOP=gnome
+DESKTOP=$desktop
 EOF
 sudo chmod 644 "$desktop_file"
 
@@ -386,16 +418,16 @@ else
 fi
 echo "avdadmin user is created and permissioned"
 
-# Seed the Linux Broker host settings profile. This writes the dconf screen lock policy,
-# the dconf profile that makes it take effect, the release agent's settings file, and the
-# systemd drop-ins, then compiles the dconf database. LINUXBROKER_DISABLE_SCREEN_LOCK still
-# chooses the screen lock posture; from here on the values are managed from the portal and
-# the release agent converges the host to the configured profile on its next run.
+# Seed the Linux Broker host settings profile. This writes the screen lock policy for each
+# desktop, the dconf profile that makes it take effect, the release agent's settings file,
+# and the systemd drop-ins, then compiles the dconf database. LINUXBROKER_DISABLE_SCREEN_LOCK
+# still chooses the screen lock posture; from here on the values are managed from the portal
+# and the release agent converges the host to the configured profile on its next run.
 if [ "$disableScreenLock" = "true" ]; then
-    echo "Seeding host settings with the Gnome Desktop screen saver and screen lock disabled..."
+    echo "Seeding host settings with the screen saver and screen lock disabled..."
     settings_seed='{"ScreenLockEnabled":false,"DisableLockScreen":true}'
 else
-    echo "Seeding host settings with the Gnome Desktop screen lock left enabled (LINUXBROKER_DISABLE_SCREEN_LOCK=false)."
+    echo "Seeding host settings with the screen lock left enabled (LINUXBROKER_DISABLE_SCREEN_LOCK=false)."
     settings_seed='{"ScreenLockEnabled":true,"DisableLockScreen":false}'
 fi
 
