@@ -162,11 +162,13 @@ def test_user_host_history_comes_from_the_temporal_table(conn):
     first = add_vm(conn, "hist-1")
     second = add_vm(conn, "hist-2", power="Off", net="Unreachable")
 
-    checkout(conn, "gina")
-    # A temporal query leaves out a row version whose period starts and ends at the same
-    # instant. The period comes from each transaction's start time, so a checkout and a return
-    # within one clock tick, as on a fast CI runner, would erase hist-1 from the history.
+    # A temporal query leaves out a row version whose period starts and ends at the same instant,
+    # and pymssql begins each transaction as the previous one commits. The version that holds
+    # gina on hist-1 therefore runs from the commit before her checkout to the checkout's own
+    # commit; on a fast CI runner both can fall in one clock tick and hist-1 drops out of her
+    # history. Pausing before the checkout keeps them apart.
     time.sleep(0.05)
+    checkout(conn, "gina")
     returned = exec_sql(conn, "EXEC dbo.ReturnVm @VMID=%s", (first,))
     assert returned and returned[0].get("ReturnedUsername") == "gina"
     exec_sql(conn, "EXEC dbo.CompleteVmCleanup @VMID=%s, @LeaseId=%s, @Username=%s",
