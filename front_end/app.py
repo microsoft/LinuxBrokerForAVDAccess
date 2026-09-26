@@ -30,7 +30,7 @@ from route_maintenance import register_route_maintenance
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('FLASK_KEY')
 app.config['SESSION_TYPE'] = 'filesystem'
-app.config['VERSION'] = '0.120'
+app.config['VERSION'] = '0.121'
 # Tokens stay valid for the life of the session rather than expiring after an
 # hour, so a long-lived management page does not start rejecting submissions.
 app.config['WTF_CSRF_TIME_LIMIT'] = None

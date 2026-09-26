@@ -502,6 +502,10 @@ restarts in 10 minutes"). It reuses the `notify-send`/`xmessage` path in
 
 ## Phase 3: operating system and desktop support
 
+**Status: Done, except the 3.5 spike.** Items 3.1–3.4, 3.6 and 3.7 shipped together, with host
+agent 1.2.0. Each has a **Shipped** note on where it differs from the design below it, and 3.8
+lists what the validation left open.
+
 ### 3.0 Support matrix
 
 | Target | Today | Target state |
@@ -514,6 +518,12 @@ restarts in 10 minutes"). It reuses the `notify-send`/`xmessage` path in
 | Ubuntu 26.04 | Not offered. GNOME is Wayland-only (Ubuntu 25.10 dropped "Ubuntu on Xorg", and GNOME 49 removed X11). Xorg remains for other desktops. | XFCE/MATE with xrdp (3.2), or the 3.5 backend |
 | Rocky / Alma 9 | Not offered | Optional (3.7) |
 
+**After Phase 3.** RHEL 7 is gone (3.3). RHEL 8 and 9, Rocky Linux 9 and AlmaLinux 9 (3.7), and
+Ubuntu 24.04 (3.1) each run GNOME, Xfce or MATE (3.2), and RHEL 9 is the default. The validation
+covered Xfce and MATE on RHEL 9 and Ubuntu, and GNOME on every distribution except Rocky. RHEL 10
+still needs the 3.5 backend. Ubuntu 26.04 could run Xfce or MATE on Xorg, but isn't offered yet
+(3.8).
+
 The current design depends on **Xorg** in three places:
 - xrdp's `xorgxrdp` backend.
 - Session inspection: `xrdp-who-xorg.sh` uses `ps -C Xorg` and the `xrdp_display` sockets.
@@ -524,7 +534,39 @@ Xorg, or a different remoting stack.
 
 ### 3.1 Ubuntu 24.04 as a real desktop target
 
-**Status: Planned** · no dependencies
+**Status: Done** · no dependencies
+
+**Shipped.** The default `linuxHostOsVersion` is `9-LVM`, `Configure-Ubuntu24_desktop-Host.sh`
+installs a desktop, and one release agent serves every distribution. Where it differs from the
+design below:
+
+- `24_04-lts` keeps its name and still maps to Canonical's server image, and the bootstrap adds
+  `ubuntu-desktop-minimal`. There is no `24_04-desktop` value.
+- A session launcher, `linux_host/xrdp-startwm.sh`, replaces editing `startwm.sh`. The bootstrap
+  and the host migration make it xrdp-sesman's `DefaultWindowManager` on every distribution. It
+  starts the desktop named in `/etc/linuxbroker/desktop.conf`, which for GNOME on Ubuntu is
+  Ubuntu's session on Xorg, unlocks the login keyring (3.4), and puts `/etc/linuxbroker/xdg`
+  ahead of `/etc/xdg`. Without `desktop.conf`, as on a migrated host, it runs the distribution's
+  own script.
+- The launcher's `--install` also adds the polkit rule for the color-profile and PackageKit
+  refresh prompts (`45-linuxbroker-xrdp.rules`), so every distribution gets it.
+- The bootstrap leaves out the first-login wizard and whoopsie, disables apport and hides update
+  notifications from broker users. GNOME 40's welcome tour, which RHEL 9 and AlmaLinux 9 showed
+  at first login, is marked as seen too. Firefox installs on its own, so an unreachable Snap
+  Store can't fail the host, and the snap works with the NFS home (3.4), so Mozilla's APT
+  repository isn't needed.
+- The bootstrap no longer adds Microsoft's package repository or the Azure CLI. That repository
+  has no `azure-cli` package for 24.04, so the old bootstrap's package install failed, and
+  existing Ubuntu hosts lack `nfs-common`, `jq` and `dconf-cli`. They must be replaced or
+  bootstrapped again.
+- `ubuntu-desktop-minimal` brings NetworkManager and a netplan file that hands every interface to
+  it. The next restart of `systemd-networkd`, which needrestart did when the Defender for Endpoint
+  extension installed a package, left the host off the network until it rebooted. The bootstrap
+  now keeps networkd as netplan's renderer. The cost is that GNOME shows no network indicator
+  (3.8).
+- Broker users get `/bin/bash` instead of Ubuntu's default `/bin/sh`.
+- `Migrate-LinuxHostReleaseAgent.ps1` failed on every Ubuntu host: Run Command starts a script
+  without a `#!` line with dash, which stopped at `set -o pipefail`. It now declares bash.
 
 **Quick win, do it first:** change the Bicep default `linuxHostOsVersion` from `24_04-lts`
 to `9-LVM` until Ubuntu is complete. Today a default `azd up` with Linux hosts produces
@@ -556,7 +598,24 @@ the AVD RemoteApp, and passes the 3.4 checklist.
 
 ### 3.2 Desktop environment choice
 
-**Status: Planned** · after 3.1
+**Status: Done** · after 3.1
+
+**Shipped.** `linuxHostDesktop` (`gnome`, `xfce` or `mate`) for every bootstrap, MATE and Xfce
+branches in `apply-host-settings.sh`, and a note on **Host Settings** when the fleet runs Xfce or
+MATE. Where it differs from the design below:
+
+- MATE is offered on every distribution, as Xfce is. The bootstrap records the desktop in
+  `/etc/linuxbroker/desktop.conf`, and the session launcher (3.1) starts it.
+- MATE takes the screen lock policy from dconf (`org.mate.screensaver`, and
+  `org.mate.lockdown disable-lock-screen`), and Xfce from xfconf system defaults with kiosk locks.
+  Both count the blank and lock delays in whole minutes, up to 8 hours, and Xfce sessions read a
+  change only when they start.
+- Ubuntu MATE's panel uses MATE's own `default` layout. The Ubuntu MATE layout, which Ubuntu's
+  MATE settings package makes the default, needs three applets the core MATE packages leave out,
+  so every new user was asked to delete three broken applets.
+- With `gnome`, the extension command is unchanged, so hosts that keep the default see no change.
+- Measured in 3.4, a session used 0.6–0.9 GB of memory with Xfce or MATE, 1.5–2.1 GB with GNOME,
+  and 2.8–3.0 GB with GNOME and Firefox open.
 
 **Why.** GNOME Shell under xrdp renders in software (llvmpipe) and costs a lot of CPU per
 session. XFCE and MATE are native X11 desktops: much lighter, and not affected by GNOME's
@@ -573,7 +632,11 @@ move away from X11. That matters even more with multi-session hosts (4.3).
 
 ### 3.3 Retire RHEL 7
 
-**Status: Planned** · no dependencies
+**Status: Done** · no dependencies
+
+**Shipped** as designed. An azd environment that still stores `7-LVM` fails template validation at
+the next `azd provision`, even with `deployLinuxHosts=false`, so the upgrade notes say to change
+it first. `patch-host.sh` and the host migration still support existing RHEL 7 hosts.
 
 Remove `7-LVM` from `deploy/bicep/main.bicep`, `main.resources.bicep`, `modules/Linux/main.bicep`
 and the regenerated `main.json`. Delete `custom_script_extensions/Configure-RHEL7-Host.sh`
@@ -582,7 +645,43 @@ but new deployments can't choose it.
 
 ### 3.4 GNOME validation and the login keyring
 
-**Status: Planned** · run it on the RHEL 9 fleet now, and on Ubuntu after 3.1
+**Status: Done** · after 3.1; the checks that need `mstsc` are open in 3.8
+
+**Shipped.** The checklist ran on GNOME, Xfce and MATE on Ubuntu 24.04 and RHEL 9, and on GNOME
+on RHEL 8 and AlmaLinux 9, with FreeRDP 3.31 as the RDP client. Each item below notes its result.
+It confirmed that nothing unlocked a login keyring at sign-in, and the keyring now unlocks with
+a variant of option 1:
+
+- The account password still changes at every checkout. Instead, the broker keeps a random key
+  for each user, the secret `keyring-<uid>` in a second Key Vault that holds nothing else, and
+  the API has write access to that vault only. The API creates the key at the user's first
+  checkout and sends it to the host with the password.
+- `create-user.sh` writes the key to `/run/linuxbroker-keyring/<user>`, which is in memory and
+  readable only by the user. Releasing the lease removes it.
+- The session launcher (3.1) unlocks the login keyring with the key before the desktop starts, or
+  creates the keyring at first sign-in. It then checks over D-Bus that the keyring is unlocked,
+  because `gnome-keyring-daemon --unlock` succeeds even with the wrong key.
+- A keyring the key doesn't open, such as one a user created with a password of their own before
+  the upgrade, is moved to `~/.local/share/linuxbroker/keyring-backup/` and replaced.
+- An applied profile reset writes a new version of the key. The older versions stay, so the
+  keyring kept with the old profile can still be opened.
+- The keyring never blocks a sign-in. Without a key, the desktop starts with the keyring locked,
+  as it did before.
+- No PAM file changes. Neither family has `pam_gnome_keyring` in xrdp-sesman's stack, and
+  `chpasswd` runs as root without the old password, so the module couldn't re-key a keyring.
+
+The validation also found four agent faults, fixed in the same release:
+
+- The idle timeout had never disconnected anyone, on any distribution: the agent looked for the
+  xrdp connection by a socket path that `ss` prints only for the X server's end. It now follows
+  the socket's peer.
+- A resumed session was disconnected again at once, because the X server's idle counter runs on
+  while no one is connected. Idle time now counts from no earlier than the current connection.
+- Tracker crawled the roaming homes. On RHEL 9 it restarted every 13 seconds on an index that
+  Ubuntu's newer Tracker had written, reading about 0.6 MB/s from the share. Hosts now mask the
+  Tracker and LocalSearch user services and hide their autostart entries.
+- When a grace period expired, the agent logged an error because the Xorg it had just killed was
+  still exiting. It now waits up to five seconds.
 
 **Why.** Every checkout sets a **new random password** (`generate_secure_password()` then
 `chpasswd` in `api/app.py`), and the home directory roams on NFS. GNOME Keyring encrypts the
@@ -592,25 +691,52 @@ libsecret apps would then prompt for a password the user never knew. This needs
 confirming on a real host.
 
 **Test checklist** (per distribution and desktop):
-- [ ] With **Keep sessions alive during the grace period** on (Phase 1, off by default):
+- [x] With **Keep sessions alive during the grace period** on (Phase 1, off by default):
       disconnect and reconnect within grace resumes the same desktop, including from a
       different AVD host. An idle disconnect resumes. At grace expiry the session and Xorg
       are gone and cleanup completes. Memory held by disconnected sessions stays within
       the VM size.
-- [ ] First login; second login on a *different* host; keyring unlock prompts.
-- [ ] Browser: the Firefox snap (Ubuntu) and Flatpak (RHEL 10+) behave with an NFS home.
+      **Result.** Passed, including from a second AVD host and with Firefox open. The idle
+      disconnect needed the two idle fixes above. Hosts with disconnected sessions used 1.2 to
+      3.5 GB of their 7.6 GB.
+- [x] First login; second login on a *different* host; keyring unlock prompts.
+      **Result.** Passed with the keyring key on RHEL 8, RHEL 9 and Ubuntu GNOME, with no
+      prompts. Secrets stored on Ubuntu were readable on RHEL 9, and the other way round.
+- [x] Browser: the Firefox snap (Ubuntu) and Flatpak (RHEL 10+) behave with an NFS home.
       Profile lock after an unclean disconnect.
-- [ ] Disconnect, then reconnect inside the grace period and resume the same session.
-- [ ] Reconnect after the grace period expires: a fresh session with the profile intact.
-- [ ] The idle warning appears, and the idle disconnect preserves the session.
+      **Result.** The Firefox snap works with the NFS home. Firefox killed on AlmaLinux reopened
+      on RHEL 9 with its tabs and no "already running" prompt, because NFS 4.1 released the
+      lock. Flatpak waits for RHEL 10 (3.5).
+- [x] Disconnect, then reconnect inside the grace period and resume the same session.
+      **Result.** Passed: the same X server, windows and unlocked keyring.
+- [x] Reconnect after the grace period expires: a fresh session with the profile intact.
+      **Result.** Passed. Both test users landed on a different host, with the keyring unlocked
+      and their secrets intact.
+- [x] The idle warning appears, and the idle disconnect preserves the session.
+      **Result.** The warning appeared on Ubuntu, and after the idle fixes the disconnect kept
+      the session. RHEL, Rocky and AlmaLinux have no `xprintidle`, so they neither warn nor
+      disconnect (3.8).
 - [ ] Clipboard in both directions, audio, resolution change, multi-monitor, full screen.
-- [ ] Screen lock posture matches the Host Settings profile, and lock after reconnect.
-- [ ] GNOME Tracker/LocalSearch and other indexers aren't crawling the NFS home.
-- [ ] `~/.cache` size and I/O on NFS during normal use (feeds 4.6).
-- [ ] Log off cleans up: the account is removed, the home is unmounted, and the profile on
+      **Result.** The clipboard works both ways on every desktop. The rest needs `mstsc`
+      (3.8): resizing the window works on RHEL 9 but drops FreeRDP 3.31 on Ubuntu (xrdp
+      0.9.24, neutrinolabs/xrdp#3877), RDP audio can work only on Ubuntu GNOME, and the test
+      client can't show several monitors.
+- [x] Screen lock posture matches the Host Settings profile, and lock after reconnect.
+      **Result.** Passed on every desktop, with the default profile and with a STIG-style one
+      that locks after 60 idle seconds. A resumed session was checked only with the lock off.
+      A session that is already idle needs one input before a new idle delay applies.
+- [x] GNOME Tracker/LocalSearch and other indexers aren't crawling the NFS home.
+      **Result.** Failed, then fixed (see above). With the fix, no indexer runs, and an idle
+      session moves at most 208 bytes over NFS in a minute.
+- [x] `~/.cache` size and I/O on NFS during normal use (feeds 4.6).
+      **Result.** 1.3 to 19 MB per user. With no indexer, I/O is only what the user's
+      applications do.
+- [x] Log off cleans up: the account is removed, the home is unmounted, and the profile on
       the share is intact.
+      **Result.** Passed, from the desktop's own log-off on Xfce and GNOME.
 
-**Keyring fix options** (decide after testing):
+**Keyring fix options.** The first was chosen, with a key that is separate from the password;
+see **Shipped** above.
 1. A stable per-user secret instead of a password rotated at every checkout. Store it in
    Key Vault keyed by `VmUsers.uid`, and rotate it only on profile reset. This is the
    simplest, but it changes the credential model.
@@ -647,7 +773,13 @@ work is estimated as a follow-up item.
 
 ### 3.6 xpra application mode
 
-**Status: Planned (decision)**
+**Status: Done (removed)**
+
+**Shipped.** xpra is removed. New hosts don't install it and allow only SSH and RDP, and
+`Migrate-LinuxHostReleaseAgent.ps1` removes xpra's repository, packages and signing key from
+existing hosts and closes TCP 443. `Connect-LinuxBroker.ps1` opens the desktop whatever `-Mode`
+it gets and logs a warning for any value other than `desktop`, so a RemoteApp that passes one
+still works. Publishing single Linux applications is a follow-up (3.8).
 
 `avd_host/broker/Connect-LinuxBroker.ps1` accepts an application name for xpra mode, but
 the branch is a stub (`# Add XPRA command`). The host scripts still install xpra from
@@ -660,10 +792,51 @@ applications". Either:
 
 ### 3.7 Rocky Linux and AlmaLinux 9 (optional)
 
+**Status: Done** · no dependencies
+
+**Shipped.** `linuxHostOsVersion` accepts `rocky-9` and `alma-9`, and both run
+`Configure-RHEL9-Host.sh`. Where it differs from the design below:
+
+- The bootstrap reads the distribution from `os-release`. On Rocky and AlmaLinux it skips
+  subscription registration, enables CRB, installs EPEL from the distribution's own
+  `epel-release` package, and installs firewalld, which their Azure images leave out.
+- Both get the 64 GB OS disk RHEL hosts have, because their images are 10 GB and 30 GB.
+- Rocky's image is a free Marketplace offer with a purchase plan. Preprovision accepts its terms,
+  but the subscription must also be allowed to buy Marketplace offers, so `DEPLOYMENT.md`
+  recommends `alma-9` where it isn't.
+- AlmaLinux 9 with GNOME passed the 3.4 checklist. Rocky Linux 9 is not validated on a live host,
+  because the test subscription can't buy Marketplace offers (3.8).
+
 The RHEL 9 script works with little change: skip `subscription-manager` and use the
 distribution's CRB repository name. That's useful where RHEL subscriptions are an obstacle.
 Add `rocky-9` and `alma-9` image mappings. `Migrate-LinuxHostReleaseAgent.ps1` already
 treats `rocky` and `almalinux` as RHEL-like.
+
+### 3.8 Follow-ups from the Phase 3 validation
+
+**Status: Planned** · no dependencies
+
+The 3.4 validation left these open. The first three need checking with `mstsc`, the client the
+broker starts, which the test client couldn't stand in for. Items marked *pre-existing* were
+there before Phase 3.
+
+| Item | Why | Direction |
+| --- | --- | --- |
+| Checks with `mstsc` | The test client couldn't present several monitors or play sound, and full screen and multi-monitor depend on the user's `Default.rdp`, because the launcher runs `mstsc /v:<ip>` | Through AVD, on an Ubuntu and a RHEL host: resize and maximize the window, use full screen and two monitors, and play sound on Ubuntu GNOME |
+| Resizing on Ubuntu | A live resize dropped FreeRDP 3.31 on xrdp 0.9.24 (neutrinolabs/xrdp#3877), and with **Keep sessions alive** off the agent then ended the session. RHEL 9's xrdp 0.10.6 resized fine. | If `mstsc` drops too, have the launcher write an `.rdp` file with `dynamic resolution:i:0` (4.8), or ship a fixed xrdp |
+| RDP audio | RHEL, Rocky and AlmaLinux package no xrdp audio module. On Ubuntu, Xfce runs PulseAudio, which has no xrdp module in the archive, and MATE starts no sound server, so only GNOME, with PipeWire and `pipewire-module-xrdp`, can play sound. | Build or ship `pipewire-module-xrdp` for the RHEL family, and run PipeWire in Xfce and MATE sessions |
+| Idle timeout on the RHEL family | RHEL, Rocky and AlmaLinux don't package `xprintidle`, even in EPEL, so those hosts neither warn nor disconnect idle sessions | Read the X idle time another way, for example with `python3` calling `XScreenSaverQueryInfo` in `libXss` through `ctypes` |
+| Host reboot during a lease (*pre-existing*) | The lease file survives the reboot, but the home isn't mounted again and the agent has no record of the user, so the host stays checked out until someone returns it, and a reconnect lands in an empty local home | Reconcile leases at boot: mount the home again, or release the lease |
+| Group IDs differ between hosts (*pre-existing*) | Only the uid is pinned. The user's own group, `tsusers` and `appusers` get whatever gid is free on each host, so group ownership of roaming files means different groups on different hosts. It does no harm while homes are `700`. | Create the user's group with gid = uid and give the shared groups fixed gids, with a migration for existing hosts |
+| Ubuntu 26.04 | Its GNOME is Wayland-only, but Xfce and MATE still run on Xorg | Offer it with Xfce or MATE. GNOME waits for 3.5, as RHEL 10 does. |
+| Publishing single applications | With xpra gone (3.6), the broker publishes only full desktops | Evaluate xrdp's RemoteApp (RAIL) support, or what the 3.5 backend offers |
+| No network indicator in Ubuntu's GNOME | systemd-networkd runs the network (3.1), so GNOME shows no network icon, and applications that ask NetworkManager, such as GNOME Software, may think the host is offline | Document it, or let NetworkManager manage the NIC without netplan removing networkd's configuration |
+| No browser in Xfce and MATE on the RHEL family | Only the GNOME install brings Firefox | Install Firefox with every desktop on the RHEL family |
+| First-login windows on RHEL 8 GNOME | A new profile shows Getting Started and a "System Not Registered" notice | Hide both, as 3.1 does for GNOME 40's tour |
+| Lock Screen entry in Xfce | With the lock off, Xfce's action menu still shows **Lock Screen**, which does nothing | Hide the entry when the Host Settings profile turns the lock off |
+| Rocky Linux 9 on a live host | The test subscription can't buy Marketplace offers, so only AlmaLinux 9 was validated | Validate `rocky-9` in a subscription that can |
+| Two keyring daemons on Ubuntu GNOME | GNOME starts its own `gnome-keyring-daemon.service` next to the launcher's. It owns no bus names and opens no keyring, and uses about 10 MB. | Have the launcher start that user unit instead of its own daemon |
+| Xfce sessions stay "closing" on RHEL 9 | GeoClue's demo agent outlives the X server, so after a disconnect with **Keep sessions alive** off the login session stays "closing" until the grace period ends. Nobody sees it, and the agent goes by Xorg. | Add its autostart entry to the ones the launcher hides |
 
 ---
 
@@ -738,6 +911,11 @@ lease files, releases and grace timers).
   MemoryMax), private `/tmp` per user (`pam_namespace`), and per-host session caps.
 - Portal: hosts show N/M sessions, and the Sessions page (2.3) becomes the primary view.
 
+**Measured in 3.4.** A session used 0.6 to 0.9 GB of memory with Xfce or MATE, 1.5 to 2.1 GB
+with GNOME, and 2.8 to 3.0 GB with GNOME and Firefox open. A preserved session keeps its memory
+while it's disconnected. On a host with 8 GB, that leaves room for several Xfce or MATE sessions
+but only two or three GNOME ones.
+
 **Open questions.** Sizing guidance per desktop. Noisy-neighbor limits. Whether some users
 or pools should stay single-session (see 4.4).
 
@@ -775,6 +953,11 @@ the host resource group; its app ID differs in sovereign clouds, so parameterize
 defaults to 100 GiB (`deploy/bicep/modules/core/nfs-storage.bicep`). Premium performance
 scales with provisioned size: 100 GiB gives roughly 3,100 baseline IOPS. Desktop sessions
 generate many small I/Os, especially browser and GNOME caches and indexers.
+
+**Measured in 3.4.** After normal use, `~/.cache` held 1.3 to 19 MB per user. With the file
+indexer off, an idle session moved at most 208 bytes over NFS in a minute. Before that, one
+Tracker that kept failing on an index written by another distribution's Tracker read about
+0.6 MB/s from the share.
 
 **Design.**
 - A sizing guide by concurrent users, and a Bicep default that reflects it.
@@ -872,6 +1055,15 @@ A separate track, prioritized independently of the phases.
 | 2026-09 | Import from Azure requires DNS (`<hostname>.<DOMAIN_NAME>`); there are no typed-in IPs, and imported hosts start unreachable until the probe reaches them. |
 | 2026-09 | Checkout and host-start events are kept for `CHECKOUT_EVENT_RETENTION_DAYS` (default 90) and purged with the audit log. |
 | 2026-09 | Broker timestamps are UTC; the portal shows relative times with the absolute UTC time as a tooltip. Keyboard shortcuts can be turned off. |
+| 2026-09 | Phase 3 ships in one PR, one commit per item, with one host agent rollout (1.2.0: the merged release agent, the xrdp session launcher, the keyring key and the xpra cleanup). The 3.5 spike stays separate. |
+| 2026-09 | New deployments default to RHEL 9 (`9-LVM`). RHEL 7 is no longer offered, but existing RHEL 7 hosts keep working. |
+| 2026-09 | xpra is removed rather than implemented. Any `-Mode` opens the desktop, so existing RemoteApps keep working. |
+| 2026-09 | The login keyring unlocks with a random key per user, kept in its own Key Vault, instead of making the account password stable. The password still changes at every checkout. A keyring the key can't open is moved aside once and replaced, and a profile reset writes a new key version. The keyring never blocks a sign-in, and no PAM file changes. |
+| 2026-09 | Every distribution starts sessions through the broker's xrdp session launcher, which falls back to the distribution's own script on hosts with no `/etc/linuxbroker/desktop.conf`. |
+| 2026-09 | The Tracker and LocalSearch file indexers are off in broker sessions, because their databases live in the roaming home and don't open across distributions. |
+| 2026-09 | Ubuntu desktop hosts keep systemd-networkd as the network renderer, at the cost of GNOME's network indicator, so a package install can't take a host off the network. |
+| 2026-09 | Idle time never counts from before the user's current connection, so a resumed session isn't disconnected for the time it spent disconnected. |
+| 2026-09 | Ubuntu 26.04 and RHEL 10 wait for 3.5 or 3.8. Rocky Linux 9 is offered through its Marketplace image, and `alma-9` is recommended where Marketplace purchases are blocked. |
 
 ## Glossary
 
