@@ -26,7 +26,7 @@ const FIELDS: FieldSpec[] = [
   {
     key: 'minvms',
     label: 'Minimum VMs',
-    help: 'Keep at least this many VMs powered on for baseline capacity. Must be at least 1.',
+    help: 'Keep at least this many VMs powered on for baseline capacity. Must be at least 1, or 0 while start on demand is on.',
   },
   {
     key: 'maxvms',
@@ -66,6 +66,8 @@ export interface RuleFormProps {
   submitLabel: string;
   busy?: boolean;
   cancelTo: string;
+  /** Start on demand is on, so the minimum may be 0. Undefined while the policy loads. */
+  zeroMinimumAllowed?: boolean;
 }
 
 type RuleValues = Omit<ScalingRuleInput, 'stopmode'> & { stopmode: ScalingRuleInput['stopmode'] | '' };
@@ -75,10 +77,21 @@ export interface RuleFieldsProps<T extends RuleValues> {
   onChange: (value: T) => void;
   /** Offer "the default rule's" as the stop mode, for a schedule window. */
   inheritStopMode?: boolean;
+  /** Start on demand is on, so the minimum may be 0. Undefined while the policy loads. */
+  zeroMinimumAllowed?: boolean;
 }
 
+const ZERO_MINIMUM_HELP =
+  'Keep at least this many VMs powered on. 0 lets idle hosts stop until someone needs one: start on demand then starts a host for the first user, who waits a minute or two.';
+
 /** The scaling values and stop mode, shared by the default rule and schedule windows. */
-export function RuleFields<T extends RuleValues>({ value, onChange, inheritStopMode = false }: RuleFieldsProps<T>) {
+export function RuleFields<T extends RuleValues>({
+  value,
+  onChange,
+  inheritStopMode = false,
+  zeroMinimumAllowed,
+}: RuleFieldsProps<T>) {
+  const zeroMinimum = String(value.minvms).trim() !== '' && Number(value.minvms) === 0;
   return (
     <>
       <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
@@ -86,9 +99,14 @@ export function RuleFields<T extends RuleValues>({ value, onChange, inheritStopM
           <TextField
             key={field.key}
             label={field.label}
-            help={field.help}
+            help={field.key === 'minvms' && zeroMinimumAllowed ? ZERO_MINIMUM_HELP : field.help}
+            error={
+              field.key === 'minvms' && zeroMinimum && zeroMinimumAllowed === false
+                ? 'A minimum of 0 needs start on demand, which is off. Turn it on in the scaling policy, or keep at least 1.'
+                : undefined
+            }
             type="number"
-            min={field.key === 'minvms' ? 1 : 0}
+            min={field.key === 'minvms' ? (zeroMinimumAllowed ? 0 : 1) : 0}
             max={field.max}
             step={field.step}
             required
@@ -109,6 +127,13 @@ export function RuleFields<T extends RuleValues>({ value, onChange, inheritStopM
           onChange={(event) => onChange({ ...value, stopmode: event.target.value as T['stopmode'] })}
         />
       </div>
+
+      {zeroMinimum && zeroMinimumAllowed ? (
+        <Notice tone="info" className="mt-5">
+          With a minimum of 0, no host runs while nobody needs one. The first user to connect waits while a host
+          starts, typically one to three minutes, and their AVD session connects when it is ready.
+        </Notice>
+      ) : null}
 
       {value.stopmode === 'Deallocate' ? (
         <Notice tone="warning" className="mt-5">
@@ -134,6 +159,7 @@ export function RuleForm({
   submitLabel,
   busy = false,
   cancelTo,
+  zeroMinimumAllowed,
 }: RuleFormProps) {
   return (
     <GlassCard className="max-w-4xl p-6">
@@ -144,7 +170,7 @@ export function RuleForm({
           onSubmit();
         }}
       >
-        <RuleFields value={value} onChange={onChange} />
+        <RuleFields value={value} onChange={onChange} zeroMinimumAllowed={zeroMinimumAllowed} />
 
         <div className="mt-6 flex flex-wrap gap-2">
           <Button type="submit" variant="primary" icon="check-circle" disabled={busy}>

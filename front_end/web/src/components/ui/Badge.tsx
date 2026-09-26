@@ -76,6 +76,7 @@ const SCALING_ACTION: Record<string, StatusDescriptor> = {
   'Scale Up': { tone: 'ok', icon: 'arrow-up', label: 'Scale up' },
   'Scale Down': { tone: 'warn', icon: 'arrow-down', label: 'Scale down' },
   'No Action': { tone: 'neutral', icon: 'dash-circle', label: 'No action' },
+  'Start On Demand': { tone: 'info', icon: 'power', label: 'Start on demand' },
 };
 
 export const VmStatusBadge = ({ value }: { value: string | null | undefined }) =>

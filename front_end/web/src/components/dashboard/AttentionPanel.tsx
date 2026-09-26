@@ -38,7 +38,12 @@ export function describeAttention(item: AttentionItem): Described {
   switch (item.Kind) {
     case 'no-ready-hosts':
       return {
-        text: <>No host can take a new user: anyone who needs one now will be turned away.</>,
+        text: (
+          <>
+            No host can take a new user and none is starting: anyone who needs one now must wait for one to start, or
+            is turned away.
+          </>
+        ),
         to: '/vms',
         action: 'View hosts',
       };

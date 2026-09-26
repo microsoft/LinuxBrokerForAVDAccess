@@ -65,7 +65,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 2. **Selects Linux Host Connection**: The user opens the **Linux Desktop** RemoteApp, which the `azd` deployment publishes, for a full RDP session to a Linux host.
 3. **Broker Agent Initiates Connection**:
    - The Broker Agent script (`Connect-LinuxBroker.ps1`) connects to the Broker API using the AVD host's managed identity.
-   - It checks out an available Linux VM for the user.
+   - It checks out an available Linux VM for the user. When none is ready, the broker can start a stopped one, and the user waits a minute or two in a small window that says their desktop is starting.
    - The user's ID is added to the Linux host with a unique 25-character password.
    - The user is added to appropriate user groups on the Linux host for RDP access.
    - The host also receives the key that unlocks the user's login keyring, so applications that save passwords do not ask for one.
@@ -329,7 +329,7 @@ azd env new <environment-name>
 azd up
 ```
 
-For existing environments that need in-place rollout instead of new-environment provisioning, use [deploy/Migrate-ExistingEnvironment.ps1](deploy/Migrate-ExistingEnvironment.ps1) from the `deploy/` directory. `azd up` remains the supported greenfield path.
+For existing environments that need in-place rollout instead of new-environment provisioning, use [deploy/Migrate-ExistingEnvironment.ps1](deploy/Migrate-ExistingEnvironment.ps1) from the `deploy/` directory. It updates the apps, the database, the Linux hosts' agent and the AVD session hosts' broker script. `azd up` remains the supported greenfield path.
 
 The deployment targets Azure commercial by default. Set `azureCloudName` to `AzureUSGovernment` or `AzureCustom` to deploy elsewhere; commercial and Government resolve their endpoints automatically, while custom and sovereign clouds require their own authority, Graph, STS, and App Service FQDNs. Air-gapped environments should also set `scriptSourceRoot` to a reachable mirror of this repository, because the Linux hosts download their agent scripts from it during bootstrap.
 
@@ -361,9 +361,15 @@ The distribution and desktop support release needs `azd provision` and agent 1.2
 - **Review the idle timeout.** It had never disconnected anyone before this release, and migrated Ubuntu hosts now enforce any timeout already set.
 - **Replace or bootstrap again any Ubuntu hosts.** Earlier releases deployed them with no desktop and without the packages NFS homes need.
 
+The start on demand release needs no new Azure resources or roles, but the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
+
+- **A checkout can start a host.** When no host is ready, the broker starts a stopped one and the user's **Linux Desktop** waits for it, for up to 10 minutes. It is on after the upgrade, and the **Scaling** page turns it off or limits how many hosts start at once.
+- **Update the AVD session hosts.** `deploy/Migrate-ExistingEnvironment.ps1` now also runs `deploy/Update-AvdHostBrokerScript.ps1`, which replaces the script on every running session host. An older script tells its user that no host is available while one starts for them.
+- **A pool can scale to zero.** With start on demand on, a rule or schedule window may keep a minimum of 0 hosts. Set one only after the **Scaling** page shows that every session host runs a script that can wait.
+
 ## Roadmap
 
-Planned work beyond this release, including RHEL 10 and Ubuntu 26.04 support, starting a host on demand, golden images and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
+Planned work beyond this release, including RHEL 10 and Ubuntu 26.04 support, golden images and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contributing
 

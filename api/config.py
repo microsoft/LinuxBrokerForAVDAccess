@@ -198,6 +198,28 @@ ATTENTION_NOT_CONNECTED_MINUTES = 30
 ATTENTION_DENIED_MINUTES = 60
 
 # ===============================
+# Start on demand
+#
+# When a checkout finds no ready host and start on demand is on, dbo.ReserveVmForStart starts a
+# stopped host for the user, and the API answers 202 with how long to wait before asking again.
+# A waiting user's next request first probes the hosts starting for it on the port the scheduled
+# task's reachability probe uses, so a host that is up is handed out without waiting for the
+# task's next run. The probes run in parallel and each waits at most the timeout.
+START_ON_DEMAND_PROBE_PORT = 22
+START_ON_DEMAND_PROBE_TIMEOUT_SECONDS = 2
+START_ON_DEMAND_PROBE_CONCURRENCY = 10
+# The wait the API asks for when it could not decide: scaling held the lock, or the host that
+# became ready went to another user. dbo.ReserveVmForStart asks for 30 to 120 seconds otherwise.
+START_ON_DEMAND_RETRY_SECONDS = 30
+# The AVD host script reports its version with each checkout. It is recorded with the checkout
+# event, so the scaling policy page can list the AVD hosts whose script cannot wait for a host.
+CLIENT_VERSION_MAX_CHARS = 32
+# The version avd_host/broker/Connect-LinuxBroker.ps1 declares as $ScriptVersion. Bump it with
+# any change to that script; api/tests checks they agree. The scaling policy page shows the AVD
+# hosts that report an older one.
+AVD_HOST_SCRIPT_VERSION = '2.0.0'
+
+# ===============================
 # Linux host agent
 #
 # The version every script in linux_host/ declares as LINUXBROKER_AGENT_VERSION. Bump it

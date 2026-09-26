@@ -537,6 +537,8 @@ export interface UtilizationPoint {
   Checkouts: number;
   Denied: number;
   Failed: number;
+  /** Users told to wait for a host to start. Absent from a broker that predates start on demand. */
+  Waited?: number;
 }
 
 export interface CheckoutStats {
@@ -554,6 +556,17 @@ export interface CheckoutStats {
   HostStarts: number;
   StartP50Seconds: number | null;
   StartP95Seconds: number | null;
+  /**
+   * Start on demand. Absent from a broker that predates it. Starting counts the times an AVD
+   * host was told to wait; Waits the waits that began in the window, and WaitsServed those
+   * that ended with a host.
+   */
+  Starting?: number;
+  Waits?: number;
+  WaitsServed?: number;
+  WaitingNow?: number;
+  WaitP50Seconds?: number | null;
+  WaitP95Seconds?: number | null;
 }
 
 export type UtilizationHours = 24 | 168;
@@ -808,6 +821,16 @@ export interface ScalingPhase {
   StopMode: 'PowerOff' | 'Deallocate' | null;
 }
 
+/** Which broker script the AVD hosts that asked for a checkout in the last seven days run. */
+export interface AvdHostScripts {
+  Seen: number;
+  /** Hosts whose script reports no version: it predates start on demand and cannot wait. */
+  Outdated: number;
+  OutdatedHostnames: string[];
+  Versions: Array<{ ClientVersion: string; AvdHosts: number; Current: boolean }>;
+  CurrentVersion: string;
+}
+
 export interface ScalingPolicy {
   TimeZone: string;
   UpdatedBy: string | null;
@@ -819,7 +842,27 @@ export interface ScalingPolicy {
   Schedules: ScalingSchedule[];
   NextChange: { InMinutes: number; AtLocal: string; PhaseName: string; ScheduleID: number | null } | null;
   LastRun: ActivityLogEntry | null;
+  /** Start on demand. Null or absent from a broker or database that predates it. */
+  StartOnDemandEnabled?: boolean | null;
+  MaxPendingStarts?: number | null;
+  /** Rules and enabled windows with a minimum of 0. */
+  ZeroMinimumCount?: number | null;
+  AvdHostScripts?: AvdHostScripts | null;
   Available?: true;
+}
+
+export interface StartOnDemandInput {
+  startondemandenabled?: boolean;
+  maxpendingstarts?: number;
+}
+
+export interface PolicyUpdateResult {
+  Result: 'Updated' | 'Unchanged';
+  TimeZone?: string;
+  StartOnDemandEnabled?: boolean | null;
+  MaxPendingStarts?: number | null;
+  ZeroMinimumCount?: number | null;
+  message: string;
 }
 
 /** What the portal gets for the policy: the policy, or word that the broker predates it. */
@@ -835,7 +878,16 @@ export interface ScalingPreview {
     /** A maintenance run waiting for a spare ready host has raised MinVMs by one. */
     MaintenanceSurge?: boolean;
   };
-  Counts: { PoweredOn: number; Serviceable: number; InUse: number; Draining: number; Utilization: number | null };
+  Counts: {
+    PoweredOn: number;
+    Serviceable: number;
+    InUse: number;
+    Draining: number;
+    /** Users waiting for a host to start, counted as demand. Absent before start on demand. */
+    Waiting?: number | null;
+    Utilization: number | null;
+  };
+  StartOnDemandEnabled?: boolean | null;
   TimeZone: string | null;
   LocalTime: string | null;
   AtUtc: string | null;

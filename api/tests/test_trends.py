@@ -130,7 +130,8 @@ def test_utilization_returns_the_series_and_checkout_health(client, fake_db, app
     monkeypatch.setattr(app_module, "utilization_window", lambda hours: (start, end, 15))
     fake_db.fetchall_rows["GetUtilizationSeries"] = [
         {"BucketStartUtc": "2026-03-03T10:45:00Z", "Runs": 3, "PoweredOn": Decimal("4.0"), "InUse": Decimal("2.3"),
-         "Serviceable": Decimal("3.7"), "PeakInUse": 3, "MinVMs": 2, "MaxVMs": 6, "Checkouts": 5, "Denied": 1, "Failed": 0},
+         "Serviceable": Decimal("3.7"), "PeakInUse": 3, "MinVMs": 2, "MaxVMs": 6, "Checkouts": 5, "Denied": 1, "Failed": 0,
+         "Waited": 2},
         {"BucketStartUtc": "2026-03-03T11:00:00Z", "Runs": 0, "PoweredOn": None, "InUse": None, "Serviceable": None,
          "PeakInUse": None, "MinVMs": None, "MaxVMs": None, "Checkouts": 0, "Denied": 0, "Failed": 0},
     ]
@@ -138,6 +139,7 @@ def test_utilization_returns_the_series_and_checkout_health(client, fake_db, app
         "Total": 40, "Assigned": 20, "Reused": 15, "NoneAvailable": 3, "ProvisionFailed": 1, "Errors": 1,
         "P50Ms": 2100, "P95Ms": 8400, "DeniedLastHour": 1, "LastDeniedUtc": "2026-03-04T10:02:11.120Z",
         "HostStarts": 4, "StartP50Seconds": 95, "StartP95Seconds": 180,
+        "Starting": 6, "Waits": 3, "WaitsServed": 2, "WaitP50Seconds": 84, "WaitP95Seconds": 150, "WaitingNow": 1,
     }
 
     response = client.get("/api/metrics/utilization")
@@ -146,9 +148,13 @@ def test_utilization_returns_the_series_and_checkout_health(client, fake_db, app
     body = response.get_json()
     assert (body["Hours"], body["BucketMinutes"], body["FromUtc"], body["ToUtc"]) == (24, 15, "2026-03-03T10:45:00Z", "2026-03-04T10:45:00Z")
     assert body["Series"][0] == {"BucketStartUtc": "2026-03-03T10:45:00Z", "Runs": 3, "PoweredOn": 4.0, "InUse": 2.3,
-                                 "Serviceable": 3.7, "PeakInUse": 3, "MinVMs": 2, "MaxVMs": 6, "Checkouts": 5, "Denied": 1, "Failed": 0}
-    assert body["Series"][1]["PoweredOn"] is None and body["Series"][1]["Runs"] == 0
+                                 "Serviceable": 3.7, "PeakInUse": 3, "MinVMs": 2, "MaxVMs": 6, "Checkouts": 5, "Denied": 1, "Failed": 0,
+                                 "Waited": 2}
+    assert body["Series"][1]["PoweredOn"] is None and body["Series"][1]["Runs"] == 0 and body["Series"][1]["Waited"] == 0
     assert body["Checkouts"]["DeniedPercent"] == 7.5 and body["Checkouts"]["StartP95Seconds"] == 180
+    # Starting answers are not checkouts: the denial rate is still NoneAvailable over Total.
+    assert {key: body["Checkouts"][key] for key in ("Starting", "Waits", "WaitsServed", "WaitP50Seconds", "WaitP95Seconds", "WaitingNow")} == {
+        "Starting": 6, "Waits": 3, "WaitsServed": 2, "WaitP50Seconds": 84, "WaitP95Seconds": 150, "WaitingNow": 1}
     assert fake_db.latest_call("GetUtilizationSeries")["params"] == (start, end, 15)
     assert fake_db.latest_call("GetCheckoutStats")["params"] == (start, end)
 
@@ -158,6 +164,8 @@ def test_utilization_with_no_checkouts_has_no_denial_rate(client, fake_db):
     body = client.get("/api/metrics/utilization?hours=168").get_json()
     assert body["BucketMinutes"] == 60 and body["Series"] == []
     assert body["Checkouts"]["DeniedPercent"] is None and body["Checkouts"]["P50Ms"] is None
+    # A database that predates start on demand (154) reports no waits.
+    assert body["Checkouts"]["Waits"] == 0 and body["Checkouts"]["WaitP50Seconds"] is None
 
 
 @pytest.mark.parametrize("hours", ["12", "abc", "0", "720"])

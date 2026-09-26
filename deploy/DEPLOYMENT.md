@@ -430,7 +430,7 @@ If the build environment cannot reach `registry.npmjs.org`, point npm at an inte
 
 ## Migration For Existing Deployments
 
-Use the migration flow when you already have a deployed customer environment and want to roll forward the current application, SQL, and Linux-host release-agent changes without treating that as part of the normal `azd up` lifecycle.
+Use the migration flow when you already have a deployed customer environment and want to roll forward the current application, SQL, Linux host release-agent and AVD session host script changes without treating that as part of the normal `azd up` lifecycle.
 
 The migration entrypoint is [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1).
 
@@ -439,10 +439,13 @@ That script intentionally stays separate from `azd up`:
 - `azd up` continues to express the desired greenfield deployment for new environments.
 - [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1) is the supported in-place process for existing environments.
 
-By default, the migration script does two things:
+By default, the migration script does three things:
 
 1. Runs [Post-Provision.ps1](Post-Provision.ps1) so the existing environment gets the latest container images, SQL scripts, role assignments, VM group sync, and Linux host SQL registration.
 2. Runs [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) so existing Linux hosts get the current release-agent files, one-minute reconciliation timer, and `systemd-logind` watcher.
+3. Runs [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1) so existing AVD session hosts get the current `Connect-LinuxBroker.ps1`, the script the **Linux Desktop** RemoteApp runs.
+
+A failed post-provision step stops the migration. The two host steps run even when the other fails, and the migration then fails, naming the steps that did; the warnings before it name the hosts to retry.
 
 Example full migration:
 
@@ -458,6 +461,17 @@ Set-Location .\deploy
 .\Migrate-ExistingEnvironment.ps1 `
 	-EnvironmentName <environment-name> `
 	-LinuxHostNames lnxhost-01,lnxhost-02
+```
+
+`-LinuxHostNames` limits only the Linux host step. `-AvdHostNames` limits the AVD session host step in the same way, and `-SkipLinuxHostReleaseAgentMigration` and `-SkipAvdHostScriptUpdate` leave out a step. Example update of only selected AVD session hosts:
+
+```powershell
+Set-Location .\deploy
+.\Migrate-ExistingEnvironment.ps1 `
+	-EnvironmentName <environment-name> `
+	-SkipPostProvision `
+	-SkipLinuxHostReleaseAgentMigration `
+	-AvdHostNames <session-host-1>,<session-host-2>
 ```
 
 Example host-only migration when you do not want to rerun the post-provision steps:
@@ -479,6 +493,8 @@ Set-Location .\deploy
 ```
 
 The host migration step updates only the release-agent-related files and services on existing Linux VMs. It does not reprovision infrastructure, replace the VM image, rerun the full Linux custom script extension, or attempt to reconcile every manual drift in an older environment.
+
+The AVD session host step changes only `C:\Temp\Connect-LinuxBroker.ps1`, through Run Command, on the VMs in the resource group tagged `broker-role=avd-host`. On each running session host it downloads the script from `ScriptSourceRoot`, fills in the API URL and client ID as `Configure-AVD-Host.ps1` does, checks that the result is a broker script in plain ASCII that parses, and replaces the installed script in one step. Because the API URL and `ScriptSourceRoot` are written into PowerShell code on the session host, the update refuses either one unless it is an `https://` URL made only of ASCII letters, digits and the characters `.`, `-`, `_`, `~`, `%` and `/`, with an optional port. A download or check that fails leaves the installed script as it was, and sessions already open keep the script they started with. Session hosts that are not running are skipped and named at the end; update each one with `-AvdHostNames` once it is started. To update only the session hosts, you can also run [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1) on its own, with the same `-EnvironmentName`, `-ScriptSourceRoot` and `-AvdHostNames` parameters.
 
 The migration also rewrites `/etc/sudoers.d/avdadmin`. Older hosts were provisioned with a broad allowlist that included `cat`, `rm`, `chmod`, `chown`, `cp`, `mount`, and `umount`. The current policy grants only `userdel`, `groupadd`, `usermod`, `chpasswd`, `/usr/local/bin/create-user.sh`, `/usr/local/bin/manage-lease.sh`, `/usr/local/bin/apply-host-settings.sh`, `/usr/local/bin/session-control.sh`, and `/usr/local/bin/patch-host.sh`; all privileged file work now happens inside those root-owned scripts. The generated policy is validated with `visudo -c` and moved into place only if it passes.
 
@@ -616,6 +632,24 @@ This release changes which Linux distributions and desktops the deployment offer
 5. Replace, or bootstrap again, any Ubuntu hosts from earlier releases and any RHEL 7 hosts you are retiring.
 
 Every layer tolerates the others being one release behind during the rollout, and the database does not change. Hosts on agent 1.1.0 ignore the key the new API sends and keep working, flagged **Agent outdated**. A 1.2.0 host that meets the previous API, or an API without `KEYRING_VAULT_URL`, gets no key and starts the desktop as before. The previous API drops the launcher's version from the heartbeat.
+
+## Upgrading To Start On Demand
+
+This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)). It needs no new Azure resources, role assignments or deployment parameters, and no Bicep change, but the AVD session hosts need the new `Connect-LinuxBroker.ps1`.
+
+- **Start on demand.** When a checkout finds no ready host, the API starts a stopped one for the user and answers `202` with how long to wait, instead of refusing. On the AVD session host, **Linux Desktop** shows *Your Linux desktop is starting…* with **Cancel**, asks again when the broker says to, and opens the desktop as soon as the host is reachable, for up to 10 minutes. The start is recorded as a scaling start is, in the scaling activity log as `Start On Demand` and in the audit log as `vm.start_on_demand`, and uses the API's existing **Desktop Virtualization Power On Off Contributor** role. It never takes the pool past the active rule's or window's `MaxVMs`, so a user who arrives when that many hosts are on and none is free is refused as before. Start on demand is on after the upgrade; an administrator can turn it off, and set how many hosts may start at once for waiting users (2 by default, up to 20), in the **Start on demand** card on the **Scaling** page.
+- **Scale to zero.** While start on demand is on, the default rule and schedule windows may keep a minimum of 0 hosts, so idle hosts stop, for example overnight, and the first user to arrive waits a minute or two for one to start. Scaling counts waiting users as demand, and a scale-down keeps a host for each of them. A minimum of 0 cannot be saved while start on demand is off. If it is turned off afterwards, scaling keeps one host on for those rules and windows, and the card says so.
+- **Connect-LinuxBroker.ps1 2.0.0.** Besides waiting for a host to start, the script tries a request again after no answer, a `408`, a `429` or a `5xx`, until three fail in a row, where the previous script tried three times at once. It requests a new token once when the broker refuses one, and tells the user in plain words what went wrong. Each attempt is logged under the **LinuxBrokerScript** source in the session host's Application event log. Session hosts keep the script they were deployed with, so the migration's new third step, [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1), replaces it on every running session host. An older script treats `202` as a failure: its user is told that no Linux host is available while a host starts for them, and gets that host at their next try once it is up. The script now reports its version with each checkout, and the **Start on demand** card shows, for the session hosts that asked for a host in the last seven days, how many run each version, and names those whose script cannot wait.
+- **Waits on the dashboard.** Every time a user is told to wait, the checkout records a `Starting` event. The dashboard's checkout card adds how many users waited, how many of them got a host, the median and 95th percentile wait, and how many are waiting now, and the capacity chart shows the users who waited. **Attention** no longer reports that no host is ready for a pool scaled to zero that nobody is waiting on.
+
+### Recommended order
+
+1. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1). It applies SQL scripts `144`–`156` before the new images start, restarts the apps in the order API, task, front end, migrates the Linux hosts, and then updates `Connect-LinuxBroker.ps1` on the running AVD session hosts.
+2. Start any AVD session host the migration skipped because it was not running, and update it with `-SkipPostProvision -SkipLinuxHostReleaseAgentMigration -AvdHostNames <session-host>`.
+3. With a test user, open **Linux Desktop** while no host is free, for example with every idle host stopped, and confirm that the wait window appears and the desktop opens once the host is up.
+4. Before you set any minimum to 0, confirm that the **Start on demand** card names no session host whose script cannot wait. The card goes by each session host's latest checkout in the last seven days, so a session host updated since then is listed until its next checkout.
+
+Every layer tolerates the others being one release behind during the rollout. Against a database without the new procedures, the new API refuses a checkout that finds no host with `409`, as before, and logs it once, and the portal says that the broker does not support start on demand yet. The previous API build keeps working against the new database: it never answers `202`, so nobody waits, and it refuses a minimum of 0 as before. Session hosts that still run an older script behave as described above.
 
 ## Manual Steps After `azd up`
 
@@ -792,7 +826,17 @@ A device object left over from an earlier deployment that used the same VM name 
 
 ### Linux Desktop opens but reports that no Linux host is available
 
-`Connect-LinuxBroker.ps1` shows this when checkout does not return a host. Check the **LinuxBrokerScript** source in the session host's Application event log. A `403` from the API means the session host's managed identity is not yet in the AVD host group; rerun `azd hooks run postprovision`. Otherwise, confirm in the portal that at least one Linux host is available.
+`Connect-LinuxBroker.ps1` shows this when the broker answers `409`: no host is ready and the broker cannot start one, because start on demand is off, the active rule or window already has `MaxVMs` hosts on, or no stopped host is free to start. Hosts in maintenance, draining or waiting for cleanup are never started. The session host's Application event log has the broker's answer to each attempt under the **LinuxBrokerScript** source, and the portal's scaling activity log shows each start on demand. Otherwise, confirm in the portal that at least one Linux host is available.
+
+A session host whose script is older than 2.0.0 shows the same message while a host starts for its user, after logging `Failed to retrieve VM information from API response.` three times. The **Start on demand** card on the **Scaling** page names such session hosts; update them as described in [Migration For Existing Deployments](#migration-for-existing-deployments).
+
+### Linux Desktop says the Linux desktop is taking longer than usual to start
+
+The user waited `MaxWaitSeconds` (10 minutes by default) and no host became ready for them. Usually the host the broker started did not become reachable on SSH: find it in the portal's scaling activity log under the `Start On Demand` action, then check its power state and reachability. The broker stops counting a host as starting 10 minutes after it started, so the next request can start another, if a stopped host is free and `MaxVMs` allows. A start that Azure refuses is logged by the API, and the user is then refused with `409` instead of waiting.
+
+### Linux Desktop reports that the Linux Broker could not authenticate this session host
+
+`Connect-LinuxBroker.ps1` shows this when the session host cannot get a token from its managed identity (`Failed to obtain access token` in the **LinuxBrokerScript** event log) or the broker refuses it (`The broker refused this session host (403)`). A `403` means the session host's managed identity is not yet in the AVD host group; rerun `azd hooks run postprovision`. The script renews a token the broker refuses with `401` once before it gives up.
 
 ### The portal shows "No access" after signing in
 

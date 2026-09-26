@@ -63,6 +63,7 @@ export function describeCapacity(series: UtilizationPoint[], hours: UtilizationH
   const serviceable = range(series.map((point) => point.Serviceable));
   const maximum = range(series.map((point) => point.MaxVMs));
   const denied = series.reduce((total, point) => total + point.Denied, 0);
+  const waited = series.reduce((most, point) => Math.max(most, point.Waited ?? 0), 0);
 
   const parts = [`Capacity over ${windowPhrase(hours)}.`];
   if (peak) parts.push(`At most ${peak.max} hosts were in use at once.`);
@@ -74,8 +75,15 @@ export function describeCapacity(series: UtilizationPoint[], hours: UtilizationH
     );
   }
   if (maximum) parts.push(`The scaling maximum was ${maximum.max === maximum.min ? maximum.max : `${maximum.min} to ${maximum.max}`}.`);
+  if (waited) parts.push(`Users waited for a host to start, at most ${waited} in one interval.`);
   parts.push(denied ? `${denied} checkout${denied === 1 ? '' : 's'} found no host.` : 'Every checkout found a host.');
   return parts.join(' ');
+}
+
+/** The latest scaling run left no host powered on, as a minimum of 0 allows. */
+export function scaledToZero(series: UtilizationPoint[]) {
+  const latest = [...series].reverse().find((point) => point.Runs > 0);
+  return latest !== undefined && latest.PoweredOn === 0 && latest.MinVMs === 0;
 }
 
 export interface CapacityCardProps {
@@ -93,7 +101,9 @@ export function CapacityCard({ hours, onHoursChange, data, busy, error, classNam
   // While another window loads, the previous one stays on screen and is described as such.
   const shownHours = data?.Hours ?? hours;
   const hasRuns = series.some((point) => point.Runs > 0);
-  const hasCheckouts = series.some((point) => point.Checkouts > 0);
+  const hasCheckouts = series.some((point) => point.Checkouts > 0 || (point.Waited ?? 0) > 0);
+  const hasWaits = series.some((point) => (point.Waited ?? 0) > 0);
+  const atZero = scaledToZero(series);
 
   const lines = useMemo<ChartSeries[]>(
     () => [
@@ -128,8 +138,21 @@ export function CapacityCard({ hours, onHoursChange, data, busy, error, classNam
         step: true,
         width: 1.5,
       },
+      ...(hasWaits
+        ? [
+            {
+              key: 'waited',
+              label: 'Users who waited for a host',
+              values: series.map((point) => point.Waited ?? 0),
+              colour: 'var(--lb-info-fg)',
+              dash: '6 2 1 2',
+              step: true,
+              width: 1.5,
+            },
+          ]
+        : []),
     ],
-    [series],
+    [series, hasWaits],
   );
   const markers = useMemo(
     () => series.flatMap((point, index) => (point.Denied > 0 ? [{ index, count: point.Denied }] : [])),
@@ -159,15 +182,26 @@ export function CapacityCard({ hours, onHoursChange, data, busy, error, classNam
             icon="activity"
           />
         ) : (
-          <TimeSeriesChart
-            times={series.map((point) => point.BucketStartUtc)}
-            bucketMinutes={data.BucketMinutes ?? 60}
-            series={lines}
-            markers={markers}
-            markerLabel="checkouts found no host"
-            summary={describeCapacity(series, shownHours)}
-            caption={`Capacity over ${windowPhrase(shownHours)}, by ${data.BucketMinutes ?? 60}-minute interval`}
-          />
+          <>
+            <TimeSeriesChart
+              times={series.map((point) => point.BucketStartUtc)}
+              bucketMinutes={data.BucketMinutes ?? 60}
+              series={lines}
+              markers={markers}
+              markerLabel="checkouts found no host"
+              summary={describeCapacity(series, shownHours)}
+              caption={`Capacity over ${windowPhrase(shownHours)}, by ${data.BucketMinutes ?? 60}-minute interval`}
+            />
+            {atZero ? (
+              <p className="mt-3 mb-0 flex items-start gap-1.5 text-xs text-muted">
+                <Icon name="power" size={12} className="mt-0.5 shrink-0" />
+                <span>
+                  Scaled to zero: no host was powered on after the latest scaling run. Start on demand starts one for
+                  the next user, who waits a minute or two.
+                </span>
+              </p>
+            ) : null}
+          </>
         )}
       </div>
     </GlassCard>

@@ -403,7 +403,7 @@ VALID_RULE = {
 
 
 @pytest.mark.parametrize("override,field", [
-    ({"minvms": 0}, "minvms"),
+    ({"minvms": -1}, "minvms"),
     ({"maxvms": 2}, "maxvms"),
     ({"scaleupratio": 101}, "scaleupratio"),
     ({"scaleupratio": 20}, "scaleupratio"),
@@ -417,6 +417,33 @@ def test_rule_creation_names_the_invalid_field(client, fake_db, override, field)
     assert response.status_code == 400
     assert field in response.get_json()["error"]
     assert fake_db.calls == []
+
+
+def test_a_rule_scales_to_zero_only_while_start_on_demand_is_on(client, fake_db):
+    zero = {**VALID_RULE, "minvms": 0}
+
+    # Off, and on a database that predates start on demand, a pool with no host cannot recover.
+    for policy in ({"TimeZone": "UTC"}, {"TimeZone": "UTC", "StartOnDemandEnabled": False}):
+        fake_db.fetchone_rows["GetScalingPolicy"] = policy
+        response = client.post("/api/scaling/rules/create", json=zero)
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "minvms can be 0 only while start on demand is on."
+    fake_db.fetchone_rows.pop("GetScalingPolicy")
+    fake_db.raise_on_execute["GetScalingPolicy"] = "(2812, b\"Could not find stored procedure 'GetScalingPolicy'.\")"
+    assert client.post("/api/scaling/rules/create", json=zero).status_code == 400
+    assert "CreateScalingRule" not in [call["proc"] for call in fake_db.calls]
+
+    del fake_db.raise_on_execute["GetScalingPolicy"]
+    fake_db.fetchone_rows["GetScalingPolicy"] = {"TimeZone": "UTC", "StartOnDemandEnabled": True}
+    fake_db.fetchone_rows["CreateScalingRule"] = {"NewRuleID": 4, "ActiveRuleID": 4, "Message": None}
+    assert client.post("/api/scaling/rules/create", json=zero).status_code == 201
+    assert fake_db.latest_call("CreateScalingRule")["params"][:2] == (0, 10)
+
+
+def test_a_rule_above_zero_never_reads_the_policy(client, fake_db):
+    fake_db.fetchone_rows["CreateScalingRule"] = {"NewRuleID": 5, "ActiveRuleID": 5, "Message": None}
+    assert client.post("/api/scaling/rules/create", json=VALID_RULE).status_code == 201
+    assert "GetScalingPolicy" not in [call["proc"] for call in fake_db.calls]
 
 
 def test_rule_creation_passes_the_stop_mode(client, fake_db):

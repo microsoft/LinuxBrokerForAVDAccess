@@ -49,6 +49,7 @@ describe('status badges', () => {
     ['Scale Up', 'Scale up'],
     ['Scale Down', 'Scale down'],
     ['No Action', 'No action'],
+    ['Start On Demand', 'Start on demand'],
   ])('renders the scaling action %s as %s', (value, label) => {
     render(<ActionBadge value={value} />);
     expect(screen.getByText(label)).toBeInTheDocument();

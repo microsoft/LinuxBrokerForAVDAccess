@@ -4,8 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import { AttentionPanel, describeAttention } from './AttentionPanel';
-import { describeCapacity } from './CapacityCard';
-import { CheckoutHealthCard, formatMilliseconds, secondsSince } from './CheckoutHealthCard';
+import { CapacityCard, describeCapacity, scaledToZero } from './CapacityCard';
+import { CheckoutHealthCard, describeWaits, formatMilliseconds, secondsSince } from './CheckoutHealthCard';
 import { TimeSeriesChart } from '../charts/TimeSeriesChart';
 import type { AttentionItems, CheckoutStats, UtilizationPoint } from '../../types/broker';
 
@@ -32,6 +32,49 @@ describe('describeCapacity', () => {
   it('says when every checkout found a host', () => {
     expect(describeCapacity([point({})], 24)).toContain('Every checkout found a host.');
   });
+
+  it('says when users waited for a host to start', () => {
+    const series = [point({ Waited: 1 }), point({ Waited: 3 }), point({})];
+    expect(describeCapacity(series, 24)).toContain('Users waited for a host to start, at most 3 in one interval.');
+    expect(describeCapacity([point({ Waited: 0 })], 24)).not.toContain('waited');
+  });
+});
+
+describe('scaledToZero', () => {
+  it('is true when the latest run left no host on under a minimum of 0', () => {
+    expect(scaledToZero([point({}), point({ PoweredOn: 0, MinVMs: 0 }), point({ Runs: 0, PoweredOn: null, MinVMs: null })])).toBe(true);
+  });
+
+  it('is false while a host is on, the minimum is above 0, or nothing ran', () => {
+    expect(scaledToZero([point({ PoweredOn: 0, MinVMs: 0 }), point({ PoweredOn: 1, MinVMs: 0 })])).toBe(false);
+    expect(scaledToZero([point({ PoweredOn: 0, MinVMs: 1 })])).toBe(false);
+    expect(scaledToZero([point({ Runs: 0, PoweredOn: 0, MinVMs: 0 })])).toBe(false);
+    expect(scaledToZero([])).toBe(false);
+  });
+});
+
+describe('CapacityCard', () => {
+  const metrics = (series: UtilizationPoint[]) => ({ Available: true as const, Hours: 24 as const, BucketMinutes: 60, Series: series });
+
+  it('charts the users who waited and says when the pool scaled to zero', () => {
+    render(
+      <CapacityCard
+        hours={24}
+        onHoursChange={() => undefined}
+        data={metrics([point({ Waited: 2 }), point({ PoweredOn: 0, InUse: 0, Serviceable: 0, MinVMs: 0 })])}
+        busy={false}
+        error={null}
+      />,
+    );
+    expect(screen.getByText('Users who waited for a host')).toBeInTheDocument();
+    expect(screen.getByText(/Scaled to zero: no host was powered on after the latest scaling run/)).toBeInTheDocument();
+  });
+
+  it('leaves the waits out when nobody waited', () => {
+    render(<CapacityCard hours={24} onHoursChange={() => undefined} data={metrics([point({})])} busy={false} error={null} />);
+    expect(screen.queryByText('Users who waited for a host')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Scaled to zero/)).not.toBeInTheDocument();
+  });
 });
 
 describe('CheckoutHealthCard', () => {
@@ -53,6 +96,29 @@ describe('CheckoutHealthCard', () => {
     expect(screen.getByText('No checkouts yet')).toBeInTheDocument();
     expect(screen.getByText('No host was started')).toBeInTheDocument();
     expect(screen.queryByText('Failed checkouts')).not.toBeInTheDocument();
+    // A broker that predates start on demand reports no waits, so the figure is left out.
+    expect(screen.queryByText('Waited for a host')).not.toBeInTheDocument();
+  });
+
+  it('shows how long users waited while a host started', () => {
+    render(
+      <CheckoutHealthCard
+        stats={{ ...STATS, Starting: 9, Waits: 4, WaitsServed: 3, WaitingNow: 1, WaitP50Seconds: 75, WaitP95Seconds: 150 }}
+        hours={24}
+      />,
+    );
+    expect(screen.getByText('Waited for a host')).toBeInTheDocument();
+    expect(screen.getByText('4')).toBeInTheDocument();
+    expect(screen.getByText('Median 1 min · 95% within 3 min · 1 without a host yet · 1 waiting now')).toBeInTheDocument();
+  });
+
+  it('describes waits', () => {
+    const none = { ...STATS, Starting: 0, Waits: 0, WaitsServed: 0, WaitingNow: 0, WaitP50Seconds: null, WaitP95Seconds: null };
+    expect(describeWaits(none)).toBe('Nobody waited for a host to start');
+    expect(describeWaits({ ...none, WaitingNow: 2 })).toBe('2 waiting now');
+    expect(describeWaits({ ...none, Waits: 2, WaitsServed: 2, WaitP50Seconds: 45, WaitP95Seconds: 90 })).toBe(
+      'Median 45 s · 95% within 2 min',
+    );
   });
 
   it('formats times', () => {

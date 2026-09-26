@@ -844,7 +844,36 @@ there before Phase 3.
 
 ### 4.1 Start a host on demand at checkout
 
-**Status: Planned** · depends on Phase 1 (readiness and scaling fixes)
+**Status: Done** · depends on Phase 1 (readiness and scaling fixes)
+
+**Shipped.** A checkout that finds no ready host starts one and answers `202`, the AVD script
+waits for it, and a rule or window may keep a minimum of 0 hosts. Where it differs from the
+design below:
+
+- `ReserveVmForStart` runs under the scaling application lock, so it never races a scaling
+  run. It starts at most one host per waiting user, and at most `MaxPendingStarts` at once (2 by
+  default, 1–20), never past the active phase's `MaxVMs`. A user who arrives while enough hosts
+  are starting waits for one of them. The API commits before it asks Azure, and records the host
+  as off again if Azure refuses.
+- `retryAfterSeconds` isn't fixed at 60: it's the median start-to-reachable time over the last
+  week, less how long the oldest starting host has taken, kept between 30 and 120 seconds, and
+  the `Retry-After` header carries it too. While a user waits, each request probes the starting
+  hosts on port 22, so a host is handed out without waiting for the task's minute-by-minute
+  probe.
+- Start on demand is on by default. The **Start on demand** card on the Scaling page turns it
+  off and sets the pending-start limit. A minimum of 0 can be saved only while it's on, and if
+  it's turned off later, scaling reads 0 as 1.
+- The AVD script (2.0.0) waits in a modeless window with **Cancel**, up to `-MaxWaitSeconds`
+  (600 by default). It asks again after `Retry-After`, or 30, 30, then 60 seconds when the
+  broker gives none, gives up after three transient failures in a row, and renews a refused
+  token once.
+  It sends `clientVersion` with each checkout, and the Scaling page names the AVD hosts whose
+  latest checkout reported none, because their script can't wait.
+- `Update-AvdHostBrokerScript.ps1` replaces the script on existing AVD hosts through Run
+  Command, and `Migrate-ExistingEnvironment.ps1` runs it after the Linux host migration.
+- Checkout events gain a `Starting` outcome. Scaling counts waiting users as demand and keeps a
+  host for each of them when scaling down, and the dashboard reports waits, how many were
+  served, and their median and 95th percentile.
 
 **Why.** When the pool is exhausted, the user sees "No Linux host is available right now.
 Try again in a few minutes." (`Connect-LinuxBroker.ps1`). The script retries three times

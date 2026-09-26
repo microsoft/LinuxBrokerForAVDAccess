@@ -99,8 +99,8 @@ a path that serves the SPA shell.
 | POST | `/api/ui/scaling/rules/<ruleid>/delete` | |
 | GET | `/api/ui/scaling/log` | Paged. |
 | GET | `/api/ui/scaling/rules/history` | Paged. |
-| GET | `/api/ui/scaling/policy` | The time zone, the default rule, the windows, and what applies now and next. `{Available: false}` when the broker predates it, so the Scaling section offers the scaling rules instead. |
-| POST | `/api/ui/scaling/policy` | Body `{timezone}`. |
+| GET | `/api/ui/scaling/policy` | The time zone, the default rule, the windows, what applies now and next, the start on demand settings, and the broker script versions the AVD hosts run. `{Available: false}` when the broker predates it, so the Scaling section offers the scaling rules instead. |
+| POST | `/api/ui/scaling/policy` | Body with any of `timezone`, `startondemandenabled` and `maxpendingstarts`, applied together. |
 | GET | `/api/ui/scaling/timezones` | |
 | POST | `/api/ui/scaling/schedules` | Adds a window. |
 | POST | `/api/ui/scaling/schedules/<scheduleid>/update` | |

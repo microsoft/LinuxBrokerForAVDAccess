@@ -63,11 +63,24 @@ export function ScalingPreviewCard({ preview, title, busy = false, error = null,
             </div>
           </dl>
 
+          {preview.Counts.Waiting ? (
+            <p className="mt-3 mb-0 flex items-start gap-1.5 text-sm">
+              <Icon name="clock" size={14} className="mt-0.5 shrink-0 text-muted" />
+              <span>
+                {preview.Counts.Waiting.toLocaleString()} {preview.Counts.Waiting === 1 ? 'user is' : 'users are'} waiting
+                for a host to start, counted as in use.
+              </span>
+            </p>
+          ) : null}
+
           {preview.Phase.MinVMs !== null ? (
             <p className="mt-4 mb-0 text-xs text-muted">
               Using <span className="font-medium text-ink">{preview.Phase.Name ?? 'the default rule'}</span>: keep{' '}
               {preview.Phase.MinVMs}–{preview.Phase.MaxVMs} hosts, scale up at {preview.Phase.ScaleUpRatio}% and down at{' '}
               {preview.Phase.ScaleDownRatio}%.
+              {preview.Phase.MinVMs === 0 && preview.StartOnDemandEnabled ? (
+                <> With a minimum of 0, the last idle host can stop; start on demand starts one for the next user.</>
+              ) : null}
               {preview.Phase.MaintenanceSurge ? (
                 <>
                   {' '}

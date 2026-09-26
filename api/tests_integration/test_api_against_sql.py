@@ -14,9 +14,13 @@ def _checkout(client, username="alice", avdhost="avd-01"):
 
 
 def test_checkout_with_no_ready_host_is_a_conflict_not_a_server_error(client, db, remote):
+    # With start on demand on, the stopped host would be started instead: see
+    # test_start_on_demand_against_sql.py.
+    db.run("UPDATE dbo.ScalingPolicy SET StartOnDemandEnabled = 0")
     db.add_vm("lnxhost-01", power="Off", network="Unreachable")
     response = _checkout(client)
     assert response.status_code == 409, response.get_json()
+    assert db.vm("lnxhost-01")["PowerState"] == "Off"
 
 
 def test_checkout_provisions_the_user_and_records_the_assignment(client, db, remote):
