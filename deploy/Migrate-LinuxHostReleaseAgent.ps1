@@ -196,7 +196,10 @@ if (-not $linuxHosts) {
     exit 0
 }
 
+# Run Command starts a script without a shebang with /bin/sh, which on Ubuntu is dash: it stops
+# at the first line, and the host keeps its old agent.
 $remoteScript = @'
+#!/bin/bash
 set -euo pipefail
 
 api_base_url=__API_BASE_URL__
