@@ -1090,6 +1090,8 @@ Ensure-DefaultEnvValue -Key 'linuxHostDesktop' -ValueFactory { 'gnome' } | Out-N
 Ensure-DefaultEnvValue -Key 'linuxHostVmSize' -ValueFactory { 'Standard_D2s_v5' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdVmSize' -ValueFactory { 'Standard_D8s_v5' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdMaxSessionLimit' -ValueFactory { '5' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdLinuxDesktopFullScreen' -ValueFactory { 'true' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdLinuxDesktopMultiMonitor' -ValueFactory { 'true' } | Out-Null
 Ensure-DefaultEnvValue -Key 'vmSubscriptionId' -ValueFactory { $subscription.id } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlAdminLogin' -ValueFactory { 'brokeradmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlDatabaseName' -ValueFactory { 'LinuxBroker' } | Out-Null
@@ -1281,6 +1283,8 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdHostPoolName' -Value (Get-RequiredAzdEnvValue -Key 'avdHostPoolName')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdSessionHostCount' -Value (ConvertTo-IntParameterValue -Key 'avdSessionHostCount')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdMaxSessionLimit' -Value (ConvertTo-IntParameterValue -Key 'avdMaxSessionLimit' -DefaultValue 5)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdLinuxDesktopFullScreen' -Value (ConvertTo-BoolParameterValue -Key 'avdLinuxDesktopFullScreen' -DefaultValue $true)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdLinuxDesktopMultiMonitor' -Value (ConvertTo-BoolParameterValue -Key 'avdLinuxDesktopMultiMonitor' -DefaultValue $true)
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdVmNamePrefix' -Value (Get-RequiredAzdEnvValue -Key 'avdVmNamePrefix')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdVmSize' -Value (Get-RequiredAzdEnvValue -Key 'avdVmSize')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'azureCloudName' -Value (Get-RequiredAzdEnvValue -Key 'azureCloudName')

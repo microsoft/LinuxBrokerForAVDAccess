@@ -140,6 +140,12 @@
     "avdMaxSessionLimit": {
       "value": 5
     },
+    "avdLinuxDesktopFullScreen": {
+      "value": true
+    },
+    "avdLinuxDesktopMultiMonitor": {
+      "value": true
+    },
     "avdVmNamePrefix": {
       "value": "avdhost"
     },

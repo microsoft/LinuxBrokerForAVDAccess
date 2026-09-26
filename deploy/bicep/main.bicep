@@ -172,6 +172,12 @@ param avdSessionHostCount int = 0
 @description('Maximum number of sessions per AVD session host.')
 param avdMaxSessionLimit int = 5
 
+@description('Opens the Linux desktop full screen. False opens it in a window on one monitor. Turn it off only once every AVD session host runs Connect-LinuxBroker.ps1 2.0.0 or later (deploy/Update-AvdHostBrokerScript.ps1): older scripts refuse the argument and the Linux Desktop app fails to open.')
+param avdLinuxDesktopFullScreen bool = true
+
+@description('Spreads a full-screen Linux desktop across every monitor. False keeps it on one monitor. Turn it off only once every AVD session host runs Connect-LinuxBroker.ps1 2.0.0 or later.')
+param avdLinuxDesktopMultiMonitor bool = true
+
 @description('AVD session host VM name prefix.')
 param avdVmNamePrefix string = 'avdhost'
 
@@ -249,6 +255,8 @@ module resources 'main.resources.bicep' = {
     avdHostPoolName: avdHostPoolName
     avdSessionHostCount: avdSessionHostCount
     avdMaxSessionLimit: avdMaxSessionLimit
+    avdLinuxDesktopFullScreen: avdLinuxDesktopFullScreen
+    avdLinuxDesktopMultiMonitor: avdLinuxDesktopMultiMonitor
     avdVmNamePrefix: avdVmNamePrefix
     avdVmSize: avdVmSize
   }

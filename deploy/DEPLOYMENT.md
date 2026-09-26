@@ -111,6 +111,8 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `deployNfsShare`: `true` or `false`. Provisions a premium Azure Files NFS share when `nfsShare` is empty. Defaults to `true`.
 - `nfsShareQuotaGiB`: provisioned size of that share in GiB. Premium shares have a 100 GiB minimum, and cost is based on the provisioned size. Defaults to `100`.
 - `avdUsersGroupId`: object ID of an existing Entra group whose members can launch **Linux Desktop**. Leave empty to have `preprovision` create `<appName>-<environmentName>-avd-users-sg` and add you to it.
+- `avdLinuxDesktopFullScreen`: `true` or `false`. Defaults to `true`, which opens the Linux desktop full screen. `false` opens it in a window on one monitor. See [Linux Desktop Display](#linux-desktop-display).
+- `avdLinuxDesktopMultiMonitor`: `true` or `false`. Defaults to `true`, which spreads a full-screen Linux desktop across every monitor of the user's AVD session. `false` keeps it on one monitor. See [Linux Desktop Display](#linux-desktop-display).
 - `vmHostResourceGroup`: override if managed VMs live in a different resource group.
 - `brokerReaderGroupId`, `brokerOperatorGroupId`, `brokerAdminGroupId`: optional object IDs of Entra groups to assign the Broker API's `Reader`, `Operator` and `FullAccess` app roles to. Assigning an app role to a group needs Microsoft Entra ID P1 or P2; without it, assign the roles to users in **Enterprise applications**. See [Portal roles](#portal-roles).
 - `sqlDatabaseSkuName`: Azure SQL Database SKU, for example `Basic`, `S1` or `GP_S_Gen5_1`. Defaults to `Basic`, which suits small pools. Use `S1` or higher when many hosts and portal users call the broker at once; each API worker process opens at most `DB_MAX_CONCURRENCY` connections (6 by default).
@@ -324,6 +326,57 @@ xfconf-query -c xfce4-screensaver -p /lock/enabled
 Expect `uint32 0`, `false`, and `true` on GNOME, `0`, `false`, and `true` on MATE, and `false`
 twice on Xfce. If `gsettings` still reports the distribution defaults, check that
 `/etc/dconf/profile/user` contains `system-db:local` and rerun `sudo dconf update`.
+
+## Linux Desktop Display
+
+**Linux Desktop** runs [Connect-LinuxBroker.ps1](../avd_host/broker/Connect-LinuxBroker.ps1) on the
+AVD session host, and the script starts Remote Desktop Connection (`mstsc.exe`) to the user's Linux
+host. From version 2.0.0 of the script, the Linux desktop opens full screen across every monitor,
+with `mstsc /v:<address> /f /multimon`. Earlier scripts ran `mstsc /v:<address>`, which left full
+screen and monitors to the user's own Remote Desktop Connection settings.
+
+Two azd environment values change this for every user:
+
+| Value | Set to `false`, it |
+| --- | --- |
+| `avdLinuxDesktopFullScreen` | opens the desktop in a window on one monitor, whatever `avdLinuxDesktopMultiMonitor` says |
+| `avdLinuxDesktopMultiMonitor` | keeps a full-screen desktop on one monitor |
+
+```powershell
+azd env set avdLinuxDesktopMultiMonitor false
+azd provision
+```
+
+Provisioning passes a `false` value to the script as `-FullScreen Off` or `-MultiMonitor Off` on the
+RemoteApp's command line. The RemoteApp requires that command line, and every `azd provision` sets
+it again, so change these values rather than the command line in the Azure portal.
+
+Before you set either value to `false`, update every session host to script 2.0.0 or later,
+including the stopped ones, which [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1)
+skips. An older script refuses the argument, and **Linux Desktop** then closes on that session host
+without connecting. While both values are `true`, the command line is the one earlier releases
+used, which every script accepts.
+
+The Linux desktop can use only the monitors that the user's AVD session has. An AVD session uses
+every monitor of the user's device, if the user's client supports several, unless the host pool's
+RDP properties set `use multimon:i:0`, which this deployment does not.
+
+### Why the script writes no connection file
+
+Since the April 2026 Windows security update, Remote Desktop Connection warns about every `.rdp` file
+that no trusted publisher signed, and turns off every redirection the file asks for, the clipboard
+included, until the user turns each one back on. The warning applies only to connections started
+from a file, so the script passes switches to `mstsc.exe` instead of writing one. See
+[Understanding security warnings when opening Remote Desktop (RDP) files](https://learn.microsoft.com/windows-server/remote/remote-desktop-services/remotepc/understanding-security-warnings).
+
+Do not apply Microsoft's
+[high-security configuration](https://learn.microsoft.com/windows-server/remote/remote-desktop-services/remotepc/manage-rdp-file-security-settings-with-group-policy#high-security-environments)
+for RDP files to the session hosts. With **Allow .rdp files from valid publishers and user's
+default .rdp settings** disabled, Remote Desktop Connection opens only files signed by a trusted
+publisher, and refuses the connection the script starts as well. Disabling **Allow .rdp files from unknown
+publishers** on its own does no harm. Connection files signed by a publisher the session hosts
+trust, which would allow the high-security configuration, are in the
+[security hardening backlog](../docs/ROADMAP.md#security-hardening-backlog).
 
 ## Quick Start
 
@@ -635,12 +688,13 @@ Every layer tolerates the others being one release behind during the rollout, an
 
 ## Upgrading To Start On Demand
 
-This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)). It needs no new Azure resources, role assignments or deployment parameters, and no Bicep change, but the AVD session hosts need the new `Connect-LinuxBroker.ps1`.
+This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)), and opens the Linux desktop full screen across every monitor (item 4.8). It needs no new Azure resources or role assignments, but the AVD session hosts need the new `Connect-LinuxBroker.ps1`.
 
 - **Start on demand.** When a checkout finds no ready host, the API starts a stopped one for the user and answers `202` with how long to wait, instead of refusing. On the AVD session host, **Linux Desktop** shows *Your Linux desktop is starting…* with **Cancel**, asks again when the broker says to, and opens the desktop as soon as the host is reachable, for up to 10 minutes. The start is recorded as a scaling start is, in the scaling activity log as `Start On Demand` and in the audit log as `vm.start_on_demand`, and uses the API's existing **Desktop Virtualization Power On Off Contributor** role. It never takes the pool past the active rule's or window's `MaxVMs`, so a user who arrives when that many hosts are on and none is free is refused as before. Start on demand is on after the upgrade; an administrator can turn it off, and set how many hosts may start at once for waiting users (2 by default, up to 20), in the **Start on demand** card on the **Scaling** page.
 - **Scale to zero.** While start on demand is on, the default rule and schedule windows may keep a minimum of 0 hosts, so idle hosts stop, for example overnight, and the first user to arrive waits a minute or two for one to start. Scaling counts waiting users as demand, and a scale-down keeps a host for each of them. A minimum of 0 cannot be saved while start on demand is off. If it is turned off afterwards, scaling keeps one host on for those rules and windows, and the card says so.
 - **Connect-LinuxBroker.ps1 2.0.0.** Besides waiting for a host to start, the script tries a request again after no answer, a `408`, a `429` or a `5xx`, until three fail in a row, where the previous script tried three times at once. It requests a new token once when the broker refuses one, and tells the user in plain words what went wrong. Each attempt is logged under the **LinuxBrokerScript** source in the session host's Application event log. Session hosts keep the script they were deployed with, so the migration's new third step, [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1), replaces it on every running session host. An older script treats `202` as a failure: its user is told that no Linux host is available while a host starts for them, and gets that host at their next try once it is up. The script now reports its version with each checkout, and the **Start on demand** card shows, for the session hosts that asked for a host in the last seven days, how many run each version, and names those whose script cannot wait.
 - **Waits on the dashboard.** Every time a user is told to wait, the checkout records a `Starting` event. The dashboard's checkout card adds how many users waited, how many of them got a host, the median and 95th percentile wait, and how many are waiting now, and the capacity chart shows the users who waited. **Attention** no longer reports that no host is ready for a pool scaled to zero that nobody is waiting on.
+- **Full screen across every monitor.** The new script opens the Linux desktop full screen across every monitor of the user's AVD session, where the previous one left that to the user's own Remote Desktop Connection settings, so users with more than one monitor see the desktop on all of them. The new `avdLinuxDesktopFullScreen` and `avdLinuxDesktopMultiMonitor` values open it in a window or on one monitor instead; set them only after every session host runs the new script. See [Linux Desktop Display](#linux-desktop-display).
 
 ### Recommended order
 
@@ -823,6 +877,10 @@ Confirm that Microsoft Entra authentication for RDP is enabled on the Windows Cl
 Users cannot sign in to a session host that is not joined, even though the `AADLoginForWindows` extension reports success. On the host, `dsregcmd /status` shows `AzureAdJoined : NO`, and the **Microsoft-Windows-User Device Registration/Admin** event log shows `error_hostname_duplicate` ("Another object with the same value for property hostnames already exists").
 
 A device object left over from an earlier deployment that used the same VM name blocks the join. In Microsoft Entra ID, find the devices with the session host's name, confirm from the Azure resource ID on the device that its VM no longer exists, and delete that device. The host retries the join on its own, typically within 15 minutes.
+
+### Linux Desktop closes without connecting after the display values changed
+
+A session host whose `Connect-LinuxBroker.ps1` is older than 2.0.0 refuses the `-FullScreen` and `-MultiMonitor` arguments that `azd provision` adds to the RemoteApp's command line when `avdLinuxDesktopFullScreen` or `avdLinuxDesktopMultiMonitor` is `false`. PowerShell stops before the script runs, so **Linux Desktop** closes at once and nothing is logged under the **LinuxBrokerScript** source. Update the script on that session host with [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1) and `-AvdHostNames <session-host>`, or set both values back to `true` and run `azd provision` again. See [Linux Desktop Display](#linux-desktop-display).
 
 ### Linux Desktop opens but reports that no Linux host is available
 

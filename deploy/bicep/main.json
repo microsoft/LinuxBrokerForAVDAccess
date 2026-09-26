@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "9307409657661009644"
+      "templateHash": "12609193375771862613"
     }
   },
   "parameters": {
@@ -364,6 +364,20 @@
         "description": "Maximum number of sessions per AVD session host."
       }
     },
+    "avdLinuxDesktopFullScreen": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Opens the Linux desktop full screen. False opens it in a window on one monitor. Turn it off only once every AVD session host runs Connect-LinuxBroker.ps1 2.0.0 or later (deploy/Update-AvdHostBrokerScript.ps1): older scripts refuse the argument and the Linux Desktop app fails to open."
+      }
+    },
+    "avdLinuxDesktopMultiMonitor": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Spreads a full-screen Linux desktop across every monitor. False keeps it on one monitor. Turn it off only once every AVD session host runs Connect-LinuxBroker.ps1 2.0.0 or later."
+      }
+    },
     "avdVmNamePrefix": {
       "type": "string",
       "defaultValue": "avdhost",
@@ -553,6 +567,12 @@
           "avdMaxSessionLimit": {
             "value": "[parameters('avdMaxSessionLimit')]"
           },
+          "avdLinuxDesktopFullScreen": {
+            "value": "[parameters('avdLinuxDesktopFullScreen')]"
+          },
+          "avdLinuxDesktopMultiMonitor": {
+            "value": "[parameters('avdLinuxDesktopMultiMonitor')]"
+          },
           "avdVmNamePrefix": {
             "value": "[parameters('avdVmNamePrefix')]"
           },
@@ -567,7 +587,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "7015886803379737196"
+              "templateHash": "10629020714663216900"
             }
           },
           "parameters": {
@@ -811,6 +831,20 @@
             "avdMaxSessionLimit": {
               "type": "int",
               "defaultValue": 5
+            },
+            "avdLinuxDesktopFullScreen": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Opens the Linux desktop full screen."
+              }
+            },
+            "avdLinuxDesktopMultiMonitor": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Spreads a full-screen Linux desktop across every monitor."
+              }
             },
             "avdVmNamePrefix": {
               "type": "string",
@@ -3313,6 +3347,12 @@
                   },
                   "avdUsersGroupId": {
                     "value": "[parameters('avdUsersGroupId')]"
+                  },
+                  "linuxDesktopFullScreen": {
+                    "value": "[parameters('avdLinuxDesktopFullScreen')]"
+                  },
+                  "linuxDesktopMultiMonitor": {
+                    "value": "[parameters('avdLinuxDesktopMultiMonitor')]"
                   }
                 },
                 "template": {
@@ -3322,7 +3362,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "16448105144039973911"
+                      "templateHash": "1940046387567330439"
                     }
                   },
                   "parameters": {
@@ -3465,6 +3505,20 @@
                       "metadata": {
                         "description": "Display name of the RemoteApp that connects users to a Linux host."
                       }
+                    },
+                    "linuxDesktopFullScreen": {
+                      "type": "bool",
+                      "defaultValue": true,
+                      "metadata": {
+                        "description": "Opens the Linux desktop full screen. False opens it in a window on one monitor. Turn it off only once every session host runs Connect-LinuxBroker.ps1 2.0.0 or later: older scripts refuse the argument and the Linux Desktop app fails to open."
+                      }
+                    },
+                    "linuxDesktopMultiMonitor": {
+                      "type": "bool",
+                      "defaultValue": true,
+                      "metadata": {
+                        "description": "Spreads a full-screen Linux desktop across every monitor. False keeps it on one monitor. Turn it off only once every session host runs Connect-LinuxBroker.ps1 2.0.0 or later: older scripts refuse the argument and the Linux Desktop app fails to open."
+                      }
                     }
                   },
                   "variables": {
@@ -3479,6 +3533,7 @@
                     "linuxBrokerConfigScriptUri": "[format('{0}/custom_script_extensions/Configure-AVD-Host.ps1', variables('normalizedScriptSourceRoot'))]",
                     "desktopVirtualizationUserRoleId": "1d18fff3-a72a-46b5-b4a9-0b38a3cd7e63",
                     "virtualMachineUserLoginRoleId": "fb879df8-f326-4884-b1cf-06f3ad86be52",
+                    "linuxDesktopDisplayArguments": "[format('{0}{1}', if(parameters('linuxDesktopFullScreen'), '', ' -FullScreen Off'), if(parameters('linuxDesktopMultiMonitor'), '', ' -MultiMonitor Off'))]",
                     "osImage": "microsoftwindowsdesktop:Windows-11:win11-24h2-avd:latest",
                     "storageAccountName": "wvdportalstorageblob",
                     "containerName": "galleryartifacts",
@@ -3782,7 +3837,7 @@
                         "applicationType": "InBuilt",
                         "filePath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
                         "commandLineSetting": "Require",
-                        "commandLineArguments": "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\\Temp\\Connect-LinuxBroker.ps1",
+                        "commandLineArguments": "[format('-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\\Temp\\Connect-LinuxBroker.ps1{0}', variables('linuxDesktopDisplayArguments'))]",
                         "iconPath": "C:\\Windows\\System32\\mstsc.exe",
                         "iconIndex": 0,
                         "showInPortal": true

@@ -10,6 +10,11 @@
     window saying the desktop is starting, with Cancel, and asks again when the broker says to,
     until a host is ready, the user cancels, or MaxWaitSeconds pass.
 
+    The desktop opens full screen across every monitor, unless FullScreen or MultiMonitor is
+    Off. The script starts mstsc with switches rather than a connection file, because since the
+    April 2026 update Remote Desktop Connection asks the user about every unsigned .rdp file and
+    turns its redirections off, the clipboard included.
+
     Configure-AVD-Host.ps1 installs the script at C:\Temp\Connect-LinuxBroker.ps1 when the
     session host is provisioned, and deploy/Update-AvdHostBrokerScript.ps1 replaces it on
     existing session hosts. Both fill in the broker API's URL and client ID.
@@ -20,7 +25,15 @@ param (
 
     [Parameter(Mandatory = $false, HelpMessage = "How long to wait, in seconds, for a Linux host that the broker starts because none is ready. 0 does not wait.")]
     [ValidateRange(0, 3600)]
-    [int]$MaxWaitSeconds = 600
+    [int]$MaxWaitSeconds = 600,
+
+    [Parameter(Mandatory = $false, HelpMessage = "On opens the Linux desktop full screen. Off opens it in a window on one monitor, whatever MultiMonitor says.")]
+    [ValidateSet('On', 'Off')]
+    [string]$FullScreen = 'On',
+
+    [Parameter(Mandatory = $false, HelpMessage = "On spreads a full-screen Linux desktop across every monitor. Off keeps it on one monitor.")]
+    [ValidateSet('On', 'Off')]
+    [string]$MultiMonitor = 'On'
 )
 
 # Sent with every checkout, so the scaling policy page can list the session hosts whose script
@@ -637,17 +650,56 @@ function Save-LinuxHostCredential {
     }
 }
 
+# Returns the switches for mstsc.exe. mstsc reads anything else on its command line as another
+# switch or a connection file, so the address can only be a host name or an IP address, with an
+# optional port.
+function Get-MstscArgumentList {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$IPAddress,
+
+        [ValidateSet('On', 'Off')]
+        [string]$FullScreen = 'On',
+
+        [ValidateSet('On', 'Off')]
+        [string]$MultiMonitor = 'On'
+    )
+
+    if ($IPAddress -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.:-]*\z') {
+        throw "The broker gave '$IPAddress' as the Linux host's address, which is not a host name or an IP address."
+    }
+
+    $arguments = @("/v:$IPAddress")
+    if ($FullScreen -eq 'On') {
+        $arguments += '/f'
+        # A session that uses every monitor opens full screen even without /f, so a window
+        # leaves /multimon out.
+        if ($MultiMonitor -eq 'On') {
+            $arguments += '/multimon'
+        }
+    }
+    return $arguments
+}
+
 function Open-RemoteDesktop {
     param (
         [Parameter(Mandatory = $true)]
         [string]$Hostname,
 
         [Parameter(Mandatory = $true)]
-        [string]$IPAddress
+        [string]$IPAddress,
+
+        [ValidateSet('On', 'Off')]
+        [string]$FullScreen = 'On',
+
+        [ValidateSet('On', 'Off')]
+        [string]$MultiMonitor = 'On'
     )
 
     Write-Log "Connecting to $Hostname (IP: $IPAddress) using Remote Desktop Connection..." "INFO"
     try {
+        $mstscArguments = @(Get-MstscArgumentList -IPAddress $IPAddress -FullScreen $FullScreen -MultiMonitor $MultiMonitor)
+
         # xrdp presents a self-signed certificate, so skip the server authentication warning for this user.
         $rdpClientKey = "HKCU:\Software\Microsoft\Terminal Server Client"
         if (-not (Test-Path $rdpClientKey)) {
@@ -655,8 +707,8 @@ function Open-RemoteDesktop {
         }
         New-ItemProperty -Path $rdpClientKey -Name "AuthenticationLevelOverride" -PropertyType DWord -Value 0 -Force | Out-Null
 
-        # Launch mstsc with the IP address
-        Start-Process mstsc.exe -ArgumentList "/v:$IPAddress" -ErrorAction Stop
+        Write-Log "Starting mstsc.exe $($mstscArguments -join ' ')." "INFO"
+        Start-Process mstsc.exe -ArgumentList $mstscArguments -ErrorAction Stop
 
         Write-Log "Successfully connected to $Hostname (IP: $IPAddress) using Remote Desktop Connection." "INFO"
         return $true
@@ -674,6 +726,12 @@ function Invoke-ConnectLinuxBroker {
         [string]$Mode = "desktop",
 
         [int]$MaxWaitSeconds = 600,
+
+        [ValidateSet('On', 'Off')]
+        [string]$FullScreen = 'On',
+
+        [ValidateSet('On', 'Off')]
+        [string]$MultiMonitor = 'On',
 
         [Parameter(Mandatory = $true)]
         [string]$ApiBaseUrl,
@@ -702,7 +760,7 @@ function Invoke-ConnectLinuxBroker {
 
     if ($result.Outcome -eq "Assigned") {
         Save-LinuxHostCredential -Checkout $result.Checkout -Username $Username
-        if (Open-RemoteDesktop -Hostname $result.Checkout.Hostname -IPAddress $result.Checkout.IPAddress) {
+        if (Open-RemoteDesktop -Hostname $result.Checkout.Hostname -IPAddress $result.Checkout.IPAddress -FullScreen $FullScreen -MultiMonitor $MultiMonitor) {
             return 0
         }
         return 1
@@ -719,7 +777,7 @@ function Invoke-ConnectLinuxBroker {
 
 # Dot-sourcing the script, as its tests do, defines the functions without connecting.
 if ($MyInvocation.InvocationName -ne '.') {
-    $exitCode = Invoke-ConnectLinuxBroker -Mode $Mode -MaxWaitSeconds $MaxWaitSeconds -ApiBaseUrl $apiBaseUrl -Resource $apiAppIdUri `
-        -Username ($env:USERNAME -replace '[^a-zA-Z0-9_]', '') -AvdHost $env:COMPUTERNAME
+    $exitCode = Invoke-ConnectLinuxBroker -Mode $Mode -MaxWaitSeconds $MaxWaitSeconds -FullScreen $FullScreen -MultiMonitor $MultiMonitor `
+        -ApiBaseUrl $apiBaseUrl -Resource $apiAppIdUri -Username ($env:USERNAME -replace '[^a-zA-Z0-9_]', '') -AvdHost $env:COMPUTERNAME
     exit ([int]($exitCode | Select-Object -Last 1))
 }

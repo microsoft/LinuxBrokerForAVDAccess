@@ -69,7 +69,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
    - The user's ID is added to the Linux host with a unique 25-character password.
    - The user is added to appropriate user groups on the Linux host for RDP access.
    - The host also receives the key that unlocks the user's login keyring, so applications that save passwords do not ask for one.
-4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP and can work as needed.
+4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP, full screen across every monitor unless the deployment chose a window or one monitor, and can work as needed.
 5. **Session Management**:
    - If the user disconnects or logs off, the Session Release Agent on the Linux host reconciles the XRDP/Xorg session state immediately when possible and otherwise on the next safety-net poll.
    - A reconnect timer is initiated, 20 minutes by default and configurable from the portal.
@@ -366,6 +366,7 @@ The start on demand release needs no new Azure resources or roles, but the AVD s
 - **A checkout can start a host.** When no host is ready, the broker starts a stopped one and the user's **Linux Desktop** waits for it, for up to 10 minutes. It is on after the upgrade, and the **Scaling** page turns it off or limits how many hosts start at once.
 - **Update the AVD session hosts.** `deploy/Migrate-ExistingEnvironment.ps1` now also runs `deploy/Update-AvdHostBrokerScript.ps1`, which replaces the script on every running session host. An older script tells its user that no host is available while one starts for them.
 - **A pool can scale to zero.** With start on demand on, a rule or schedule window may keep a minimum of 0 hosts. Set one only after the **Scaling** page shows that every session host runs a script that can wait.
+- **The Linux desktop opens full screen across every monitor.** Set `avdLinuxDesktopFullScreen` or `avdLinuxDesktopMultiMonitor` to `false` to open it in a window or on one monitor, but only after every session host runs the new script. See [Linux Desktop Display](deploy/DEPLOYMENT.md#linux-desktop-display).
 
 ## Roadmap
 

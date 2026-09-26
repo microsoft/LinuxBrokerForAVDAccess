@@ -337,7 +337,7 @@ Describe 'Get-AvdHostUpdateScript' {
         $default = Get-PayloadValue -Payload (Get-AvdHostUpdateScript -SourceUrl $script:DefaultSourceUrl -ApiBaseUrl $script:ApiUrl -ApiClientId $script:ClientId) -Name 'destination'
 
         $bicep = [System.IO.File]::ReadAllText((Join-Path $script:RepoRoot 'deploy\bicep\modules\AVD\main.bicep'))
-        $remoteAppPath = [regex]::Match($bicep, "commandLineArguments: '[^']*-File (\S+?)'").Groups[1].Value.Replace('\\', '\')
+        $remoteAppPath = [regex]::Match($bicep, 'commandLineArguments: ''[^'']*-File ([^\s''$]+)').Groups[1].Value.Replace('\\', '\')
         $remoteAppPath | Should -BeExactly $default
         $configure = [System.IO.File]::ReadAllText((Join-Path $script:RepoRoot 'custom_script_extensions\Configure-AVD-Host.ps1'))
         $configure | Should -Match ([regex]::Escape('$folderPath = "C:\Temp"'))

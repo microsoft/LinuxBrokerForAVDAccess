@@ -822,8 +822,8 @@ there before Phase 3.
 
 | Item | Why | Direction |
 | --- | --- | --- |
-| Checks with `mstsc` | The test client couldn't present several monitors or play sound, and full screen and multi-monitor depend on the user's `Default.rdp`, because the launcher runs `mstsc /v:<ip>` | Through AVD, on an Ubuntu and a RHEL host: resize and maximize the window, use full screen and two monitors, and play sound on Ubuntu GNOME |
-| Resizing on Ubuntu | A live resize dropped FreeRDP 3.31 on xrdp 0.9.24 (neutrinolabs/xrdp#3877), and with **Keep sessions alive** off the agent then ended the session. RHEL 9's xrdp 0.10.6 resized fine. | If `mstsc` drops too, have the launcher write an `.rdp` file with `dynamic resolution:i:0` (4.8), or ship a fixed xrdp |
+| Checks with `mstsc` | The test client couldn't present several monitors or play sound. The launcher now opens the desktop full screen across every monitor (4.8), which nobody has checked through AVD yet, including whether a RemoteApp session gives the inner `mstsc` more than one monitor | Through AVD, on an Ubuntu and a RHEL host: resize and maximize the window, use full screen and two monitors, and play sound on Ubuntu GNOME |
+| Resizing on Ubuntu | A live resize dropped FreeRDP 3.31 on xrdp 0.9.24 (neutrinolabs/xrdp#3877), and with **Keep sessions alive** off the agent then ended the session. RHEL 9's xrdp 0.10.6 resized fine. | If `mstsc` drops too, ship a fixed xrdp, or evaluate turning dynamic resolution off in the user's `Default.rdp`, which `mstsc /v:` reads without the warning that a written `.rdp` file now brings (4.8) |
 | RDP audio | RHEL, Rocky and AlmaLinux package no xrdp audio module. On Ubuntu, Xfce runs PulseAudio, which has no xrdp module in the archive, and MATE starts no sound server, so only GNOME, with PipeWire and `pipewire-module-xrdp`, can play sound. | Build or ship `pipewire-module-xrdp` for the RHEL family, and run PipeWire in Xfce and MATE sessions |
 | Idle timeout on the RHEL family | RHEL, Rocky and AlmaLinux don't package `xprintidle`, even in EPEL, so those hosts neither warn nor disconnect idle sessions | Read the X idle time another way, for example with `python3` calling `XScreenSaverQueryInfo` in `libXss` through `ctypes` |
 | Host reboot during a lease (*pre-existing*) | The lease file survives the reboot, but the home isn't mounted again and the agent has no record of the user, so the host stays checked out until someone returns it, and a reconnect lands in an empty local home | Reconcile leases at boot: mount the home again, or release the lease |
@@ -1014,7 +1014,47 @@ Tracker that kept failing on an index written by another distribution's Tracker 
 
 ### 4.8 Tuning the double RDP hop
 
-**Status: Planned**
+**Status: Done, except the checks through AVD and the CPU measurements** · both wait for the
+Phase 4 validation
+
+**Shipped.** `Connect-LinuxBroker.ps1` opens the Linux desktop full screen across every monitor of
+the user's AVD session, with `mstsc /v:<address> /f /multimon`. Where it differs from the design
+below:
+
+- **Switches, not an `.rdp` file.** Since the April 2026 update (CVE-2026-26151), Remote Desktop
+  Connection warns about every `.rdp` file that no trusted publisher signed, and turns off every
+  redirection the file asks for, the clipboard included, until the user turns each one back on.
+  Connections that don't start from a file are unaffected, so the launcher keeps `mstsc /v:`. The
+  properties that have no mstsc switch (`session bpp`, `networkautodetect`, `bandwidthautodetect`,
+  `connection type`, wallpaper and font smoothing) stay as the user's own Remote Desktop
+  Connection settings have them. Signed connection
+  files are in the hardening backlog. Until they exist, the session hosts must stay out of
+  Microsoft's high-security RDP file configuration, which blocks `mstsc /v:` too, and
+  `DEPLOYMENT.md` says so.
+- **Both on by default, and each can be turned off.** `-FullScreen Off` opens the desktop in a
+  window on one monitor, and `-MultiMonitor Off` keeps it full screen on one. The deployment sets
+  them from `avdLinuxDesktopFullScreen` and `avdLinuxDesktopMultiMonitor` and passes only `Off`,
+  so the default RemoteApp command line is unchanged, and scripts older than 2.0.0, which refuse
+  the new parameters, keep working with it.
+- The script refuses an address from the broker that isn't a host name or an IP address, before it
+  changes anything, because mstsc reads anything else on its command line as another switch or a
+  connection file.
+- **No H.264 on the Linux hosts.** What each distribution's xrdp offers:
+
+  | Distribution | xrdp | Graphics pipeline |
+  | --- | --- | --- |
+  | Ubuntu 24.04 | 0.9.24 | None: it arrived in 0.10 |
+  | RHEL 9, Rocky Linux 9, AlmaLinux 9 | 0.10.6.1 from EPEL | RFX. The package brings the `noopenh264` stub, which xrdp detects and doesn't use |
+  | RHEL 8 | 0.10.6.1 from EPEL | RFX. The package is built without openh264 |
+
+  Without a GPU, H.264 in xrdp was more sluggish and blurrier than RFX
+  (neutrinolabs/xrdp#3489), so the hosts keep RFX. xrdp's default `gfx.toml` lists H.264 first,
+  so a host where Cisco's openh264 replaced the stub would switch to H.264. It belongs with GPU
+  encoding on GPU hosts.
+
+**Open.** Through AVD, check full screen and two monitors, including whether a RemoteApp session
+gives the inner `mstsc` more than one monitor, and measure CPU on both hops with GNOME and with
+Xfce, which feeds 3.2 and 4.3. Both are part of the Phase 4 validation and the 3.8 `mstsc` checks.
 
 The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
 - xrdp ≥ 0.10.2 supports **H.264** in the graphics pipeline. Check the version on each
@@ -1048,6 +1088,7 @@ A separate track, prioritized independently of the phases.
 | `avdadmin` sudo allowlist is root-equivalent | `usermod`, `userdel`, `groupadd` and `chpasswd` with arbitrary arguments (`Configure-*-Host.sh`) | Once every host runs `create-user.sh --password-stdin` (Phase 1), drop `chpasswd`, `groupadd` and `usermod`. Move `userdel` into `manage-lease.sh`. The allowlist then holds only validated scripts. |
 | SSH host keys not verified | `StrictHostKeyChecking=no` in `run_remote_command` | Record host keys at provisioning (Key Vault or SQL) and pin them, or use an SSH CA |
 | RDP server identity not verified | `AuthenticationLevelOverride=0` in `Connect-LinuxBroker.ps1`; xrdp self-signed certificates | Issue xrdp certificates from Key Vault or enterprise PKI, and restore server authentication |
+| Launch without a signed connection file | `Connect-LinuxBroker.ps1` starts `mstsc /v:` (4.8), so the AVD session hosts can't take Microsoft's high-security RDP file configuration, which allows only files signed by a trusted publisher, and the connection properties that have no `mstsc` switch stay at their defaults | Have the API sign each checkout's `.rdp` file with a Key Vault certificate that the session hosts trust through the trusted-publisher thumbprint policy. Signing on the session host would expose the key to its users. Pair it with the xrdp certificates above. |
 | Username collisions | `re.sub(r'[^a-zA-Z0-9_]', '', username)` maps `john.smith` and `johnsmith` to the same Linux account and NFS home | Derive usernames from a stable identifier (UPN plus collision check, or object ID) and keep the mapping in `VmUsers` |
 | Shared SSH private key for the whole fleet | One Key Vault secret (`KEY_NAME`) | Per-host keys or short-lived SSH certificates |
 | NFS `AUTH_SYS` trust | `sec=sys`, `NoRootSquash` (`nfs-storage.bicep`, `create-user.sh`); root on any host in the subnet can read every home | Restrict private endpoint access to the Linux host subnet with an NSG. Consider Azure NetApp Files with Kerberos (krb5p) for strong isolation. |

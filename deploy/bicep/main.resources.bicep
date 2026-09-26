@@ -103,6 +103,10 @@ param linuxHostDesktop string = 'gnome'
 param avdHostPoolName string = ''
 param avdSessionHostCount int = 0
 param avdMaxSessionLimit int = 5
+@description('Opens the Linux desktop full screen.')
+param avdLinuxDesktopFullScreen bool = true
+@description('Spreads a full-screen Linux desktop across every monitor.')
+param avdLinuxDesktopMultiMonitor bool = true
 param avdVmNamePrefix string = 'avdhost'
 @allowed([
   'Standard_DS2_v2'
@@ -603,6 +607,8 @@ module avdHosts 'modules/AVD/main.bicep' = if (deployAvdHosts && avdSessionHostC
     linuxBrokerApiClientId: apiClientId
     scriptSourceRoot: scriptSourceRoot
     avdUsersGroupId: avdUsersGroupId
+    linuxDesktopFullScreen: avdLinuxDesktopFullScreen
+    linuxDesktopMultiMonitor: avdLinuxDesktopMultiMonitor
   }
 }
 

@@ -61,11 +61,18 @@ param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/Lin
 param avdUsersGroupId string = ''
 @description('Display name of the RemoteApp that connects users to a Linux host.')
 param remoteAppFriendlyName string = 'Linux Desktop'
+@description('Opens the Linux desktop full screen. False opens it in a window on one monitor. Turn it off only once every session host runs Connect-LinuxBroker.ps1 2.0.0 or later: older scripts refuse the argument and the Linux Desktop app fails to open.')
+param linuxDesktopFullScreen bool = true
+@description('Spreads a full-screen Linux desktop across every monitor. False keeps it on one monitor. Turn it off only once every session host runs Connect-LinuxBroker.ps1 2.0.0 or later: older scripts refuse the argument and the Linux Desktop app fails to open.')
+param linuxDesktopMultiMonitor bool = true
 
 var normalizedScriptSourceRoot = endsWith(scriptSourceRoot, '/') ? take(scriptSourceRoot, length(scriptSourceRoot) - 1) : scriptSourceRoot
 var linuxBrokerConfigScriptUri = '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-AVD-Host.ps1'
 var desktopVirtualizationUserRoleId = '1d18fff3-a72a-46b5-b4a9-0b38a3cd7e63'
 var virtualMachineUserLoginRoleId = 'fb879df8-f326-4884-b1cf-06f3ad86be52'
+// The script's defaults are On, so only Off is passed, and a session host that still runs a
+// script from before 2.0.0 opens the desktop as it always has.
+var linuxDesktopDisplayArguments = '${linuxDesktopFullScreen ? '' : ' -FullScreen Off'}${linuxDesktopMultiMonitor ? '' : ' -MultiMonitor Off'}'
 
 var osImage = 'microsoftwindowsdesktop:Windows-11:win11-24h2-avd:latest'
 var vmNames = [for i in range(1, sessionHostCount): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
@@ -371,7 +378,7 @@ resource linuxDesktopApp 'Microsoft.DesktopVirtualization/applicationGroups/appl
     applicationType: 'InBuilt'
     filePath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
     commandLineSetting: 'Require'
-    commandLineArguments: '-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\\Temp\\Connect-LinuxBroker.ps1'
+    commandLineArguments: '-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\\Temp\\Connect-LinuxBroker.ps1${linuxDesktopDisplayArguments}'
     iconPath: 'C:\\Windows\\System32\\mstsc.exe'
     iconIndex: 0
     showInPortal: true

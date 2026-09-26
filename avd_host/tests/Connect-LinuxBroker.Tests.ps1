@@ -154,6 +154,53 @@ Describe 'Connect-LinuxBroker.ps1' {
     It 'waits ten minutes at most by default' {
         $MaxWaitSeconds | Should -Be 600
     }
+
+    It 'opens the desktop full screen across every monitor by default' {
+        $FullScreen | Should -Be 'On'
+        $MultiMonitor | Should -Be 'On'
+    }
+
+    # The AVD module passes these on the RemoteApp's command line.
+    It 'takes only On or Off for <Name>' -TestCases @(
+        @{ Name = 'FullScreen' }
+        @{ Name = 'MultiMonitor' }
+    ) {
+        $parameter = (Get-Command $script:BrokerScriptPath).Parameters[$Name]
+        $validateSet = $parameter.Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] }
+        $validateSet.ValidValues | Should -Be @('On', 'Off')
+    }
+
+    # Scripts from before 2.0.0 refuse these parameters, so the RemoteApp passes one only to turn
+    # it Off, and a default deployment keeps the command line those scripts accept.
+    It 'is given a display parameter by the RemoteApp only to turn it Off' {
+        $bicep = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\..\deploy\bicep\modules\AVD\main.bicep'))
+        $bicep | Should -Match ([regex]::Escape('-File C:\\Temp\\Connect-LinuxBroker.ps1${linuxDesktopDisplayArguments}'''))
+        $definition = [regex]::Match($bicep, '(?m)^var linuxDesktopDisplayArguments = (.+)$').Groups[1].Value
+        $passed = @([regex]::Matches($definition, '\? '''' : '' -(\w+) (\w+)'''))
+
+        @($passed | ForEach-Object { $_.Groups[1].Value }) | Should -Be @('FullScreen', 'MultiMonitor')
+        foreach ($argument in $passed) {
+            $argument.Groups[2].Value | Should -BeExactly 'Off'
+            (Get-Command $script:BrokerScriptPath).Parameters.Keys | Should -Contain $argument.Groups[1].Value
+        }
+    }
+
+    # Only starting the script runs the call, which no test does.
+    It 'passes -<Name> from its command line on' -TestCases @(
+        @{ Name = 'Mode' }
+        @{ Name = 'MaxWaitSeconds' }
+        @{ Name = 'FullScreen' }
+        @{ Name = 'MultiMonitor' }
+    ) {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:BrokerScriptPath, [ref]$null, [ref]$null)
+        $calls = @($ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Invoke-ConnectLinuxBroker'
+                }, $true))
+
+        $calls.Count | Should -Be 1
+        $calls[0].Extent.Text | Should -Match ('-{0} \${0}(\s|\z)' -f $Name)
+    }
 }
 
 Describe 'ConvertTo-RetryAfter' {
@@ -605,7 +652,9 @@ Describe 'Invoke-ConnectLinuxBroker' {
             $Username -eq 'alice' -and $AvdHost -eq 'avd-0' -and $MaxWaitSeconds -eq 600
         }
         Should -Invoke Save-LinuxHostCredential -Scope It -Times 1 -Exactly -ParameterFilter { $Username -eq 'alice' -and $Checkout.Hostname -eq 'lnx-05' }
-        Should -Invoke Open-RemoteDesktop -Scope It -Times 1 -Exactly -ParameterFilter { $Hostname -eq 'lnx-05' -and $IPAddress -eq '10.0.0.5' }
+        Should -Invoke Open-RemoteDesktop -Scope It -Times 1 -Exactly -ParameterFilter {
+            $Hostname -eq 'lnx-05' -and $IPAddress -eq '10.0.0.5' -and $FullScreen -eq 'On' -and $MultiMonitor -eq 'On'
+        }
         Should -Invoke Show-UserMessage -Scope It -Times 0 -Exactly
     }
 
@@ -614,6 +663,18 @@ Describe 'Invoke-ConnectLinuxBroker' {
 
         Invoke-ConnectLinuxBroker @connectArguments -MaxWaitSeconds 120 | Should -Be 0
         Should -Invoke Request-LinuxHost -Scope It -Times 1 -Exactly -ParameterFilter { $MaxWaitSeconds -eq 120 }
+    }
+
+    # The test cases' names differ from the parameters', which the filter would see instead of an
+    # unbound parameter.
+    It 'passes FullScreen <Screen> and MultiMonitor <Monitors> on' -TestCases @(
+        @{ Screen = 'Off'; Monitors = 'On' }
+        @{ Screen = 'On'; Monitors = 'Off' }
+    ) {
+        Mock Request-LinuxHost { New-CheckoutResult -Outcome Assigned -Checkout (New-TestCheckout) }
+
+        Invoke-ConnectLinuxBroker @connectArguments -FullScreen $Screen -MultiMonitor $Monitors | Should -Be 0
+        Should -Invoke Open-RemoteDesktop -Scope It -Times 1 -Exactly -ParameterFilter { $FullScreen -eq $Screen -and $MultiMonitor -eq $Monitors }
     }
 
     It 'fails when Remote Desktop Connection cannot be started' {
@@ -696,6 +757,58 @@ Describe 'Save-LinuxHostCredential' {
     }
 }
 
+Describe 'Get-MstscArgumentList' {
+    It 'opens full screen across every monitor by default' {
+        (Get-MstscArgumentList -IPAddress '10.0.0.5') -join ' ' | Should -BeExactly '/v:10.0.0.5 /f /multimon'
+    }
+
+    # A session that uses every monitor opens full screen even without /f.
+    It 'builds <Expected> for FullScreen <FullScreen> and MultiMonitor <MultiMonitor>' -TestCases @(
+        @{ FullScreen = 'On'; MultiMonitor = 'On'; Expected = '/v:10.0.0.5 /f /multimon' }
+        @{ FullScreen = 'On'; MultiMonitor = 'Off'; Expected = '/v:10.0.0.5 /f' }
+        @{ FullScreen = 'Off'; MultiMonitor = 'On'; Expected = '/v:10.0.0.5' }
+        @{ FullScreen = 'Off'; MultiMonitor = 'Off'; Expected = '/v:10.0.0.5' }
+    ) {
+        (Get-MstscArgumentList -IPAddress '10.0.0.5' -FullScreen $FullScreen -MultiMonitor $MultiMonitor) -join ' ' | Should -BeExactly $Expected
+    }
+
+    It 'returns a list even when the address is the only switch' {
+        $arguments = @(Get-MstscArgumentList -IPAddress '10.0.0.5' -FullScreen Off)
+
+        $arguments.Count | Should -Be 1
+        $arguments[0] | Should -BeExactly '/v:10.0.0.5'
+    }
+
+    It 'takes the address <Address>' -TestCases @(
+        @{ Address = '10.0.0.5' }
+        @{ Address = '10.0.0.5:3390' }
+        @{ Address = 'lnx-05' }
+        @{ Address = 'lnx-05.contoso.internal' }
+    ) {
+        (Get-MstscArgumentList -IPAddress $Address -MultiMonitor Off) -join ' ' | Should -BeExactly "/v:$Address /f"
+    }
+
+    It 'refuses the address <Name>' -TestCases @(
+        @{ Name = 'with another switch'; Address = '10.0.0.5 /admin' }
+        @{ Name = 'that is a switch'; Address = '/edit' }
+        @{ Name = 'that starts with a hyphen'; Address = '-10.0.0.5' }
+        @{ Name = 'with a quote'; Address = '10.0.0.5"' }
+        @{ Name = 'with a tab'; Address = "10.0.0.5`t" }
+        @{ Name = 'with a line break'; Address = "10.0.0.5`n" }
+        @{ Name = 'that is a connection file'; Address = 'C:\Users\Public\evil.rdp' }
+        @{ Name = 'on a share'; Address = '\\attacker\share\evil.rdp' }
+        @{ Name = 'with a Kelvin sign'; Address = "lnx-0$([char]0x212A)" }
+        @{ Name = 'with a typographic quote'; Address = "10.0.0.5$([char]0x201D)" }
+    ) {
+        { Get-MstscArgumentList -IPAddress $Address } | Should -Throw "*is not a host name or an IP address*"
+    }
+
+    It 'refuses FullScreen or MultiMonitor other than On or Off' {
+        { Get-MstscArgumentList -IPAddress '10.0.0.5' -FullScreen 'Yes' } | Should -Throw
+        { Get-MstscArgumentList -IPAddress '10.0.0.5' -MultiMonitor 'All' } | Should -Throw
+    }
+}
+
 Describe 'Open-RemoteDesktop' {
     BeforeEach {
         Mock Write-Log {}
@@ -706,15 +819,28 @@ Describe 'Open-RemoteDesktop' {
         Mock Start-Process {}
     }
 
-    It 'turns off the server authentication warning and starts mstsc for the host' {
+    It 'turns off the server authentication warning and starts mstsc full screen across every monitor' {
         Open-RemoteDesktop -Hostname 'lnx-05' -IPAddress '10.0.0.5' | Should -BeTrue
 
         Should -Invoke New-ItemProperty -Scope It -Times 1 -Exactly -ParameterFilter {
             $Path -eq 'HKCU:\Software\Microsoft\Terminal Server Client' -and $Name -eq 'AuthenticationLevelOverride' -and $Value -eq 0
         }
-        Should -Invoke Start-Process -Scope It -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'mstsc.exe' -and (@($ArgumentList) -join ' ') -eq '/v:10.0.0.5' }
+        Should -Invoke Start-Process -Scope It -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'mstsc.exe' -and (@($ArgumentList) -join ' ') -ceq '/v:10.0.0.5 /f /multimon' }
+        Should -Invoke Write-Log -Scope It -Times 1 -Exactly -ParameterFilter { $Message -eq 'Starting mstsc.exe /v:10.0.0.5 /f /multimon.' -and $Level -eq 'INFO' }
         Should -Invoke New-Item -Scope It -Times 0 -Exactly
         Should -Invoke Show-UserMessage -Scope It -Times 0 -Exactly
+    }
+
+    It 'opens a window when FullScreen is Off' {
+        Open-RemoteDesktop -Hostname 'lnx-05' -IPAddress '10.0.0.5' -FullScreen Off | Should -BeTrue
+
+        Should -Invoke Start-Process -Scope It -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'mstsc.exe' -and (@($ArgumentList) -join ' ') -ceq '/v:10.0.0.5' }
+    }
+
+    It 'keeps a full-screen desktop on one monitor when MultiMonitor is Off' {
+        Open-RemoteDesktop -Hostname 'lnx-05' -IPAddress '10.0.0.5' -MultiMonitor Off | Should -BeTrue
+
+        Should -Invoke Start-Process -Scope It -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'mstsc.exe' -and (@($ArgumentList) -join ' ') -ceq '/v:10.0.0.5 /f' }
     }
 
     It 'creates the Remote Desktop client key when it is missing' {
@@ -728,6 +854,17 @@ Describe 'Open-RemoteDesktop' {
         Mock Start-Process { throw 'The system cannot find the file specified.' }
 
         Open-RemoteDesktop -Hostname 'lnx-05' -IPAddress '10.0.0.5' | Should -BeFalse
+        Should -Invoke Show-UserMessage -Scope It -Times 1 -Exactly -ParameterFilter {
+            $Message -eq 'Remote Desktop Connection could not be started for lnx-05. Try again, or contact your administrator.' -and $Icon -eq 'Error'
+        }
+    }
+
+    It 'refuses an address that is not a host name or an IP address before changing anything' {
+        Open-RemoteDesktop -Hostname 'lnx-05' -IPAddress '10.0.0.5 /admin' | Should -BeFalse
+
+        Should -Invoke New-ItemProperty -Scope It -Times 0 -Exactly
+        Should -Invoke Start-Process -Scope It -Times 0 -Exactly
+        Should -Invoke Write-Log -Scope It -Times 1 -Exactly -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*is not a host name or an IP address*' }
         Should -Invoke Show-UserMessage -Scope It -Times 1 -Exactly -ParameterFilter {
             $Message -eq 'Remote Desktop Connection could not be started for lnx-05. Try again, or contact your administrator.' -and $Icon -eq 'Error'
         }
