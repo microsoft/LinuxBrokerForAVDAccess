@@ -307,10 +307,21 @@ xorg_processes_for_user() {
     ps h -C Xorg -o pid=,user=,comm= 2>/dev/null | awk -v user="$username" '$2 == user {print $1 ":" $3}'
 }
 
+# A killed Xorg can take a moment to exit and be reaped by xrdp-sesman, so it gets a few
+# seconds before it counts as remaining.
+XORG_EXIT_WAIT_SECONDS=5
+
 xorg_processes_remaining() {
     local username="$1"
+    local waited=0
 
-    [ -n "$(xorg_processes_for_user "$username")" ]
+    while [ -n "$(xorg_processes_for_user "$username")" ]; do
+        [ "$waited" -ge "$XORG_EXIT_WAIT_SECONDS" ] && return 0
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
 }
 
 terminate_session_processes() {

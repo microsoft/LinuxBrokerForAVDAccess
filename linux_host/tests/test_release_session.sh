@@ -75,9 +75,20 @@ run_for_script() {
     printf '666 bob Xorg\n' > "$FAKE_PS_XORG"
     printf 'bob\t0\n' > "$DISCONNECTED_USERS_FILE"
     export FAKE_KILL_SURVIVES=1
+    # A killed Xorg that exits while the agent waits for it counts as gone.
+    sleep() { : > "$FAKE_PS_XORG"; }
     reconcile_disconnected_user bob 0 2
+    [ -z "$(get_disconnect_timestamp bob)" ] || fail "$label timestamp should be cleared when Xorg exits during the wait"
+    assert_not_contains_file "$LOG_FILE" "Xorg processes remain"
+
+    printf '666 bob Xorg\n' > "$FAKE_PS_XORG"
+    printf 'bob\t0\n' > "$DISCONNECTED_USERS_FILE"
+    sleep() { :; }
+    reconcile_disconnected_user bob 0 2
+    unset -f sleep
     unset FAKE_KILL_SURVIVES
     assert_eq "$(get_disconnect_timestamp bob)" "0" "$label timestamp should remain when Xorg survives"
+    assert_file_contains "$LOG_FILE" "Xorg processes remain for user bob"
 }
 
 aggregation_for_script() {
