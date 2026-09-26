@@ -200,7 +200,7 @@ On RHEL, Rocky Linux and AlmaLinux, Xfce and MATE come from EPEL. Rocky Linux an
 These scripts:
 
 - **Install xrdp**: Set up xrdp for full desktop access over RDP, enabling users to connect via AVD. The host firewall allows only SSH and RDP.
-- **Start the desktop**: xrdp starts every session through `xrdp-startwm.sh`, which runs the desktop the deployment chose.
+- **Start the desktop**: xrdp starts every session through `xrdp-startwm.sh`, which runs the desktop the deployment chose. GNOME's file indexer is turned off, because it would crawl the home directories on the NFS share.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the timer-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.
 - **Install the Host Settings Agent**: Installs `apply-host-settings.sh` and seeds the settings profile, so screen lock policy and session timings are applied consistently on every supported distribution rather than only on RHEL 8. `LINUXBROKER_DISABLE_SCREEN_LOCK` still chooses the screen lock posture that is seeded; from then on the values are managed from the portal.

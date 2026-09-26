@@ -780,7 +780,8 @@ generate many small I/Os, especially browser and GNOME caches and indexers.
 - A sizing guide by concurrent users, and a Bicep default that reflects it.
 - Keep caches local: `/etc/profile.d/linuxbroker-cache.sh` sets
   `XDG_CACHE_HOME=/var/tmp/xdg-cache/$USER`, with `systemd-tmpfiles` cleanup. Point
-  browser disk caches at it. Disable GNOME Tracker/LocalSearch indexing of NFS homes.
+  browser disk caches at it. Tracker/LocalSearch no longer indexes NFS homes: 3.4 turned
+  it off.
 - Mount tuning per Azure Files NFS guidance (`nconnect=4` is already set; consider
   `read_ahead_kb`).
 - Alerts on share throttling (`Transactions` with `SuccessWithThrottling`) and

@@ -14,6 +14,7 @@ FAKE_SESMAN_PID=""
 
 # Everything the tests create. Whatever was there before is set aside and put back.
 TOUCHED=(/etc/xrdp /usr/libexec/xrdp /etc/polkit-1 /etc/X11 /usr/share/gnome-session /etc/linuxbroker
+    /usr/lib/systemd/user /etc/systemd/user /etc/xdg/autostart
     "$LAUNCHER" "$SHIM_DIR/systemctl" "$SHIM_DIR/gnome-session" "$SHIM_DIR/startxfce4" "$SHIM_DIR/mate-session"
     "$SHIM_DIR/logger" "$SHIM_DIR/gnome-keyring-daemon" "$SHIM_DIR/gdbus" "$SHIM_DIR/pgrep" "$SHIM_DIR/pkill"
     /run/linuxbroker-keyring)
@@ -125,7 +126,7 @@ fake_session_script() {
   echo "ran=$label"
   echo "args=\$*"
   for name in DESKTOP_SESSION XDG_SESSION_DESKTOP XDG_CURRENT_DESKTOP XDG_SESSION_TYPE GNOME_SHELL_SESSION_MODE LBTEST_PROFILE \
-      GNOME_KEYRING_CONTROL SSH_AUTH_SOCK; do
+      GNOME_KEYRING_CONTROL SSH_AUTH_SOCK XDG_CONFIG_DIRS; do
     echo "\$name=\${!name:-}"
   done
 } > "\${LBTEST_SESSION_OUT:-/dev/null}"
@@ -238,8 +239,122 @@ INI
     assert_file_contains "$SESMAN_INI" "DefaultWindowManager=/usr/local/bin/xrdp-startwm.sh"
     assert_contains "$out" "polkit is not installed"
     assert_not_exists /etc/polkit-1
+    assert_contains "$out" "No file indexer is installed."
+    assert_not_exists /etc/systemd/user
+    assert_not_exists /etc/linuxbroker/xdg
     # Without a running xrdp-sesman there is nothing to reload.
     assert_file_contains "$FAKE_CALLS" "systemctl show --property MainPID --value xrdp-sesman.service"
+}
+
+# Stand-ins for an indexer's packaged user services and autostart entries.
+fake_user_units() {
+    local unit
+    mkdir -p /usr/lib/systemd/user
+    for unit in "$@"; do
+        printf '[Service]\nExecStart=/usr/libexec/%s\n' "${unit%.service}" > "/usr/lib/systemd/user/$unit"
+    done
+}
+
+fake_autostart_entries() {
+    local entry
+    mkdir -p /etc/xdg/autostart
+    for entry in "$@"; do
+        printf '[Desktop Entry]\nType=Application\nExec=/usr/libexec/%s\nOnlyShowIn=GNOME;KDE;XFCE;\n' "${entry%.desktop}" \
+            > "/etc/xdg/autostart/$entry"
+    done
+}
+
+assert_masked() {
+    [ -L "/etc/systemd/user/$1" ] || fail "expected /etc/systemd/user/$1 to be a mask${2:+ ($2)}"
+    assert_eq "$(readlink "/etc/systemd/user/$1")" "/dev/null" "$1${2:+ ($2)}"
+}
+
+assert_hidden() {
+    local entry="/etc/linuxbroker/xdg/autostart/$1"
+    assert_file_contains "$entry" "Hidden=true"
+    assert_eq "$(grep -v '^#' "$entry" | head -n 1)" "[Desktop Entry]" "$1 starts with its group"
+    assert_file_contains "$entry" "Type=Application"
+    assert_file_contains "$entry" "Name=${1%.desktop}"
+    assert_eq "$(stat -c %a "$entry")" "644" "$1"
+}
+
+test_install_turns_off_the_file_indexer() {
+    local out status unit packaged
+
+    # Tracker 3, as Ubuntu 24.04 ships it: the miner is enabled for GNOME sessions.
+    setup_case
+    write_ubuntu_sesman
+    fake_session_script /etc/xrdp/startwm.sh debian-startwm
+    fake_user_units tracker-miner-fs-3.service tracker-miner-fs-control-3.service tracker-writeback-3.service \
+        tracker-xdg-portal-3.service gnome-session-manager@.service
+    mkdir -p /etc/systemd/user/gnome-session.target.wants
+    ln -s /usr/lib/systemd/user/tracker-miner-fs-3.service /etc/systemd/user/gnome-session.target.wants/tracker-miner-fs-3.service
+    fake_autostart_entries tracker-miner-fs-3.desktop nm-applet.desktop
+    packaged=$(md5sum /etc/xdg/autostart/tracker-miner-fs-3.desktop)
+
+    out=$(bash "$LAUNCHER" --install 2>&1); status=$?
+    assert_eq "$status" "0" "install: $out"
+    for unit in tracker-miner-fs-3.service tracker-miner-fs-control-3.service tracker-writeback-3.service; do
+        assert_masked "$unit"
+    done
+    assert_not_exists /etc/systemd/user/tracker-xdg-portal-3.service
+    assert_not_exists /etc/systemd/user/gnome-session-manager@.service
+    assert_hidden tracker-miner-fs-3.desktop
+    assert_eq "$(ls -A /etc/linuxbroker/xdg/autostart | tr '\n' ' ')" "tracker-miner-fs-3.desktop " "only the indexer's entries"
+    assert_eq "$(stat -c %a /etc/linuxbroker/xdg)" "755"
+    assert_eq "$(stat -c %a /etc/linuxbroker/xdg/autostart)" "755"
+    assert_eq "$(md5sum /etc/xdg/autostart/tracker-miner-fs-3.desktop)" "$packaged" "the package's entry is not changed"
+    assert_eq "$(readlink /etc/systemd/user/gnome-session.target.wants/tracker-miner-fs-3.service)" \
+        "/usr/lib/systemd/user/tracker-miner-fs-3.service" "the package's enablement is not changed"
+    assert_contains "$out" "The file indexer's services are masked: tracker-miner-fs-3.service tracker-miner-fs-control-3.service tracker-writeback-3.service."
+    assert_contains "$out" "The file indexer's autostart entries are hidden from broker sessions: tracker-miner-fs-3.desktop."
+
+    # Running it again changes nothing; an edited entry is managed.
+    echo "Hidden=false" >> /etc/linuxbroker/xdg/autostart/tracker-miner-fs-3.desktop
+    out=$(bash "$LAUNCHER" --install 2>&1); status=$?
+    assert_eq "$status" "0" "second install: $out"
+    assert_not_contains_file /etc/linuxbroker/xdg/autostart/tracker-miner-fs-3.desktop "Hidden=false"
+    assert_masked tracker-miner-fs-3.service "after a second install"
+
+    # A file an administrator put in a mask's place is left alone.
+    rm -f /etc/systemd/user/tracker-writeback-3.service
+    printf '[Service]\nExecStart=/usr/local/bin/writeback\n' > /etc/systemd/user/tracker-writeback-3.service
+    out=$(bash "$LAUNCHER" --install 2>&1); status=$?
+    assert_eq "$status" "0" "install beside an administrator's unit: $out"
+    assert_contains "$out" "WARNING: /etc/systemd/user/tracker-writeback-3.service is not a mask"
+    assert_file_contains /etc/systemd/user/tracker-writeback-3.service "ExecStart=/usr/local/bin/writeback"
+    assert_masked tracker-miner-fs-3.service "beside an administrator's unit"
+
+    # Tracker 2, as RHEL 8 ships it, which its GNOME starts from the autostart entries.
+    setup_case
+    write_ubuntu_sesman
+    fake_session_script /etc/xrdp/startwm.sh debian-startwm
+    fake_user_units tracker-store.service tracker-miner-fs.service tracker-miner-apps.service tracker-extract.service \
+        tracker-writeback.service
+    fake_autostart_entries tracker-store.desktop tracker-miner-fs.desktop tracker-miner-apps.desktop tracker-extract.desktop
+    out=$(bash "$LAUNCHER" --install 2>&1); status=$?
+    assert_eq "$status" "0" "Tracker 2: $out"
+    for unit in tracker-store.service tracker-miner-fs.service tracker-miner-apps.service tracker-extract.service \
+        tracker-writeback.service; do
+        assert_masked "$unit" "Tracker 2"
+    done
+    assert_eq "$(stat -c %a /etc/systemd/user)" "755"
+    for unit in tracker-store.desktop tracker-miner-fs.desktop tracker-miner-apps.desktop tracker-extract.desktop; do
+        assert_hidden "$unit"
+    done
+
+    # LocalSearch, as GNOME 47 renamed it.
+    setup_case
+    write_ubuntu_sesman
+    fake_session_script /etc/xrdp/startwm.sh debian-startwm
+    fake_user_units localsearch-3.service localsearch-control-3.service tinysparql-xdg-portal-3.service
+    fake_autostart_entries localsearch-3.desktop
+    out=$(bash "$LAUNCHER" --install 2>&1); status=$?
+    assert_eq "$status" "0" "LocalSearch: $out"
+    assert_masked localsearch-3.service "LocalSearch"
+    assert_masked localsearch-control-3.service "LocalSearch"
+    assert_not_exists /etc/systemd/user/tinysparql-xdg-portal-3.service
+    assert_hidden localsearch-3.desktop
 }
 
 test_install_reads_sesman_ini_as_xrdp_does() {
@@ -507,6 +622,34 @@ test_xfce_and_mate_on_rhel() {
     assert_eq "$(session_value ran)" "rhel-startwm" "no xinit Xsession"
 }
 
+test_sessions_skip_the_hidden_autostart_entries() {
+    setup_case
+    setup_rhel_session
+    install_desktop_shim startxfce4
+    printf 'DESKTOP=xfce\n' > "$DESKTOP_FILE"
+
+    # Nothing hidden, nothing changed.
+    run_session
+    assert_eq "$(session_value XDG_CONFIG_DIRS)" ""
+
+    mkdir -p /etc/linuxbroker/xdg/autostart
+    run_session
+    assert_eq "$(session_value ran)" "rhel-xsession"
+    assert_eq "$(session_value XDG_CONFIG_DIRS)" "/etc/linuxbroker/xdg:/etc/xdg"
+
+    run_session XDG_CONFIG_DIRS=/etc/xdg/xdg-custom:/etc/xdg
+    assert_eq "$(session_value XDG_CONFIG_DIRS)" "/etc/linuxbroker/xdg:/etc/xdg/xdg-custom:/etc/xdg"
+
+    run_session XDG_CONFIG_DIRS=/etc/linuxbroker/xdg:/etc/xdg
+    assert_eq "$(session_value XDG_CONFIG_DIRS)" "/etc/linuxbroker/xdg:/etc/xdg" "already first"
+
+    # The distribution's own script gets them too.
+    printf 'DESKTOP=gnome\n' > "$DESKTOP_FILE"
+    run_session
+    assert_eq "$(session_value ran)" "rhel-startwm"
+    assert_eq "$(session_value XDG_CONFIG_DIRS)" "/etc/linuxbroker/xdg:/etc/xdg"
+}
+
 test_an_unusable_record_falls_back() {
     local record
     setup_case
@@ -726,6 +869,7 @@ test_without_a_usable_key_the_desktop_starts_as_before() {
 
 test_install_on_ubuntu
 test_install_on_rhel
+test_install_turns_off_the_file_indexer
 test_install_reads_sesman_ini_as_xrdp_does
 test_install_refusals
 test_ubuntu_on_xorg
@@ -733,6 +877,7 @@ test_otherwise_the_distribution_script_runs
 test_xfce_and_mate_on_debian
 test_rhel_runs_its_own_script_for_gnome
 test_xfce_and_mate_on_rhel
+test_sessions_skip_the_hidden_autostart_entries
 test_an_unusable_record_falls_back
 test_the_login_keyring_opens_with_the_brokers_key
 test_a_keyring_the_key_cannot_open_is_moved_aside

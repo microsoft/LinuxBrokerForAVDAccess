@@ -8,12 +8,14 @@
 # script cannot start Ubuntu's session on Xorg, or choose between desktops installed side by
 # side. Anything this script does not handle, including a host without desktop.conf, runs the
 # distribution's script exactly as before. First, it unlocks the user's login keyring with the
-# key create-user.sh left for them, when there is one.
+# key create-user.sh left for them, when there is one, and puts /etc/linuxbroker/xdg ahead of
+# the distribution's configuration directories.
 #
 # --install, as root, points DefaultWindowManager in /etc/xrdp/sesman.ini at this script. It
 # records the script it replaces in /etc/linuxbroker/xrdp-startwm.conf, keeps the original
 # file as sesman.ini.linuxbroker-orig, and installs a polkit rule so broker users are not asked
-# for an administrator's password inside an xrdp session. It is idempotent: the host migration
+# for an administrator's password inside an xrdp session. It also turns off the file indexer,
+# which would crawl the home directories on the NFS share. It is idempotent: the host migration
 # runs it, and patch-host.sh runs it after every patch run in case an update replaced
 # sesman.ini. It exits 3 when xrdp is not installed, and 1 on any other failure.
 
@@ -31,6 +33,10 @@ DESKTOP_FILE="$SETTINGS_DIRECTORY/desktop.conf"
 POLKIT_RULES_DIRECTORY="/etc/polkit-1/rules.d"
 POLKIT_RULE_FILE="$POLKIT_RULES_DIRECTORY/45-linuxbroker-xrdp.rules"
 UBUNTU_SESSION_FILE="/usr/share/gnome-session/sessions/ubuntu.session"
+USER_UNIT_DIRECTORY="/usr/lib/systemd/user"
+USER_UNIT_MASK_DIRECTORY="/etc/systemd/user"
+AUTOSTART_DIRECTORY="/etc/xdg/autostart"
+XDG_OVERRIDE_DIRECTORY="$SETTINGS_DIRECTORY/xdg"
 
 # Where a relative DefaultWindowManager lives: /etc/xrdp upstream, /usr/libexec/xrdp in the
 # Fedora and EPEL packages.
@@ -240,6 +246,85 @@ install_polkit_rule() {
     write_managed_file "$POLKIT_RULE_FILE" "$(polkit_rule)"
 }
 
+# Tracker, which GNOME 47 renames LocalSearch, indexes each home directory into a database it
+# keeps in that home, so on a broker host it crawls the NFS share. Homes also move between
+# hosts, and a database one distribution's Tracker wrote does not open in another's: RHEL 9's
+# miner then exits, and systemd restarts it every few seconds, reading the share each time. Its
+# services are masked, which also stops D-Bus from starting them, and its autostart entries are
+# hidden from the sessions this script starts, because Xfce, and GNOME on RHEL 8, run them
+# directly. File managers still search, without the index. A session that is already running
+# keeps any indexer it started.
+
+# The indexer's user services, except its portal, which only passes on sandboxed applications'
+# queries.
+indexer_units() {
+    local path name
+
+    for path in "$USER_UNIT_DIRECTORY"/tracker-*.service "$USER_UNIT_DIRECTORY"/localsearch-*.service; do
+        [ -f "$path" ] || continue
+        name="${path##*/}"
+        case "$name" in
+            *-xdg-portal-*) ;;
+            *) printf '%s\n' "$name" ;;
+        esac
+    done
+}
+
+# Masks a user service for every user, as systemctl --global mask does, unless an
+# administrator has put a file of their own in its place.
+mask_user_unit() {
+    local link="$USER_UNIT_MASK_DIRECTORY/$1"
+
+    if [ -L "$link" ] && [ "$(readlink "$link")" = "/dev/null" ]; then
+        return 0
+    fi
+    if [ -e "$link" ] || [ -L "$link" ]; then
+        echo "WARNING: $link is not a mask, so $1 is left as it is."
+        return 0
+    fi
+    mkdir -p "$USER_UNIT_MASK_DIRECTORY" && ln -s /dev/null "$link" && restore_context "$link"
+}
+
+hidden_autostart_entry() {
+    cat <<ENTRY
+# Managed by xrdp-startwm.sh (Linux Broker). Manual edits are overwritten.
+# Hides $AUTOSTART_DIRECTORY/$1 from broker sessions, which do not index files.
+[Desktop Entry]
+Type=Application
+Name=${1%.desktop}
+Exec=true
+NoDisplay=true
+Hidden=true
+ENTRY
+}
+
+install_indexing_policy() {
+    local unit path name units=() entries=()
+
+    while IFS= read -r unit; do
+        mask_user_unit "$unit" || return 1
+        units+=("$unit")
+    done < <(indexer_units)
+
+    for path in "$AUTOSTART_DIRECTORY"/tracker-*.desktop "$AUTOSTART_DIRECTORY"/localsearch-*.desktop; do
+        [ -f "$path" ] || continue
+        name="${path##*/}"
+        if ! mkdir -p "$XDG_OVERRIDE_DIRECTORY/autostart" \
+            || ! chmod 755 "$XDG_OVERRIDE_DIRECTORY" "$XDG_OVERRIDE_DIRECTORY/autostart"; then
+            return 1
+        fi
+        write_managed_file "$XDG_OVERRIDE_DIRECTORY/autostart/$name" "$(hidden_autostart_entry "$name")" || return 1
+        entries+=("$name")
+    done
+
+    if [ ${#units[@]} -eq 0 ] && [ ${#entries[@]} -eq 0 ]; then
+        echo "No file indexer is installed."
+        return 0
+    fi
+    [ ${#units[@]} -eq 0 ] || echo "The file indexer's services are masked: ${units[*]}."
+    [ ${#entries[@]} -eq 0 ] || echo "The file indexer's autostart entries are hidden from broker sessions: ${entries[*]}."
+}
+
 # xrdp-sesman reloads sesman.ini on SIGHUP without touching running sessions, which a restart
 # can end. xrdp 0.10 also reads it again for every new session.
 reload_sesman() {
@@ -309,6 +394,7 @@ install_launcher() {
     fi
 
     install_polkit_rule || fail "Could not write $POLKIT_RULE_FILE."
+    install_indexing_policy || fail "Could not turn off the file indexer."
     exit 0
 }
 
@@ -535,9 +621,20 @@ run_original() {
     exit 1
 }
 
+# Puts the autostart entries --install hides ahead of the distribution's own. Xsession and the
+# desktops add their own directories to the list, and keep this one.
+use_broker_configuration() {
+    [ -d "$XDG_OVERRIDE_DIRECTORY" ] || return 0
+    case "${XDG_CONFIG_DIRS:-}" in
+        "$XDG_OVERRIDE_DIRECTORY" | "$XDG_OVERRIDE_DIRECTORY":*) ;;
+        *) export XDG_CONFIG_DIRS="$XDG_OVERRIDE_DIRECTORY:${XDG_CONFIG_DIRS:-/etc/xdg}" ;;
+    esac
+}
+
 start_session() {
     local desktop starter=""
 
+    use_broker_configuration
     unlock_keyring
     desktop=$(configured_desktop)
     if [ -n "$desktop" ]; then
