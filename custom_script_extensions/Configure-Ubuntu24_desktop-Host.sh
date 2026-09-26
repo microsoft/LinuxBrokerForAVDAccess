@@ -193,6 +193,17 @@ hide-reboot-notification=true
 notify-ubuntu-advantage-available=false
 show-livepatch-status-icon=false
 EOF
+# mate-session-manager brings ubuntu-mate-default-settings, which makes the Ubuntu MATE panel
+# layout the default. That layout needs the Brisk menu, indicator and trash applets, which the
+# core MATE set leaves out, so every new user was asked to delete three broken applets. MATE's
+# own layout uses only the applets mate-panel ships.
+if [ "$desktop" = "mate" ]; then
+    cat >> "$ubuntu_dconf_file" <<'EOF'
+
+[org/mate/panel/general]
+default-layout='default'
+EOF
+fi
 chmod 644 "$ubuntu_dconf_file"
 dconf update
 
