@@ -144,7 +144,7 @@ def test_scaling_rules_constraints_history_and_create_lock(conn, second_conn):
     assert "StopMode" in exec_sql(conn, "EXEC dbo.GetVmScalingRulesHistoryPaged")[0]
 
     for sql in [
-        "UPDATE dbo.VmScalingRules SET MinVMs=0",
+        "UPDATE dbo.VmScalingRules SET MinVMs=-1",
         "UPDATE dbo.VmScalingRules SET ScaleUpIncrement=0",
         "UPDATE dbo.VmScalingRules SET ScaleUpRatio=101",
         "UPDATE dbo.VmScalingRules SET StopMode='Stop'",
