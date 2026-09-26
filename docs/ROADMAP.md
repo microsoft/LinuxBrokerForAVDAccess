@@ -965,9 +965,42 @@ different image.
 
 ### 4.5 AVD scaling plan for the pass-through host pool
 
-**Status: Planned** · no dependencies
+**Status: Done** · no dependencies
 
-The Windows AVD hosts only run `mstsc`, but they're deployed without any autoscale
+**Shipped.** The deployment creates a scaling plan for the AVD host pool, turns on Start VM on
+Connect, and gives the Azure Virtual Desktop service principal the role both need. Where it
+differs from the design below:
+
+- **The role is on the subscription, not the host resource group.** Autoscale works only with
+  **Desktop Virtualization Power On Off Contributor** on the whole subscription, so the deployment
+  assigns it there. That needs Owner or User Access Administrator, and lets Azure Virtual Desktop
+  start and stop any session host in the subscription. `preprovision` finds the service principal
+  by its app ID only, never by its display name, and checks whether it holds the role already,
+  directly, through a group or from a management group, and whether the deploying account can
+  assign it. When the role is there it assigns nothing, and when it can't be assigned the plan is
+  deployed assigned to no host pool and `preprovision` prints the command for an Owner, instead
+  of the deployment failing. `assignAvdAutoscaleRole=false` leaves the role to an administrator.
+- Microsoft documents one app ID for Azure Virtual Desktop, `9cdead84-a844-4324-93f2-b2e6bb768d07`.
+  `avdServicePrincipalAppId` still overrides it, and `avdServicePrincipalObjectId` skips the lookup.
+- **Start VM on Connect,** so the weekend minimum can be 0. The first user after a quiet spell
+  waits while it starts a session host, and can then wait again for a Linux host: two starts.
+- **Weekday and weekend schedules** with the same times, 07:00, 09:00, 18:00 and 20:00 in UTC by
+  default. Ramp-up and peak spread new sessions breadth-first, and ramp-down and off-peak pack them
+  depth-first. Nobody is signed out: a session host stops only once it has no sessions,
+  disconnected ones included.
+- **Stopped hosts no longer block a deployment.** Azure refuses to change a VM extension on a VM
+  that isn't running, and autoscale, like the broker's own scaling and start on demand, leaves
+  hosts deallocated. `preprovision` lists the Linux hosts and session hosts that aren't running,
+  and the deployment leaves out their extensions. A deployment also replaces a VM's tags, so it
+  writes back the `excludeFromScaling` tag that keeps autoscale away from a session host.
+
+**Open.** Check in Azure that the role check sees an existing assignment, that the plan can be
+assigned right after the role, that `UTC` is accepted as the time zone, and that Start VM on
+Connect starts a session host. `Update-AvdHostBrokerScript.ps1` skips session hosts that
+autoscale has stopped, so updating one means tagging, starting and updating it by hand; the
+script could start them itself, or session hosts could update the script when they boot.
+
+**Design.** The Windows AVD hosts only run `mstsc`, but they're deployed without any autoscale
 (`deploy/bicep/modules/AVD/main.bicep` has no `scalingPlans` resource). Add a
 `Microsoft.DesktopVirtualization/scalingPlans` resource for the pooled host pool, with
 ramp-up, peak, ramp-down and off-peak parameters and a time zone. Assign **Desktop

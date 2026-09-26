@@ -107,6 +107,12 @@ param avdMaxSessionLimit int = 5
 param avdLinuxDesktopFullScreen bool = true
 @description('Spreads a full-screen Linux desktop across every monitor.')
 param avdLinuxDesktopMultiMonitor bool = true
+@description('Starts a deallocated AVD session host when a user connects and no running one can take the session.')
+param avdStartVmOnConnect bool = true
+@description('Lowercase AVD session host names mapped to their excludeFromScaling tag values, which the deployment writes back.')
+param avdScalingExclusions object = {}
+@description('Linux hosts and AVD session hosts whose VM extensions are left out because the VMs are not running.')
+param hostNamesNotRunning array = []
 param avdVmNamePrefix string = 'avdhost'
 @allowed([
   'Standard_DS2_v2'
@@ -583,6 +589,7 @@ module linuxHosts 'modules/Linux/main.bicep' = if (deployLinuxHosts && linuxHost
     scriptSourceRoot: scriptSourceRoot
     disableScreenLock: linuxHostDisableScreenLock
     desktop: linuxHostDesktop
+    skipExtensionVmNames: hostNamesNotRunning
   }
 }
 
@@ -609,6 +616,9 @@ module avdHosts 'modules/AVD/main.bicep' = if (deployAvdHosts && avdSessionHostC
     avdUsersGroupId: avdUsersGroupId
     linuxDesktopFullScreen: avdLinuxDesktopFullScreen
     linuxDesktopMultiMonitor: avdLinuxDesktopMultiMonitor
+    startVmOnConnect: avdStartVmOnConnect
+    skipExtensionVmNames: hostNamesNotRunning
+    scalingExclusions: avdScalingExclusions
   }
 }
 

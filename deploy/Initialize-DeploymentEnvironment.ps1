@@ -59,6 +59,11 @@ if ([string]::IsNullOrWhiteSpace($EnvironmentName)) {
 
 $graphAppId = '00000003-0000-0000-c000-000000000000'
 $defaultAccessAppRoleId = '00000000-0000-0000-0000-000000000000'
+# The Azure Virtual Desktop first-party app, whose service principal starts and stops session
+# hosts for the scaling plan and Start VM on Connect.
+$avdServicePrincipalAppId = '9cdead84-a844-4324-93f2-b2e6bb768d07'
+# Desktop Virtualization Power On Off Contributor, which main.bicep assigns to that service principal.
+$avdAutoscaleRoleDefinitionId = '40c5ff49-9181-41f8-ae61-143b0e78555e'
 $frontendGraphDelegatedPermissions = @(
     @{ name = 'User.Read'; id = 'e1fe6dd8-ba31-4d61-89e7-88639da4683d' }
     @{ name = 'profile'; id = '14dad69e-099b-42c9-810b-d002981feec1' }
@@ -815,6 +820,515 @@ function Ensure-EntraRdpAuthentication {
     }
 }
 
+# A property's value, or $null when the object or the property is missing. The lookup ignores
+# case, as Azure does with tag names.
+function Get-PropertyValue {
+    param(
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
+function Get-VmTagValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Vm,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return [string](Get-PropertyValue -InputObject (Get-PropertyValue -InputObject $Vm -Name 'tags') -Name $Name)
+}
+
+# A time of day for the AVD scaling plan, as HH:mm on a 24-hour clock.
+function ConvertTo-TimeOfDayParameterValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][string]$DefaultValue
+    )
+
+    $value = Get-AzdEnvValue -Key $Key
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        $value = $DefaultValue
+    }
+
+    $match = [regex]::Match($value.Trim(), '^([01]?[0-9]|2[0-3]):([0-5][0-9])\z')
+    if (-not $match.Success) {
+        throw "azd environment value '$Key' must be a time of day as HH:mm on a 24-hour clock, such as 07:00, but was '$value'."
+    }
+
+    return ('{0:D2}:{1}' -f [int]$match.Groups[1].Value, $match.Groups[2].Value)
+}
+
+function ConvertTo-PercentParameterValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][int]$DefaultValue,
+        [Parameter(Mandatory = $false)][int]$Minimum = 0
+    )
+
+    $value = ConvertTo-IntParameterValue -Key $Key -DefaultValue $DefaultValue
+    if ($value -lt $Minimum -or $value -gt 100) {
+        throw "azd environment value '$Key' must be a whole number from $Minimum to 100, but was '$value'."
+    }
+
+    return $value
+}
+
+# The scaling plan's phases start in order within one day: ramp-up, peak, ramp-down, off-peak.
+function Assert-AvdScalingPlanTimeOrder {
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Times)
+
+    $previousKey = $null
+    $previousMinutes = -1
+    foreach ($key in @($Times.Keys)) {
+        $parts = ([string]$Times[$key]).Split(':')
+        $minutes = ([int]$parts[0] * 60) + [int]$parts[1]
+        if ($null -ne $previousKey -and $minutes -le $previousMinutes) {
+            throw "azd environment value '$key' ($($Times[$key])) must be later than '$previousKey' ($($Times[$previousKey])). The scaling plan's ramp-up, peak, ramp-down and off-peak times must come in that order within one day."
+        }
+
+        $previousKey = $key
+        $previousMinutes = $minutes
+    }
+}
+
+# The canonical form of a Windows time zone ID, or '' when this machine does not know it. It does
+# not use FindSystemTimeZoneById, which also accepts IANA names on .NET 6 and later.
+function Resolve-WindowsTimeZoneId {
+    param([Parameter(Mandatory = $true)][string]$TimeZoneId)
+
+    $id = $TimeZoneId.Trim()
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        foreach ($zone in [System.TimeZoneInfo]::GetSystemTimeZones()) {
+            if ([string]::Equals($zone.Id, $id, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $zone.Id
+            }
+        }
+
+        return ''
+    }
+
+    # Elsewhere the system time zones have IANA IDs, so ask ICU whether it knows the Windows ID.
+    $ianaId = $null
+    if ($null -ne [System.TimeZoneInfo].GetMethod('TryConvertWindowsIdToIanaId', [type[]]@([string], [string].MakeByRefType())) -and
+        [System.TimeZoneInfo]::TryConvertWindowsIdToIanaId($id, [ref]$ianaId)) {
+        return $id
+    }
+
+    return ''
+}
+
+# The broker's Linux hosts and AVD session hosts that exist but are not running, and the
+# excludeFromScaling tags on the session hosts. Azure refuses to change an extension on a VM that
+# is not running, and a deployment replaces the tags of every VM it declares.
+function Get-HostPowerStateSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$SubscriptionId,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName
+    )
+
+    $snapshot = @{
+        Listed = $false
+        NotRunning = @()
+        NotRunningDisplay = @()
+        AvdScalingExclusions = [ordered]@{}
+    }
+    $unlistedWarning = "so this deployment updates the VM extensions of every host. If one is not running, the deployment fails with 'Cannot modify extensions in the VM when the VM is not running'; start that host, or run azd provision again."
+
+    $groupExists = (@(az group exists --name $ResourceGroupName --subscription $SubscriptionId --only-show-errors 2>$null) -join '').Trim()
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Could not check whether resource group '$ResourceGroupName' exists, $unlistedWarning"
+        return $snapshot
+    }
+
+    if ($groupExists -ne 'true') {
+        $snapshot.Listed = $true
+        return $snapshot
+    }
+
+    $vmJson = (@(az vm list --resource-group $ResourceGroupName --subscription $SubscriptionId --show-details --output json --only-show-errors 2>$null) -join "`n")
+    $vms = $null
+    if ($LASTEXITCODE -eq 0) {
+        try {
+            $vms = @(ConvertFrom-Json -InputObject $vmJson | ForEach-Object { $_ })
+        }
+        catch {
+            $vms = $null
+        }
+    }
+
+    if ($null -eq $vms) {
+        Write-Warning "Could not list the VMs in resource group '$ResourceGroupName', $unlistedWarning"
+        return $snapshot
+    }
+
+    $notRunning = New-Object System.Collections.Generic.List[string]
+    $notRunningDisplay = New-Object System.Collections.Generic.List[string]
+    foreach ($vm in $vms) {
+        if ($null -eq $vm) {
+            continue
+        }
+
+        $role = Get-VmTagValue -Vm $vm -Name 'broker-role'
+        if ($role -ne 'linux-host' -and $role -ne 'avd-host') {
+            continue
+        }
+
+        $name = [string](Get-PropertyValue -InputObject $vm -Name 'name')
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            continue
+        }
+
+        # An empty power state means Azure could not report one, so the host is treated as running.
+        $powerState = [string](Get-PropertyValue -InputObject $vm -Name 'powerState')
+        if (-not [string]::IsNullOrWhiteSpace($powerState) -and $powerState -notmatch 'running') {
+            $notRunning.Add($name.ToLowerInvariant())
+            $notRunningDisplay.Add("$name ($powerState)")
+        }
+
+        # Autoscale leaves alone a session host that carries the tag, whatever its value.
+        if ($role -eq 'avd-host') {
+            $exclusion = Get-PropertyValue -InputObject (Get-PropertyValue -InputObject $vm -Name 'tags') -Name 'excludeFromScaling'
+            if ($null -ne $exclusion) {
+                $snapshot.AvdScalingExclusions[$name.ToLowerInvariant()] = [string]$exclusion
+            }
+        }
+    }
+
+    $snapshot.Listed = $true
+    $snapshot.NotRunning = $notRunning.ToArray()
+    $snapshot.NotRunningDisplay = $notRunningDisplay.ToArray()
+    return $snapshot
+}
+
+# The Azure Virtual Desktop service principal's object ID in this tenant, or '' when it cannot be
+# found or created. It is looked up by app ID only, never by display name, so that a lookalike app
+# registration can never be given a role on the subscription.
+function Resolve-AvdServicePrincipalObjectId {
+    param(
+        [AllowEmptyString()][string]$ConfiguredObjectId = '',
+        [Parameter(Mandatory = $true)][string]$AppId,
+        [switch]$SkipCreate
+    )
+
+    $parsed = [guid]::Empty
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredObjectId)) {
+        if (-not [guid]::TryParseExact($ConfiguredObjectId.Trim(), 'D', [ref]$parsed)) {
+            throw "azd environment value 'avdServicePrincipalObjectId' must be the object ID of the Azure Virtual Desktop service principal, a GUID, but was '$ConfiguredObjectId'."
+        }
+
+        return $parsed.ToString()
+    }
+
+    if (-not [guid]::TryParseExact($AppId.Trim(), 'D', [ref]$parsed)) {
+        throw "azd environment value 'avdServicePrincipalAppId' must be the app ID of the Azure Virtual Desktop service principal, a GUID, but was '$AppId'."
+    }
+
+    $appIdValue = $parsed.ToString()
+    $listJson = (@(az ad sp list --filter "appId eq '$appIdValue'" --query '[].id' --output json --only-show-errors 2>$null) -join "`n")
+    if ($LASTEXITCODE -eq 0) {
+        $ids = @()
+        try {
+            $ids = @(ConvertFrom-Json -InputObject $listJson | ForEach-Object { [string]$_ })
+        }
+        catch {
+            $ids = @()
+        }
+
+        foreach ($id in $ids) {
+            if ([guid]::TryParseExact($id, 'D', [ref]$parsed)) {
+                return $parsed.ToString()
+            }
+        }
+    }
+
+    if ($SkipCreate) {
+        return ''
+    }
+
+    $createdId = (@(az ad sp create --id $appIdValue --query id --output tsv --only-show-errors 2>$null) -join '').Trim()
+    if ($LASTEXITCODE -eq 0 -and [guid]::TryParseExact($createdId, 'D', [ref]$parsed)) {
+        return $parsed.ToString()
+    }
+
+    return ''
+}
+
+# A GET on Azure Resource Manager through az rest. The query string goes in --url-parameters,
+# because az.cmd would hand an unquoted & in the URL to cmd.exe.
+function Invoke-ArmGetRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$QueryParameters
+    )
+
+    # Merged stderr lines must not stop the script, whatever the caller's preference.
+    $callerErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = az rest --method get --url $Path --url-parameters $QueryParameters --output json --only-show-errors 2>&1
+        $succeeded = $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $callerErrorActionPreference
+    }
+
+    $standardOutput = New-Object System.Collections.Generic.List[string]
+    $errorOutput = New-Object System.Collections.Generic.List[string]
+    foreach ($line in @($output)) {
+        if ($line -is [System.Management.Automation.ErrorRecord]) {
+            $errorOutput.Add([string]$line)
+        }
+        elseif ($null -ne $line) {
+            $standardOutput.Add([string]$line)
+        }
+    }
+
+    $response = $null
+    if ($succeeded) {
+        try {
+            $response = ConvertFrom-Json -InputObject ($standardOutput -join "`n")
+        }
+        catch {
+            $response = $null
+        }
+
+        if ($null -eq $response) {
+            $succeeded = $false
+            $errorOutput.Add('The response was not a JSON object.')
+        }
+    }
+
+    return @{
+        Succeeded = $succeeded
+        Response = $response
+        ErrorText = ($errorOutput -join "`n")
+    }
+}
+
+# Whether the principal holds the role on the whole subscription, directly or from a management
+# group: Assigned, NotAssigned or Unknown. Autoscale is not satisfied by the role on a resource
+# group.
+function Get-AvdAutoscaleRoleState {
+    param(
+        [Parameter(Mandatory = $true)][string]$PrincipalObjectId,
+        [Parameter(Mandatory = $true)][string]$SubscriptionId,
+        [string]$RoleDefinitionId = '40c5ff49-9181-41f8-ae61-143b0e78555e'
+    )
+
+    $subscriptionScope = "/subscriptions/$SubscriptionId"
+    # atScope() returns the assignments on the subscription and the scopes above it, and
+    # assignedTo() the principal's own and those of the groups it belongs to.
+    $request = Invoke-ArmGetRequest -Path "$subscriptionScope/providers/Microsoft.Authorization/roleAssignments" -QueryParameters @(
+        'api-version=2022-04-01',
+        ('$filter=atScope() and assignedTo(''{0}'')' -f $PrincipalObjectId)
+    )
+    if (-not $request.Succeeded) {
+        return 'Unknown'
+    }
+
+    foreach ($assignment in @(Get-PropertyValue -InputObject $request.Response -Name 'value')) {
+        $properties = Get-PropertyValue -InputObject $assignment -Name 'properties'
+        if ($null -eq $properties) {
+            $properties = $assignment
+        }
+
+        $principalId = [string](Get-PropertyValue -InputObject $properties -Name 'principalId')
+        $principalType = [string](Get-PropertyValue -InputObject $properties -Name 'principalType')
+        $roleDefinition = [string](Get-PropertyValue -InputObject $properties -Name 'roleDefinitionId')
+        $scope = [string](Get-PropertyValue -InputObject $properties -Name 'scope')
+        if (-not [string]::Equals($principalId, $PrincipalObjectId, [System.StringComparison]::OrdinalIgnoreCase) -and $principalType -ne 'Group') {
+            continue
+        }
+
+        if (-not $roleDefinition.EndsWith("/$RoleDefinitionId", [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        if ($scope -eq '/' -or
+            [string]::Equals($scope.TrimEnd('/'), $subscriptionScope, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $scope.StartsWith('/providers/Microsoft.Management/managementGroups/', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return 'Assigned'
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue -InputObject $request.Response -Name 'nextLink'))) {
+        return 'Unknown'
+    }
+
+    return 'NotAssigned'
+}
+
+# Whether an Azure RBAC action matches one of a role's action patterns, in which * is a wildcard.
+function Test-ActionPermitted {
+    param(
+        [Parameter(Mandatory = $true)][string]$Action,
+        [AllowNull()][AllowEmptyCollection()][object[]]$Patterns = @()
+    )
+
+    foreach ($pattern in @($Patterns)) {
+        $text = [string]$pattern
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            continue
+        }
+
+        $expression = '^' + [regex]::Escape($text.Trim()).Replace('\*', '.*') + '\z'
+        if ([regex]::IsMatch($Action, $expression, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+# Whether the signed-in account can create role assignments on the whole subscription: Yes, No or
+# Unknown. It reads the account's effective permissions there, which do not show deny assignments,
+# so the deployment can still be refused.
+function Test-CanAssignSubscriptionRole {
+    param([Parameter(Mandatory = $true)][string]$SubscriptionId)
+
+    $action = 'Microsoft.Authorization/roleAssignments/write'
+    $request = Invoke-ArmGetRequest -Path "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/permissions" -QueryParameters @('api-version=2022-04-01')
+    if (-not $request.Succeeded) {
+        if ($request.ErrorText -match 'AuthorizationFailed|Forbidden') {
+            return 'No'
+        }
+
+        return 'Unknown'
+    }
+
+    $conditional = $false
+    foreach ($permission in @(Get-PropertyValue -InputObject $request.Response -Name 'value')) {
+        if ($null -eq $permission) {
+            continue
+        }
+
+        $actions = @(Get-PropertyValue -InputObject $permission -Name 'actions')
+        $notActions = @(Get-PropertyValue -InputObject $permission -Name 'notActions')
+        if ((Test-ActionPermitted -Action $action -Patterns $actions) -and -not (Test-ActionPermitted -Action $action -Patterns $notActions)) {
+            # A condition, such as one that limits which roles may be assigned, may not allow this one.
+            if ([string]::IsNullOrWhiteSpace([string](Get-PropertyValue -InputObject $permission -Name 'condition'))) {
+                return 'Yes'
+            }
+
+            $conditional = $true
+        }
+    }
+
+    if ($conditional -or -not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue -InputObject $request.Response -Name 'nextLink'))) {
+        return 'Unknown'
+    }
+
+    return 'No'
+}
+
+# Whether the deployment gives the Azure Virtual Desktop service principal Desktop Virtualization
+# Power On Off Contributor on the subscription, and whether it assigns the scaling plan to the
+# host pool, which Azure refuses while the service principal lacks that role. An assignment that
+# is certain to be refused is left out with a warning, so that it does not fail the deployment.
+function Resolve-AvdAutoscaleRolePlan {
+    param(
+        [Parameter(Mandatory = $true)][bool]$AvdSessionHostsDeployed,
+        [Parameter(Mandatory = $true)][bool]$ScalingPlanRequested,
+        [Parameter(Mandatory = $true)][bool]$StartVmOnConnect,
+        [Parameter(Mandatory = $true)][bool]$AssignRoleRequested,
+        [AllowEmptyString()][string]$ConfiguredObjectId = '',
+        [Parameter(Mandatory = $true)][string]$AppId,
+        [Parameter(Mandatory = $true)][string]$SubscriptionId,
+        [string]$RoleDefinitionId = '40c5ff49-9181-41f8-ae61-143b0e78555e'
+    )
+
+    $plan = @{
+        ServicePrincipalObjectId = ''
+        AssignRole = $false
+        ScalingPlanEnabled = $ScalingPlanRequested
+        Summary = ''
+    }
+
+    if (-not $AvdSessionHostsDeployed) {
+        $plan.Summary = 'no AVD session hosts are deployed.'
+        return $plan
+    }
+
+    if (-not $ScalingPlanRequested -and -not $StartVmOnConnect) {
+        $plan.Summary = 'neither the scaling plan nor Start VM on Connect needs a role.'
+        return $plan
+    }
+
+    $roleName = 'Desktop Virtualization Power On Off Contributor'
+    $startVmImpact = 'Start VM on Connect cannot start session hosts'
+    $leftOutImpact = New-Object System.Collections.Generic.List[string]
+    $keptImpact = New-Object System.Collections.Generic.List[string]
+    if ($ScalingPlanRequested) {
+        $leftOutImpact.Add('the scaling plan is deployed but assigned to no host pool, because Azure refuses the assignment without the role')
+        $keptImpact.Add('Azure refuses to assign the scaling plan to the host pool, which fails the deployment')
+    }
+    if ($StartVmOnConnect) {
+        $leftOutImpact.Add($startVmImpact)
+        $keptImpact.Add($startVmImpact)
+    }
+
+    $objectId = Resolve-AvdServicePrincipalObjectId -ConfiguredObjectId $ConfiguredObjectId -AppId $AppId -SkipCreate:(-not $AssignRoleRequested)
+    $plan.ServicePrincipalObjectId = $objectId
+    $ownerCommand = "az role assignment create --assignee-object-id $objectId --assignee-principal-type ServicePrincipal --role $RoleDefinitionId --scope /subscriptions/$SubscriptionId"
+
+    if (-not $AssignRoleRequested) {
+        # The administrator manages the role, possibly through a custom role this check cannot see,
+        # so the scaling plan stays as requested.
+        if (-not [string]::IsNullOrWhiteSpace($objectId) -and
+            (Get-AvdAutoscaleRoleState -PrincipalObjectId $objectId -SubscriptionId $SubscriptionId -RoleDefinitionId $RoleDefinitionId) -eq 'NotAssigned') {
+            Write-Warning "assignAvdAutoscaleRole is false, and the Azure Virtual Desktop service principal does not hold $roleName on subscription '$SubscriptionId'. Unless it has the same permissions through another role, $($keptImpact -join ', and '). An Owner or User Access Administrator can assign the role with this command: $ownerCommand"
+        }
+
+        $plan.Summary = 'the role is managed outside this deployment (assignAvdAutoscaleRole is false).'
+        return $plan
+    }
+
+    if ([string]::IsNullOrWhiteSpace($objectId)) {
+        $plan.ScalingPlanEnabled = $false
+        Write-Warning "Could not find or create the service principal of Azure Virtual Desktop (app ID $AppId) in this tenant, so the deployment cannot give it $roleName on subscription '$SubscriptionId'. Until it holds the role, $($leftOutImpact -join ', and '). Set avdServicePrincipalObjectId to the object ID of the service principal and run azd provision again, or, if it already holds the role, set assignAvdAutoscaleRole to false."
+        $plan.Summary = 'the Azure Virtual Desktop service principal was not found, so no role is assigned.'
+        return $plan
+    }
+
+    $roleState = Get-AvdAutoscaleRoleState -PrincipalObjectId $objectId -SubscriptionId $SubscriptionId -RoleDefinitionId $RoleDefinitionId
+    if ($roleState -eq 'Assigned') {
+        $plan.Summary = "the Azure Virtual Desktop service principal already holds $roleName on the subscription."
+        return $plan
+    }
+
+    $canAssign = Test-CanAssignSubscriptionRole -SubscriptionId $SubscriptionId
+    if ($canAssign -eq 'No') {
+        $plan.ScalingPlanEnabled = $false
+        Write-Warning "Your account cannot assign roles on subscription '$SubscriptionId', so the deployment cannot give the Azure Virtual Desktop service principal $roleName there. Until it holds the role, $($leftOutImpact -join ', and '). Have an Owner or User Access Administrator run the command below, then run azd provision again. If the service principal has the same permissions through another role, set assignAvdAutoscaleRole to false instead. Command: $ownerCommand"
+        $plan.Summary = 'the role is not assigned, and your account cannot assign it.'
+        return $plan
+    }
+
+    $plan.AssignRole = $true
+    if ($roleState -eq 'Unknown' -or $canAssign -eq 'Unknown') {
+        Write-Warning "Could not confirm whether the Azure Virtual Desktop service principal already holds $roleName on subscription '$SubscriptionId', or whether your account can assign it, so the deployment assigns it. If the deployment fails with RoleAssignmentExists, the role is already assigned: set assignAvdAutoscaleRole to false. If it fails with AuthorizationFailed, have an Owner or User Access Administrator run the command below, then set assignAvdAutoscaleRole to false. Command: $ownerCommand"
+    }
+
+    $plan.Summary = "the deployment gives the Azure Virtual Desktop service principal $roleName on the subscription."
+    return $plan
+}
+
 function Ensure-FrontendApplication {
     param(
         [Parameter(Mandatory = $true)][hashtable]$CloudContext,
@@ -1092,6 +1606,20 @@ Ensure-DefaultEnvValue -Key 'avdVmSize' -ValueFactory { 'Standard_D8s_v5' } | Ou
 Ensure-DefaultEnvValue -Key 'avdMaxSessionLimit' -ValueFactory { '5' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdLinuxDesktopFullScreen' -ValueFactory { 'true' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdLinuxDesktopMultiMonitor' -ValueFactory { 'true' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanEnabled' -ValueFactory { 'true' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdStartVmOnConnect' -ValueFactory { 'true' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanTimeZone' -ValueFactory { 'UTC' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanRampUpStart' -ValueFactory { '07:00' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanPeakStart' -ValueFactory { '09:00' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanRampDownStart' -ValueFactory { '18:00' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanOffPeakStart' -ValueFactory { '20:00' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanRampUpMinimumHostsPct' -ValueFactory { '20' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanRampUpCapacityThresholdPct' -ValueFactory { '60' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanRampDownMinimumHostsPct' -ValueFactory { '10' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanRampDownCapacityThresholdPct' -ValueFactory { '90' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdScalingPlanWeekendMinimumHostsPct' -ValueFactory { '0' } | Out-Null
+Ensure-DefaultEnvValue -Key 'assignAvdAutoscaleRole' -ValueFactory { 'true' } | Out-Null
+Ensure-DefaultEnvValue -Key 'avdServicePrincipalAppId' -ValueFactory { $avdServicePrincipalAppId } | Out-Null
 Ensure-DefaultEnvValue -Key 'vmSubscriptionId' -ValueFactory { $subscription.id } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlAdminLogin' -ValueFactory { 'brokeradmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'sqlDatabaseName' -ValueFactory { 'LinuxBroker' } | Out-Null
@@ -1133,14 +1661,15 @@ if ($deployLinuxHostsValue -eq 'true') {
     [void](Ensure-LinuxHostSshKeys)
 }
 
+# The subscription azd provisions, where the hosts and the scaling plan deploy; not vmSubscriptionId.
+$deploymentSubscriptionId = Get-FirstNonEmptyValue -Values @(
+    (Get-AzdEnvValue -Key 'AZURE_SUBSCRIPTION_ID'),
+    $env:AZURE_SUBSCRIPTION_ID,
+    $subscription.id
+)
+
 if ($deployLinuxHostsValue -eq 'true' -and (ConvertTo-IntParameterValue -Key 'linuxHostCount') -gt 0) {
-    # The Linux hosts deploy to the subscription azd provisions, not to vmSubscriptionId.
-    $linuxHostSubscriptionId = Get-FirstNonEmptyValue -Values @(
-        (Get-AzdEnvValue -Key 'AZURE_SUBSCRIPTION_ID'),
-        $env:AZURE_SUBSCRIPTION_ID,
-        $subscription.id
-    )
-    Ensure-LinuxHostImageTerms -OsVersion (Get-AzdEnvValue -Key 'linuxHostOsVersion') -SubscriptionId $linuxHostSubscriptionId
+    Ensure-LinuxHostImageTerms -OsVersion (Get-AzdEnvValue -Key 'linuxHostOsVersion') -SubscriptionId $deploymentSubscriptionId
 }
 
 $apiApp = Ensure-ApiApplication -CloudContext $cloudContext -DisplayName $apiAppDisplayName
@@ -1236,6 +1765,83 @@ else {
 Write-Host "AVD users group: $avdUsersGroupSummary"
 Write-Host 'Automatic admin consent was attempted for the configured application permissions. If consent was not granted, complete it manually in Microsoft Entra ID.'
 
+# Azure refuses to change an extension on a VM that is not running, and autoscale and the broker's
+# own scaling leave hosts deallocated. So the deployment leaves out the extensions of the hosts that
+# are not running, and writes back the excludeFromScaling tags it would otherwise remove. This is
+# the resource group main.bicep deploys to, since resourceGroupName is not set here.
+$deploymentResourceGroupName = "rg-$(Get-RequiredAzdEnvValue -Key 'appName')-$EnvironmentName"
+$hostNamesNotRunning = @()
+$avdScalingExclusions = [ordered]@{}
+if ((ConvertTo-BoolParameterValue -Key 'deployLinuxHosts') -or (ConvertTo-BoolParameterValue -Key 'deployAvdHosts')) {
+    $hostSnapshot = Get-HostPowerStateSnapshot -SubscriptionId $deploymentSubscriptionId -ResourceGroupName $deploymentResourceGroupName
+    $hostNamesNotRunning = @($hostSnapshot.NotRunning)
+    $avdScalingExclusions = $hostSnapshot.AvdScalingExclusions
+    if ($hostNamesNotRunning.Count -gt 0) {
+        Write-Warning "These hosts are not running, so this deployment leaves their VM extensions as they are: $($hostSnapshot.NotRunningDisplay -join ', '). Changes that the extensions carry, such as the API URL, scriptSourceRoot, linuxHostDesktop and linuxHostDisableScreenLock, reach a host only once it is running and azd provision runs again. If a host stops while this deployment runs, the deployment can still fail; run azd provision again."
+    }
+
+    if ($avdScalingExclusions.Count -gt 0) {
+        Write-Host "Keeping the excludeFromScaling tag on AVD session hosts: $(@($avdScalingExclusions.Keys) -join ', ')."
+    }
+}
+
+# The AVD scaling plan and the role that lets Azure Virtual Desktop start and stop session hosts.
+$avdScalingPlanTimes = [ordered]@{
+    avdScalingPlanRampUpStart = ConvertTo-TimeOfDayParameterValue -Key 'avdScalingPlanRampUpStart' -DefaultValue '07:00'
+    avdScalingPlanPeakStart = ConvertTo-TimeOfDayParameterValue -Key 'avdScalingPlanPeakStart' -DefaultValue '09:00'
+    avdScalingPlanRampDownStart = ConvertTo-TimeOfDayParameterValue -Key 'avdScalingPlanRampDownStart' -DefaultValue '18:00'
+    avdScalingPlanOffPeakStart = ConvertTo-TimeOfDayParameterValue -Key 'avdScalingPlanOffPeakStart' -DefaultValue '20:00'
+}
+Assert-AvdScalingPlanTimeOrder -Times $avdScalingPlanTimes
+$avdScalingPlanRampUpMinimumHostsPct = ConvertTo-PercentParameterValue -Key 'avdScalingPlanRampUpMinimumHostsPct' -DefaultValue 20
+$avdScalingPlanRampUpCapacityThresholdPct = ConvertTo-PercentParameterValue -Key 'avdScalingPlanRampUpCapacityThresholdPct' -DefaultValue 60 -Minimum 1
+$avdScalingPlanRampDownMinimumHostsPct = ConvertTo-PercentParameterValue -Key 'avdScalingPlanRampDownMinimumHostsPct' -DefaultValue 10
+$avdScalingPlanRampDownCapacityThresholdPct = ConvertTo-PercentParameterValue -Key 'avdScalingPlanRampDownCapacityThresholdPct' -DefaultValue 90 -Minimum 1
+$avdScalingPlanWeekendMinimumHostsPct = ConvertTo-PercentParameterValue -Key 'avdScalingPlanWeekendMinimumHostsPct' -DefaultValue 0
+$avdStartVmOnConnect = ConvertTo-BoolParameterValue -Key 'avdStartVmOnConnect' -DefaultValue $true
+$avdSessionHostsDeployed = (ConvertTo-BoolParameterValue -Key 'deployAvdHosts') -and
+    ((ConvertTo-IntParameterValue -Key 'avdSessionHostCount') -gt 0) -and
+    (-not [string]::IsNullOrWhiteSpace((Get-AzdEnvValue -Key 'avdHostPoolName')))
+
+$avdScalingPlanTimeZone = Get-FirstNonEmptyValue -Values @((Get-AzdEnvValue -Key 'avdScalingPlanTimeZone'), 'UTC')
+$knownTimeZoneId = Resolve-WindowsTimeZoneId -TimeZoneId $avdScalingPlanTimeZone
+if (-not [string]::IsNullOrWhiteSpace($knownTimeZoneId)) {
+    $avdScalingPlanTimeZone = $knownTimeZoneId
+}
+elseif ($avdSessionHostsDeployed) {
+    $timeZoneHint = ''
+    if ($avdScalingPlanTimeZone.Contains('/')) {
+        $timeZoneHint = ' It looks like an IANA time zone name; use the Windows ID instead, such as Eastern Standard Time for America/New_York.'
+    }
+
+    Write-Warning "avdScalingPlanTimeZone '$avdScalingPlanTimeZone' is not a Windows time zone ID this machine knows, so Azure may refuse the scaling plan.$timeZoneHint"
+}
+
+$avdAutoscaleArguments = @{
+    AvdSessionHostsDeployed = $avdSessionHostsDeployed
+    ScalingPlanRequested = (ConvertTo-BoolParameterValue -Key 'avdScalingPlanEnabled' -DefaultValue $true)
+    StartVmOnConnect = $avdStartVmOnConnect
+    AssignRoleRequested = (ConvertTo-BoolParameterValue -Key 'assignAvdAutoscaleRole' -DefaultValue $true)
+    ConfiguredObjectId = (Get-AzdEnvValue -Key 'avdServicePrincipalObjectId')
+    AppId = (Get-FirstNonEmptyValue -Values @((Get-AzdEnvValue -Key 'avdServicePrincipalAppId'), $avdServicePrincipalAppId))
+    SubscriptionId = $deploymentSubscriptionId
+    RoleDefinitionId = $avdAutoscaleRoleDefinitionId
+}
+$avdAutoscale = Resolve-AvdAutoscaleRolePlan @avdAutoscaleArguments
+if ($avdSessionHostsDeployed) {
+    $avdScalingPlanState = "assigned to the host pool, in time zone $avdScalingPlanTimeZone"
+    if (-not $avdAutoscale.ScalingPlanEnabled) {
+        $avdScalingPlanState = 'deployed but assigned to no host pool'
+    }
+
+    $avdStartVmOnConnectState = 'off'
+    if ($avdStartVmOnConnect) {
+        $avdStartVmOnConnectState = 'on'
+    }
+
+    Write-Host "AVD autoscale: scaling plan $avdScalingPlanState; Start VM on Connect $avdStartVmOnConnectState; $($avdAutoscale.Summary)"
+}
+
 # Generate the Bicep parameters file with the real values so azd passes them
 # to the ARM deployment. azd collects parameters BEFORE running preprovision,
 # so env values set above would not be picked up through ${...} references or
@@ -1285,6 +1891,22 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdMaxSessionLimit' -Value (ConvertTo-IntParameterValue -Key 'avdMaxSessionLimit' -DefaultValue 5)
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdLinuxDesktopFullScreen' -Value (ConvertTo-BoolParameterValue -Key 'avdLinuxDesktopFullScreen' -DefaultValue $true)
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdLinuxDesktopMultiMonitor' -Value (ConvertTo-BoolParameterValue -Key 'avdLinuxDesktopMultiMonitor' -DefaultValue $true)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanEnabled' -Value ([bool]$avdAutoscale.ScalingPlanEnabled)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdStartVmOnConnect' -Value $avdStartVmOnConnect
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanTimeZone' -Value $avdScalingPlanTimeZone
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanRampUpStart' -Value $avdScalingPlanTimes['avdScalingPlanRampUpStart']
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanPeakStart' -Value $avdScalingPlanTimes['avdScalingPlanPeakStart']
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanRampDownStart' -Value $avdScalingPlanTimes['avdScalingPlanRampDownStart']
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanOffPeakStart' -Value $avdScalingPlanTimes['avdScalingPlanOffPeakStart']
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanRampUpMinimumHostsPct' -Value $avdScalingPlanRampUpMinimumHostsPct
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanRampUpCapacityThresholdPct' -Value $avdScalingPlanRampUpCapacityThresholdPct
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanRampDownMinimumHostsPct' -Value $avdScalingPlanRampDownMinimumHostsPct
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanRampDownCapacityThresholdPct' -Value $avdScalingPlanRampDownCapacityThresholdPct
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingPlanWeekendMinimumHostsPct' -Value $avdScalingPlanWeekendMinimumHostsPct
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdScalingExclusions' -Value $avdScalingExclusions
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'hostNamesNotRunning' -Value @($hostNamesNotRunning)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdServicePrincipalObjectId' -Value $avdAutoscale.ServicePrincipalObjectId
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'assignAvdAutoscaleRole' -Value ([bool]$avdAutoscale.AssignRole)
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdVmNamePrefix' -Value (Get-RequiredAzdEnvValue -Key 'avdVmNamePrefix')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdVmSize' -Value (Get-RequiredAzdEnvValue -Key 'avdVmSize')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'azureCloudName' -Value (Get-RequiredAzdEnvValue -Key 'azureCloudName')

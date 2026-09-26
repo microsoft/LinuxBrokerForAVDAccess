@@ -146,6 +146,54 @@
     "avdLinuxDesktopMultiMonitor": {
       "value": true
     },
+    "avdScalingPlanEnabled": {
+      "value": true
+    },
+    "avdStartVmOnConnect": {
+      "value": true
+    },
+    "avdScalingPlanTimeZone": {
+      "value": "UTC"
+    },
+    "avdScalingPlanRampUpStart": {
+      "value": "07:00"
+    },
+    "avdScalingPlanPeakStart": {
+      "value": "09:00"
+    },
+    "avdScalingPlanRampDownStart": {
+      "value": "18:00"
+    },
+    "avdScalingPlanOffPeakStart": {
+      "value": "20:00"
+    },
+    "avdScalingPlanRampUpMinimumHostsPct": {
+      "value": 20
+    },
+    "avdScalingPlanRampUpCapacityThresholdPct": {
+      "value": 60
+    },
+    "avdScalingPlanRampDownMinimumHostsPct": {
+      "value": 10
+    },
+    "avdScalingPlanRampDownCapacityThresholdPct": {
+      "value": 90
+    },
+    "avdScalingPlanWeekendMinimumHostsPct": {
+      "value": 0
+    },
+    "avdScalingExclusions": {
+      "value": {}
+    },
+    "hostNamesNotRunning": {
+      "value": []
+    },
+    "avdServicePrincipalObjectId": {
+      "value": "<avd-service-principal-object-id>"
+    },
+    "assignAvdAutoscaleRole": {
+      "value": true
+    },
     "avdVmNamePrefix": {
       "value": "avdhost"
     },

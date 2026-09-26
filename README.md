@@ -300,7 +300,7 @@ Given that AVD acts as a pass-through in this solution, starting with **light to
    - Avoid using VMs with more than 24 vCPUs to prevent diminishing returns due to increased synchronization overhead.
 4. **Optimize for Multi-Session Workloads**:
    - Use multiple smaller VMs (e.g., 8-core instances) rather than fewer large VMs. This allows for better load balancing and resource management.
-   - Smaller VMs can be shut down when not in use, conserving resources and reducing costs. Use Azure autoscale to manage VM power states based on demand.
+   - Smaller VMs can be shut down when not in use, conserving resources and reducing costs. The deployment's [scaling plan](deploy/DEPLOYMENT.md#avd-autoscale) starts and stops the AVD session hosts on a schedule.
 
 ## Getting Started
 
@@ -361,12 +361,13 @@ The distribution and desktop support release needs `azd provision` and agent 1.2
 - **Review the idle timeout.** It had never disconnected anyone before this release, and migrated Ubuntu hosts now enforce any timeout already set.
 - **Replace or bootstrap again any Ubuntu hosts.** Earlier releases deployed them with no desktop and without the packages NFS homes need.
 
-The start on demand release needs no new Azure resources or roles, but the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
+The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription, and the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
 
 - **A checkout can start a host.** When no host is ready, the broker starts a stopped one and the user's **Linux Desktop** waits for it, for up to 10 minutes. It is on after the upgrade, and the **Scaling** page turns it off or limits how many hosts start at once.
 - **Update the AVD session hosts.** `deploy/Migrate-ExistingEnvironment.ps1` now also runs `deploy/Update-AvdHostBrokerScript.ps1`, which replaces the script on every running session host. An older script tells its user that no host is available while one starts for them.
 - **A pool can scale to zero.** With start on demand on, a rule or schedule window may keep a minimum of 0 hosts. Set one only after the **Scaling** page shows that every session host runs a script that can wait.
 - **The Linux desktop opens full screen across every monitor.** Set `avdLinuxDesktopFullScreen` or `avdLinuxDesktopMultiMonitor` to `false` to open it in a window or on one monitor, but only after every session host runs the new script. See [Linux Desktop Display](deploy/DEPLOYMENT.md#linux-desktop-display).
+- **The AVD session hosts start and stop on a schedule.** `azd provision` adds a scaling plan, turns on Start VM on Connect and gives the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription, which needs Owner or User Access Administrator there. Update the session hosts' script first, while they all still run, and review the schedule before you provision, or set `avdScalingPlanEnabled` to `false`. See [AVD Autoscale](deploy/DEPLOYMENT.md#avd-autoscale).
 
 ## Roadmap
 

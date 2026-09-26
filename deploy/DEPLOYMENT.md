@@ -44,7 +44,7 @@ For upgrade scenarios, keep one more distinction clear:
 You need enough access to do all of the following:
 
 - Create resource groups and deploy Azure resources.
-- Create Azure role assignments.
+- Create Azure role assignments. When AVD session hosts are deployed, one of them is on the subscription, which needs **Owner** or **User Access Administrator** on the subscription. Without that, the deployment still succeeds, but the AVD scaling plan is left unassigned until an administrator assigns the role; see [AVD Autoscale](#avd-autoscale).
 - Create or update Microsoft Entra app registrations.
 - Create or update service principals.
 - Create or update Entra security groups.
@@ -66,6 +66,7 @@ At a high level, the deployment provisions and configures the following:
 - A premium Azure Files NFS share for Linux home directories, reachable only through a private endpoint. It is skipped when you supply `nfsShare`, set `deployNfsShare` to `false`, or deploy no Linux hosts.
 - Optional Linux hosts and optional AVD hosts, depending on azd environment settings.
 - When AVD hosts are deployed, a RemoteApp application group that publishes **Linux Desktop**, which runs `Connect-LinuxBroker.ps1` on the session host to check out a Linux host and open an RDP session to it.
+- When AVD hosts are deployed, an Azure Virtual Desktop scaling plan that starts and stops the session hosts on a schedule, and Start VM on Connect on the host pool. See [AVD Autoscale](#avd-autoscale).
 - Two Entra app registrations: frontend and API.
 - Two Entra security groups for VM authorization: AVD hosts and Linux hosts.
 - When AVD hosts are deployed and `avdUsersGroupId` is not set, a third Entra security group for AVD users, with the deploying user added as a member.
@@ -82,6 +83,7 @@ The deployment model now follows these runtime rules:
 - The API and function apps are integrated with the virtual network's app subnet, so the API reaches Linux hosts on their private IP addresses for SSH and the portal's connectivity test.
 - The API managed identity holds **Desktop Virtualization Power On Off Contributor** on the VM resource group, which lets it start and stop hosts for the portal and scaling rules without broader write access. Stopping a host powers it off without deallocating it, so a stopped host still accrues compute charges.
 - Members of the AVD users group hold **Desktop Virtualization User** on the RemoteApp application group and **Virtual Machine User Login** on each session host. Both are required: the first publishes **Linux Desktop** to the user, and the second lets the user sign in to the Microsoft Entra joined session host.
+- The Azure Virtual Desktop service principal holds **Desktop Virtualization Power On Off Contributor** on the subscription, which autoscale and Start VM on Connect need. Autoscale does not work with the role on a resource group, and the role lets Azure Virtual Desktop start and stop any session host in the subscription, not only this deployment's.
 
 ## Required And Common azd Environment Values
 
@@ -113,6 +115,11 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `avdUsersGroupId`: object ID of an existing Entra group whose members can launch **Linux Desktop**. Leave empty to have `preprovision` create `<appName>-<environmentName>-avd-users-sg` and add you to it.
 - `avdLinuxDesktopFullScreen`: `true` or `false`. Defaults to `true`, which opens the Linux desktop full screen. `false` opens it in a window on one monitor. See [Linux Desktop Display](#linux-desktop-display).
 - `avdLinuxDesktopMultiMonitor`: `true` or `false`. Defaults to `true`, which spreads a full-screen Linux desktop across every monitor of the user's AVD session. `false` keeps it on one monitor. See [Linux Desktop Display](#linux-desktop-display).
+- `avdScalingPlanEnabled`: `true` or `false`. Defaults to `true`, which assigns the deployment's scaling plan to the AVD host pool, so autoscale starts and stops the session hosts. `false` deploys the plan assigned to no host pool and leaves the session hosts as they are. See [AVD Autoscale](#avd-autoscale).
+- `avdStartVmOnConnect`: `true` or `false`. Defaults to `true`, which starts a stopped AVD session host for a user who opens **Linux Desktop** when no running session host can take the session.
+- `avdScalingPlanTimeZone`: Windows time zone ID the scaling plan's times are in, such as `Eastern Standard Time`. Defaults to `UTC`. The schedule itself comes from `avdScalingPlanRampUpStart`, `avdScalingPlanPeakStart`, `avdScalingPlanRampDownStart`, `avdScalingPlanOffPeakStart` and the five `avdScalingPlan...Pct` values; see [AVD Autoscale](#avd-autoscale).
+- `assignAvdAutoscaleRole`: `true` or `false`. Defaults to `true`, which lets the deployment give the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription when it does not hold it. Set it to `false` when an administrator manages that role.
+- `avdServicePrincipalObjectId`: object ID of the Azure Virtual Desktop service principal in your tenant. Leave empty to have `preprovision` find it by its app ID, `avdServicePrincipalAppId`, which defaults to `9cdead84-a844-4324-93f2-b2e6bb768d07`.
 - `vmHostResourceGroup`: override if managed VMs live in a different resource group.
 - `brokerReaderGroupId`, `brokerOperatorGroupId`, `brokerAdminGroupId`: optional object IDs of Entra groups to assign the Broker API's `Reader`, `Operator` and `FullAccess` app roles to. Assigning an app role to a group needs Microsoft Entra ID P1 or P2; without it, assign the roles to users in **Enterprise applications**. See [Portal roles](#portal-roles).
 - `sqlDatabaseSkuName`: Azure SQL Database SKU, for example `Basic`, `S1` or `GP_S_Gen5_1`. Defaults to `Basic`, which suits small pools. Use `S1` or higher when many hosts and portal users call the broker at once; each API worker process opens at most `DB_MAX_CONCURRENCY` connections (6 by default).
@@ -378,6 +385,108 @@ publishers** on its own does no harm. Connection files signed by a publisher the
 trust, which would allow the high-security configuration, are in the
 [security hardening backlog](../docs/ROADMAP.md#security-hardening-backlog).
 
+## AVD Autoscale
+
+The AVD session hosts only run Remote Desktop Connection to the Linux hosts, so they need to run
+only while users need them. With the session hosts, the deployment creates an Azure Virtual Desktop
+[scaling plan](https://learn.microsoft.com/azure/virtual-desktop/autoscale-scenarios),
+`<host-pool>-scaling-plan`, that starts and stops them on a schedule, and turns on
+[Start VM on Connect](https://learn.microsoft.com/azure/virtual-desktop/start-virtual-machine-connect)
+for the host pool.
+
+The plan has one schedule for Monday to Friday and one for Saturday and Sunday, with the same times,
+in `avdScalingPlanTimeZone`:
+
+| Phase | Starts at | Session hosts kept on | Starts another session host above | New sessions go to |
+| --- | --- | --- | --- | --- |
+| Ramp-up | `avdScalingPlanRampUpStart`, 07:00 | `avdScalingPlanRampUpMinimumHostsPct`, 20% | `avdScalingPlanRampUpCapacityThresholdPct`, 60% | the session host with the fewest sessions |
+| Peak | `avdScalingPlanPeakStart`, 09:00 | as ramp-up | as ramp-up | the session host with the fewest sessions |
+| Ramp-down | `avdScalingPlanRampDownStart`, 18:00 | `avdScalingPlanRampDownMinimumHostsPct`, 10% | `avdScalingPlanRampDownCapacityThresholdPct`, 90% | the busiest session host with room |
+| Off-peak | `avdScalingPlanOffPeakStart`, 20:00 | as ramp-down | as ramp-down | the busiest session host with room |
+
+- **Session hosts kept on** is a share of all the session hosts, rounded up, so with up to five
+  session hosts, 20% and 10% both keep one on. On Saturday and Sunday,
+  `avdScalingPlanWeekendMinimumHostsPct`, 0% by default, takes the place of both.
+- Autoscale starts another session host when the sessions fill more than the threshold's share of
+  what the running session hosts can hold, `avdMaxSessionLimit` each. During peak, ramp-down and
+  off-peak, it also stops session hosts that have no sessions, as long as the others stay under the
+  threshold. It stops none during ramp-up. Its load balancing replaces the host pool's own.
+- Users are never signed out. A session host stops only once it has no sessions, disconnected ones
+  included, so a user who closes their Remote Desktop client without signing out keeps their session
+  host, and their Linux session, running.
+- The times are `HH:mm` on a 24-hour clock and must come in the order of the table within one day.
+  Each share is a whole number from 0 to 100, and each threshold from 1 to 100. `preprovision`
+  refuses other values.
+
+`avdScalingPlanTimeZone` is a Windows time zone ID, such as `Eastern Standard Time`, not an IANA
+name such as `America/New_York`, and `preprovision` warns when it does not know the value. It is
+separate from the time zone of the broker's own scaling schedule for the Linux hosts, which an
+administrator sets on the portal's **Scaling** page, so change them together.
+
+With the weekend share at 0%, every session host can stop. The first user to open **Linux Desktop**
+then waits while Start VM on Connect starts a session host, which their Remote Desktop client
+reports, and if no Linux host is ready either, waits again inside the session host while the broker
+starts one. So the first user can wait through two starts, of several minutes in all. Keep a
+weekend share above 0% if that is too long. For a pooled host pool, Start VM on Connect starts a
+session host only when none is running, and another only when the running ones reach their session
+limit; autoscale starts the rest.
+
+To keep autoscale away from a session host, for example while you maintain it, tag it
+`excludeFromScaling`, with any value. Autoscale then never starts or stops it, and leaves its drain
+mode alone, which it otherwise overrides in a pooled host pool. A deployment replaces a VM's tags,
+so `preprovision` records the tag and `azd provision` writes it back.
+
+```powershell
+az vm update -g <resource-group> -n <session-host> --set tags.excludeFromScaling=maintenance
+az vm update -g <resource-group> -n <session-host> --remove tags.excludeFromScaling
+```
+
+The plan uses power-management autoscale, which starts and stops existing session hosts and works in
+Azure Government. Dynamic autoscale, which also creates and deletes session hosts, is not available
+there, and the deployment does not use it.
+
+### The autoscale role
+
+Autoscale and Start VM on Connect start and stop the session hosts as the Azure Virtual Desktop
+service principal, which must hold **Desktop Virtualization Power On Off Contributor** on the
+subscription: autoscale does not work with the role on a resource group or a VM. The role lets
+Azure Virtual Desktop start and stop any session host in the subscription, and assigning it needs
+**Owner** or **User Access Administrator** on the subscription.
+
+`preprovision` finds the service principal by its app ID, `avdServicePrincipalAppId`, never by its
+name, and, unless `assignAvdAutoscaleRole` is `false`, creates it in the tenant if it is missing. It
+then checks whether the service principal holds the role on the subscription already, directly,
+through a group or from a management group, and whether your account can assign roles there:
+
+| `preprovision` finds that | The deployment |
+| --- | --- |
+| The role is assigned | assigns nothing |
+| The role is not assigned, and you can assign it | assigns it |
+| The role is not assigned, and you cannot assign it | deploys the scaling plan assigned to no host pool, and `preprovision` prints the command for an Owner or User Access Administrator to run. Start VM on Connect stays on, but starts nothing until the role is assigned. |
+| The service principal cannot be found or created | does the same, and `preprovision` asks you to set `avdServicePrincipalObjectId` |
+| It cannot tell | assigns the role, and `preprovision` warns what a failure would mean |
+
+Once an administrator has assigned the role, run `azd provision` again, and it assigns the plan to
+the host pool.
+
+- `assignAvdAutoscaleRole=false` stops the deployment from assigning the role, for when an
+  administrator manages it, for example through a custom role, which the check does not recognize.
+  The plan is then assigned as `avdScalingPlanEnabled` says, and `preprovision` only warns when the
+  service principal holds no **Desktop Virtualization Power On Off Contributor** assignment on the
+  subscription.
+- `avdScalingPlanEnabled=false` keeps the plan but assigns it to no host pool, so autoscale leaves
+  the session hosts alone. Set it when the host pool already has a scaling plan, because a host pool
+  can have only one and the deployment would fail, or when something else scales the session hosts,
+  because autoscale must not be combined with another scaling tool.
+- `avdStartVmOnConnect=false` turns off Start VM on Connect. With the plan off too, the deployment
+  assigns no role. Start VM on Connect on its own needs only **Desktop Virtualization Power On
+  Contributor**, on any scope that contains the session hosts: to use it on the resource group
+  instead of the subscription role, assign it to the service principal yourself and set
+  `assignAvdAutoscaleRole` to `false`.
+- `avdServicePrincipalObjectId` skips the lookup. `avdServicePrincipalAppId` defaults to
+  `9cdead84-a844-4324-93f2-b2e6bb768d07`, the app ID Microsoft documents for Azure Virtual Desktop;
+  set it only for a cloud where the service principal has another.
+
 ## Quick Start
 
 From the repository root:
@@ -426,6 +535,8 @@ It currently does all of the following:
 - Creates or reuses frontend and API client secrets.
 - Generates or reuses Linux host SSH keys.
 - When Linux hosts are deployed with `linuxHostOsVersion=rocky-9`, accepts the Azure Marketplace terms of the Rocky Linux 9 image in the deployment subscription unless they are accepted already.
+- Lists the Linux hosts and AVD session hosts already in the resource group that are not running, so the deployment leaves out their VM extensions, which Azure refuses to change on a VM that is not running, and records the `excludeFromScaling` tag of each AVD session host, which the deployment writes back. See [A deployment failed with `Cannot modify extensions in the VM when the VM is not running`](#a-deployment-failed-with-cannot-modify-extensions-in-the-vm-when-the-vm-is-not-running).
+- Checks the AVD scaling plan's times and shares, and, when AVD session hosts are deployed, finds the Azure Virtual Desktop service principal and decides whether the deployment gives it **Desktop Virtualization Power On Off Contributor** on the subscription. See [The autoscale role](#the-autoscale-role).
 - Writes resolved values back into the azd environment in both uppercase and camelCase forms expected by the deployment.
 
 The API app registration is also configured with the Graph application permissions the API uses to validate host and group membership.
@@ -446,6 +557,8 @@ Important deployment characteristics:
 - The API's `NFS_SHARE` setting points at the provisioned Azure Files share unless `nfsShare` is set. The storage account disables public network access and shared key access, and it allows non-HTTPS traffic because NFS does not use HTTPS; the private endpoint is the only path to it.
 - RHEL, Rocky Linux and AlmaLinux hosts use Generation 2 images so they can run with Trusted Launch.
 - The AVD host pool prefers RemoteApp and sets RDP properties that enable Microsoft Entra single sign-on to the Microsoft Entra joined session hosts.
+- The AVD host pool has Start VM on Connect on, and a scaling plan starts and stops its session hosts on a schedule. See [AVD Autoscale](#avd-autoscale).
+- Hosts that were not running when `preprovision` listed them keep their VM extensions as they were. Changes that the extensions carry, such as the API URL, `scriptSourceRoot`, `linuxHostDesktop` and `linuxHostDisableScreenLock`, reach such a host the next time `azd provision` runs while it is running.
 - Linux hosts run the desktop that `linuxHostDesktop` names, GNOME by default, with the screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - Key Vault stores `db-password` and `linux-host`.
 - The API app receives Key Vault Secrets User access so it can read those secrets at runtime.
@@ -547,7 +660,7 @@ Set-Location .\deploy
 
 The host migration step updates only the release-agent-related files and services on existing Linux VMs. It does not reprovision infrastructure, replace the VM image, rerun the full Linux custom script extension, or attempt to reconcile every manual drift in an older environment.
 
-The AVD session host step changes only `C:\Temp\Connect-LinuxBroker.ps1`, through Run Command, on the VMs in the resource group tagged `broker-role=avd-host`. On each running session host it downloads the script from `ScriptSourceRoot`, fills in the API URL and client ID as `Configure-AVD-Host.ps1` does, checks that the result is a broker script in plain ASCII that parses, and replaces the installed script in one step. Because the API URL and `ScriptSourceRoot` are written into PowerShell code on the session host, the update refuses either one unless it is an `https://` URL made only of ASCII letters, digits and the characters `.`, `-`, `_`, `~`, `%` and `/`, with an optional port. A download or check that fails leaves the installed script as it was, and sessions already open keep the script they started with. Session hosts that are not running are skipped and named at the end; update each one with `-AvdHostNames` once it is started. To update only the session hosts, you can also run [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1) on its own, with the same `-EnvironmentName`, `-ScriptSourceRoot` and `-AvdHostNames` parameters.
+The AVD session host step changes only `C:\Temp\Connect-LinuxBroker.ps1`, through Run Command, on the VMs in the resource group tagged `broker-role=avd-host`. On each running session host it downloads the script from `ScriptSourceRoot`, fills in the API URL and client ID as `Configure-AVD-Host.ps1` does, checks that the result is a broker script in plain ASCII that parses, and replaces the installed script in one step. Because the API URL and `ScriptSourceRoot` are written into PowerShell code on the session host, the update refuses either one unless it is an `https://` URL made only of ASCII letters, digits and the characters `.`, `-`, `_`, `~`, `%` and `/`, with an optional port. A download or check that fails leaves the installed script as it was, and sessions already open keep the script they started with. Session hosts that are not running are skipped and named at the end; update each one with `-AvdHostNames` once it is started. While the scaling plan is assigned, autoscale can stop a session host you started before the update reaches it, so tag the session host `excludeFromScaling` before you start it and remove the tag once it is updated; see [AVD Autoscale](#avd-autoscale). To update only the session hosts, you can also run [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1) on its own, with the same `-EnvironmentName`, `-ScriptSourceRoot` and `-AvdHostNames` parameters.
 
 The migration also rewrites `/etc/sudoers.d/avdadmin`. Older hosts were provisioned with a broad allowlist that included `cat`, `rm`, `chmod`, `chown`, `cp`, `mount`, and `umount`. The current policy grants only `userdel`, `groupadd`, `usermod`, `chpasswd`, `/usr/local/bin/create-user.sh`, `/usr/local/bin/manage-lease.sh`, `/usr/local/bin/apply-host-settings.sh`, `/usr/local/bin/session-control.sh`, and `/usr/local/bin/patch-host.sh`; all privileged file work now happens inside those root-owned scripts. The generated policy is validated with `visudo -c` and moved into place only if it passes.
 
@@ -688,20 +801,23 @@ Every layer tolerates the others being one release behind during the rollout, an
 
 ## Upgrading To Start On Demand
 
-This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)), and opens the Linux desktop full screen across every monitor (item 4.8). It needs no new Azure resources or role assignments, but the AVD session hosts need the new `Connect-LinuxBroker.ps1`.
+This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)), opens the Linux desktop full screen across every monitor (item 4.8), and starts and stops the AVD session hosts on a schedule (item 4.5). The schedule adds a scaling plan and a role assignment on the subscription, so the release needs `azd provision`, and the AVD session hosts need the new `Connect-LinuxBroker.ps1`.
 
 - **Start on demand.** When a checkout finds no ready host, the API starts a stopped one for the user and answers `202` with how long to wait, instead of refusing. On the AVD session host, **Linux Desktop** shows *Your Linux desktop is starting…* with **Cancel**, asks again when the broker says to, and opens the desktop as soon as the host is reachable, for up to 10 minutes. The start is recorded as a scaling start is, in the scaling activity log as `Start On Demand` and in the audit log as `vm.start_on_demand`, and uses the API's existing **Desktop Virtualization Power On Off Contributor** role. It never takes the pool past the active rule's or window's `MaxVMs`, so a user who arrives when that many hosts are on and none is free is refused as before. Start on demand is on after the upgrade; an administrator can turn it off, and set how many hosts may start at once for waiting users (2 by default, up to 20), in the **Start on demand** card on the **Scaling** page.
 - **Scale to zero.** While start on demand is on, the default rule and schedule windows may keep a minimum of 0 hosts, so idle hosts stop, for example overnight, and the first user to arrive waits a minute or two for one to start. Scaling counts waiting users as demand, and a scale-down keeps a host for each of them. A minimum of 0 cannot be saved while start on demand is off. If it is turned off afterwards, scaling keeps one host on for those rules and windows, and the card says so.
 - **Connect-LinuxBroker.ps1 2.0.0.** Besides waiting for a host to start, the script tries a request again after no answer, a `408`, a `429` or a `5xx`, until three fail in a row, where the previous script tried three times at once. It requests a new token once when the broker refuses one, and tells the user in plain words what went wrong. Each attempt is logged under the **LinuxBrokerScript** source in the session host's Application event log. Session hosts keep the script they were deployed with, so the migration's new third step, [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1), replaces it on every running session host. An older script treats `202` as a failure: its user is told that no Linux host is available while a host starts for them, and gets that host at their next try once it is up. The script now reports its version with each checkout, and the **Start on demand** card shows, for the session hosts that asked for a host in the last seven days, how many run each version, and names those whose script cannot wait.
 - **Waits on the dashboard.** Every time a user is told to wait, the checkout records a `Starting` event. The dashboard's checkout card adds how many users waited, how many of them got a host, the median and 95th percentile wait, and how many are waiting now, and the capacity chart shows the users who waited. **Attention** no longer reports that no host is ready for a pool scaled to zero that nobody is waiting on.
 - **Full screen across every monitor.** The new script opens the Linux desktop full screen across every monitor of the user's AVD session, where the previous one left that to the user's own Remote Desktop Connection settings, so users with more than one monitor see the desktop on all of them. The new `avdLinuxDesktopFullScreen` and `avdLinuxDesktopMultiMonitor` values open it in a window or on one monitor instead; set them only after every session host runs the new script. See [Linux Desktop Display](#linux-desktop-display).
+- **The AVD session hosts start and stop on a schedule.** `azd provision` creates a scaling plan, assigns it to the host pool, turns on Start VM on Connect and gives the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription, which needs Owner or User Access Administrator there. The plan takes effect at once. In UTC, unless you set `avdScalingPlanTimeZone`, it keeps at least 20% of the session hosts on from 07:00 on weekdays, 10% from 18:00 and none on Saturday and Sunday, rounded up, and it stops a session host only once the session host has no sessions. Review the schedule before you provision, and set `avdScalingPlanEnabled` to `false` if the host pool already has a scaling plan or the session hosts should stay as they are. See [AVD Autoscale](#avd-autoscale).
+- **`azd provision` leaves stopped hosts' extensions alone.** Azure refuses to change a VM extension on a VM that is not running, and scaling, start on demand and autoscale all stop hosts, so `preprovision` lists the hosts that are not running and the deployment leaves out their extensions. It also keeps any `excludeFromScaling` tag on the session hosts, which a deployment would otherwise remove.
 
 ### Recommended order
 
-1. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1). It applies SQL scripts `144`–`156` before the new images start, restarts the apps in the order API, task, front end, migrates the Linux hosts, and then updates `Connect-LinuxBroker.ps1` on the running AVD session hosts.
+1. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1). It applies SQL scripts `144`–`156` before the new images start, restarts the apps in the order API, task, front end, migrates the Linux hosts, and then updates `Connect-LinuxBroker.ps1` on the running AVD session hosts. Running it before `azd provision` updates the session hosts before autoscale starts stopping them.
 2. Start any AVD session host the migration skipped because it was not running, and update it with `-SkipPostProvision -SkipLinuxHostReleaseAgentMigration -AvdHostNames <session-host>`.
-3. With a test user, open **Linux Desktop** while no host is free, for example with every idle host stopped, and confirm that the wait window appears and the desktop opens once the host is up.
-4. Before you set any minimum to 0, confirm that the **Start on demand** card names no session host whose script cannot wait. The card goes by each session host's latest checkout in the last seven days, so a session host updated since then is listed until its next checkout.
+3. Review the [AVD autoscale](#avd-autoscale) values, then run `azd provision`. It creates the scaling plan and the role assignment and turns on Start VM on Connect, and its `postprovision` step builds the images and restarts the apps again. If `preprovision` warns that it cannot assign the role, have an Owner or User Access Administrator run the command it prints, then run `azd provision` again.
+4. With a test user, open **Linux Desktop** while no host is free, for example with every idle host stopped, and confirm that the wait window appears and the desktop opens once the host is up.
+5. Before you set any minimum to 0, confirm that the **Start on demand** card names no session host whose script cannot wait. The card goes by each session host's latest checkout in the last seven days, so a session host updated since then is listed until its next checkout.
 
 Every layer tolerates the others being one release behind during the rollout. Against a database without the new procedures, the new API refuses a checkout that finds no host with `409`, as before, and logs it once, and the portal says that the broker does not support start on demand yet. The previous API build keeps working against the new database: it never answers `202`, so nobody waits, and it refuses a minimum of 0 as before. Session hosts that still run an older script behave as described above.
 
@@ -896,6 +1012,10 @@ The user waited `MaxWaitSeconds` (10 minutes by default) and no host became read
 
 `Connect-LinuxBroker.ps1` shows this when the session host cannot get a token from its managed identity (`Failed to obtain access token` in the **LinuxBrokerScript** event log) or the broker refuses it (`The broker refused this session host (403)`). A `403` means the session host's managed identity is not yet in the AVD host group; rerun `azd hooks run postprovision`. The script renews a token the broker refuses with `401` once before it gives up.
 
+### Start VM on Connect does not start a session host
+
+Start VM on Connect needs the Azure Virtual Desktop service principal to hold **Desktop Virtualization Power On Off Contributor** or **Desktop Virtualization Power On Contributor** on a scope that contains the session hosts. `preprovision` warns when the deployment cannot assign it, and a new assignment can take a few minutes to take effect. Also confirm that `avdStartVmOnConnect` is `true` and that the host pool's **Properties** in the Azure portal show **Start VM on Connect** turned on. In a pooled host pool, Start VM on Connect starts a session host only when none is running, and another only when the running ones reach their session limit.
+
 ### The portal shows "No access" after signing in
 
 The signed-in account holds none of the Broker API's `Reader`, `Operator` or `FullAccess` app roles. Assign one (see [Portal roles](#portal-roles)) and sign in again. If the portal instead reports that it could not verify your roles, the portal could not reach the API's `/api/me` endpoint; check the API app's health.
@@ -953,6 +1073,43 @@ azd env set avdVmSize Standard_D8as_v4
 ```
 
 `avdVmSize` accepts only the sizes listed in `main.bicep`, and both host types use Trusted Launch, so pick a Gen2-capable size.
+
+### A deployment failed with `Cannot modify extensions in the VM when the VM is not running`
+
+A host was stopped or deallocated when the deployment tried to update its VM extensions. `preprovision` lists the hosts that are not running so that the deployment leaves out their extensions, so either the host stopped after `preprovision` listed it, which the broker's scaling, start on demand and autoscale can all do at any time, or `preprovision` could not list the VMs and warned that the deployment would update the extensions of every host. Run `azd provision` again, which lists the hosts again.
+
+### A deployment failed with `AuthorizationFailed` on a role assignment on the subscription
+
+The deployment tried to give the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription, and your account cannot assign roles there. `preprovision` could not check this beforehand and warned about it. Have an Owner or User Access Administrator run the command from that warning, which looks like this:
+
+```powershell
+az role assignment create --assignee-object-id <object-id> --assignee-principal-type ServicePrincipal --role 40c5ff49-9181-41f8-ae61-143b0e78555e --scope /subscriptions/<subscription-id>
+```
+
+`40c5ff49-9181-41f8-ae61-143b0e78555e` is **Desktop Virtualization Power On Off Contributor**, and `az ad sp list --filter "appId eq '9cdead84-a844-4324-93f2-b2e6bb768d07'" --query "[0].id" --output tsv` prints the object ID of the service principal. Then set `assignAvdAutoscaleRole` to `false`, because the check that could not tell may not tell next time either, and run `azd provision` again. To do without autoscale instead, set `avdScalingPlanEnabled` and `avdStartVmOnConnect` to `false`. See [The autoscale role](#the-autoscale-role).
+
+### A deployment failed with `RoleAssignmentExists`
+
+The Azure Virtual Desktop service principal already holds **Desktop Virtualization Power On Off Contributor** on the subscription through an assignment that `preprovision` could not see, so the deployment tried to assign it again. Set `assignAvdAutoscaleRole` to `false` and run `azd provision` again.
+
+### The AVD scaling plan is not assigned to the host pool
+
+The deployment leaves the plan assigned to no host pool when `avdScalingPlanEnabled` is `false`, and when `preprovision` finds that the Azure Virtual Desktop service principal cannot get its role, because the service principal cannot be found or created, or because it does not hold the role and your account cannot assign it. `preprovision` says which in a warning. Once the role is assigned, run `azd provision` again. See [The autoscale role](#the-autoscale-role).
+
+If the `avdScalingPlan` deployment fails with `BadRequest` and `unable to access host pool`, Azure Virtual Desktop could not use its role on the host pool. The deployment assigns the plan last, but a role assigned in the same deployment can still take a few more minutes to take effect, so wait and run `azd provision` again. With `assignAvdAutoscaleRole` set to `false`, also confirm that the service principal holds the role on the subscription.
+
+A host pool can have only one scaling plan. If the host pool is assigned to another plan, remove it from that plan in the Azure portal, or set `avdScalingPlanEnabled` to `false` to keep the other plan.
+
+### `preprovision` warns that `avdScalingPlanTimeZone` is not a Windows time zone ID
+
+`preprovision` looks the value up among the Windows time zone IDs that the machine it runs on knows. Use the Windows ID, such as `Eastern Standard Time` for `America/New_York`. On Windows, `Get-TimeZone -ListAvailable` lists the IDs in its `Id` column, and in PowerShell 7 on any platform the first line below converts an IANA name:
+
+```powershell
+$id = $null; [System.TimeZoneInfo]::TryConvertIanaIdToWindowsId('America/New_York', [ref]$id) | Out-Null; $id
+azd env set avdScalingPlanTimeZone "Eastern Standard Time"
+```
+
+`preprovision` passes a value it does not know to the deployment unchanged, and Azure refuses the scaling plan if Azure does not know it either.
 
 ### Home directories are not on the NFS share
 

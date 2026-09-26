@@ -65,6 +65,12 @@ param remoteAppFriendlyName string = 'Linux Desktop'
 param linuxDesktopFullScreen bool = true
 @description('Spreads a full-screen Linux desktop across every monitor. False keeps it on one monitor. Turn it off only once every session host runs Connect-LinuxBroker.ps1 2.0.0 or later: older scripts refuse the argument and the Linux Desktop app fails to open.')
 param linuxDesktopMultiMonitor bool = true
+@description('Starts a deallocated session host when a user opens the Linux Desktop app and no running session host can take the session. Azure Virtual Desktop needs Desktop Virtualization Power On Contributor, or Power On Off Contributor, to start it.')
+param startVmOnConnect bool = true
+@description('Session hosts whose VM extensions this deployment leaves out, because Azure refuses to change an extension on a VM that is not running. The preprovision hook passes the ones that are deallocated or stopped.')
+param skipExtensionVmNames array = []
+@description('Lowercase session host names, each mapped to the value of the excludeFromScaling tag it carries. A deployment replaces the tags of every VM it declares, so these are written back.')
+param scalingExclusions object = {}
 
 var normalizedScriptSourceRoot = endsWith(scriptSourceRoot, '/') ? take(scriptSourceRoot, length(scriptSourceRoot) - 1) : scriptSourceRoot
 var linuxBrokerConfigScriptUri = '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-AVD-Host.ps1'
@@ -73,6 +79,7 @@ var virtualMachineUserLoginRoleId = 'fb879df8-f326-4884-b1cf-06f3ad86be52'
 // The script's defaults are On, so only Off is passed, and a session host that still runs a
 // script from before 2.0.0 opens the desktop as it always has.
 var linuxDesktopDisplayArguments = '${linuxDesktopFullScreen ? '' : ' -FullScreen Off'}${linuxDesktopMultiMonitor ? '' : ' -MultiMonitor Off'}'
+var skipExtensionVmNamesLower = [for vmName in skipExtensionVmNames: toLower(vmName)]
 
 var osImage = 'microsoftwindowsdesktop:Windows-11:win11-24h2-avd:latest'
 var vmNames = [for i in range(1, sessionHostCount): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
@@ -95,7 +102,7 @@ resource hostPool 'Microsoft.DesktopVirtualization/hostPools@2024-04-03' = {
     loadBalancerType: loadBalancerType
     maxSessionLimit: maxSessionLimit
     customRdpProperty: customRdpProperty
-    startVMOnConnect: false
+    startVMOnConnect: startVmOnConnect
     validationEnvironment: false
     agentUpdate: agentUpdate
     registrationInfo: {
@@ -163,7 +170,9 @@ module hostPoolRegistrationToken 'token.bicep' = {
     preferredAppGroupType: hostPool.properties.preferredAppGroupType
     maxSessionLimit: hostPool.properties.maxSessionLimit
     customRdpProperty: customRdpProperty
-    startVMOnConnect: hostPool.properties.startVMOnConnect
+    // Passed as declared rather than read back from the host pool, in case creating the host pool
+    // ignores it: this second PUT is always an update.
+    startVMOnConnect: startVmOnConnect
     validationEnvironment: hostPool.properties.validationEnvironment
     agentUpdate: hostPool.properties.agentUpdate
   }
@@ -214,7 +223,13 @@ resource vmSessionHost 'Microsoft.Compute/virtualMachines@2024-11-01' = [
     name: name
     location: location
     // The broker-role tag is how the post-provision hook finds the session hosts to add to the AVD host group.
-    tags: tags
+    // The deployment replaces a VM's tags, so an excludeFromScaling tag an administrator added,
+    // which keeps autoscale away from the host, is written back.
+    tags: contains(scalingExclusions, toLower(name))
+      ? union(tags, {
+          excludeFromScaling: scalingExclusions[toLower(name)]
+        })
+      : tags
     identity: {
       type: 'SystemAssigned'
     }
@@ -269,8 +284,12 @@ resource vmSessionHost 'Microsoft.Compute/virtualMachines@2024-11-01' = [
   }
 ]
 
+// Azure refuses to change an extension on a VM that is not running, and the DSC extension's
+// registration token changes on every deployment, so the extensions of session hosts that
+// autoscale has deallocated are left out. A session host that is registered keeps working
+// without them.
 resource entraloginExtension 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' = [
-  for (name, i) in vmNames: {
+  for (name, i) in vmNames: if (!contains(skipExtensionVmNamesLower, toLower(name))) {
     name: '${name}/AADLoginForWindows'
     location: resourceGroup().location
     properties: {
@@ -292,7 +311,7 @@ resource entraloginExtension 'Microsoft.Compute/virtualMachines/extensions@2024-
 ]
 
 resource avdDscExtension 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' = [
-  for (name, i) in vmNames: {
+  for (name, i) in vmNames: if (!contains(skipExtensionVmNamesLower, toLower(name))) {
     name: '${name}/Microsoft.PowerShell.DSC'
     location: resourceGroup().location
     properties: {
@@ -330,7 +349,7 @@ resource avdDscExtension 'Microsoft.Compute/virtualMachines/extensions@2024-11-0
 ]
 
 resource linuxBrokerConfig 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' = [
-  for (name, i) in vmNames: {
+  for (name, i) in vmNames: if (!contains(skipExtensionVmNamesLower, toLower(name))) {
     name: '${name}/CustomScriptExtension'
     location: location
     properties: {

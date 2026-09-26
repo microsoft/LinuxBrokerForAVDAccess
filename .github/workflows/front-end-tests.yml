@@ -13,6 +13,7 @@ on:
       - 'deploy/bicep/**'
       - 'deploy/Update-AvdHostBrokerScript.ps1'
       - 'deploy/Migrate-ExistingEnvironment.ps1'
+      - 'deploy/Initialize-DeploymentEnvironment.ps1'
       - '.github/workflows/front-end-tests.yml'
   push:
     paths:
@@ -26,6 +27,7 @@ on:
       - 'deploy/bicep/**'
       - 'deploy/Update-AvdHostBrokerScript.ps1'
       - 'deploy/Migrate-ExistingEnvironment.ps1'
+      - 'deploy/Initialize-DeploymentEnvironment.ps1'
       - '.github/workflows/front-end-tests.yml'
 
 jobs:
@@ -220,7 +222,8 @@ jobs:
           Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser -SkipPublisherCheck
           Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Force -Scope CurrentUser -SkipPublisherCheck
 
-      # Also runs Update-AvdHostBrokerScript.ps1 and Migrate-ExistingEnvironment.ps1 with Azure mocked.
+      # Also runs Update-AvdHostBrokerScript.ps1, Migrate-ExistingEnvironment.ps1 and the autoscale
+      # checks of Initialize-DeploymentEnvironment.ps1 with Azure mocked.
       - name: Run the Pester tests
         shell: powershell
         run: |
