@@ -19,7 +19,7 @@
 
 # The Linux Broker host agent version. Every script in linux_host/ declares the same value
 # and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
-LINUXBROKER_AGENT_VERSION="1.1.0"
+LINUXBROKER_AGENT_VERSION="1.2.0"
 
 LAUNCHER_PATH="/usr/local/bin/xrdp-startwm.sh"
 SESMAN_INI="/etc/xrdp/sesman.ini"

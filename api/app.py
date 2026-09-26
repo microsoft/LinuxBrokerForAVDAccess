@@ -4412,7 +4412,7 @@ HEARTBEAT_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
 HEARTBEAT_SCRIPTS = (
     'release-session.sh', 'logind-session-watcher.sh', 'xrdp-who-xorg.sh',
     'create-user.sh', 'manage-lease.sh', 'apply-host-settings.sh', 'session-control.sh',
-    'patch-host.sh',
+    'patch-host.sh', 'xrdp-startwm.sh',
 )
 HEARTBEAT_DESKTOPS = ('gnome', 'xfce', 'mate', 'kde', 'other', 'none', 'unknown')
 HEARTBEAT_SESSION_STATES = ('active', 'disconnected', 'unknown')

@@ -10,7 +10,7 @@ import pytest
 def page_row(hostname, **values):
     row = {"VMID": 1, "Hostname": hostname, "IPAddress": "10.0.0.4", "PowerState": "On", "NetworkStatus": "Reachable",
            "VmStatus": "CheckedOut", "Username": "alice", "Ready": False, "CleanupPending": False, "DrainRequested": False,
-           "SettingsVersion": 3, "CurrentSettingsVersion": 3, "AgentVersion": "1.1.0", "HeartbeatAgeSeconds": 20,
+           "SettingsVersion": 3, "CurrentSettingsVersion": 3, "AgentVersion": "1.2.0", "HeartbeatAgeSeconds": 20,
            "ReconcileIntervalSeconds": 60, "SessionsJson": json.dumps([{"username": "Alice", "state": "disconnected"}]),
            "TotalCount": 41}
     row.update(values)

@@ -66,7 +66,7 @@ def test_attention_combines_broker_items_with_host_health(client, db):
     db.run("UPDATE dbo.VirtualMachines SET PowerStateChangedDate = DATEADD(MINUTE, -30, GETDATE()) WHERE Hostname = 'lnxhost-02'")
     db.run("UPDATE dbo.VirtualMachines SET SettingsVersion = (SELECT TOP 1 SettingsVersion FROM dbo.LinuxHostSettings)")
     heartbeat = client.post("/api/hosts/lnxhost-01/heartbeat", data=json.dumps({
-        "agentVersion": "1.1.0", "xrdp": {"active": False}, "sessions": [{"username": "dave", "state": "active"}],
+        "agentVersion": "1.2.0", "xrdp": {"active": False}, "sessions": [{"username": "dave", "state": "active"}],
     }), content_type="application/json")
     assert heartbeat.status_code == 200, heartbeat.get_json()
 

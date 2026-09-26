@@ -204,7 +204,7 @@ ATTENTION_DENIED_MINUTES = 60
 # with any change to those scripts; api/tests checks they agree. Fleet health flags a host
 # whose reported agent or scripts are older. The override exists so an operator can silence
 # the flag during a staged rollout.
-HOST_AGENT_VERSION = '1.1.0'
+HOST_AGENT_VERSION = '1.2.0'
 EXPECTED_HOST_AGENT_VERSION = (os.environ.get('EXPECTED_HOST_AGENT_VERSION') or '').strip() or HOST_AGENT_VERSION
 
 HEARTBEAT_MAX_BYTES = 32 * 1024
