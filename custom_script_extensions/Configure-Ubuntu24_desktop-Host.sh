@@ -152,6 +152,22 @@ if ! dpkg-query -W -f='${Status}' firefox 2>/dev/null | grep -q 'install ok inst
     desktop_packages+=(firefox-)
 fi
 
+# ubuntu-desktop-minimal brings NetworkManager, whose netplan default in /usr/lib/netplan
+# hands the NIC to NetworkManager the next time netplan generates its configuration. The
+# running systemd-networkd keeps the address until it restarts, and a later restart, such as
+# needrestart after any package install, then drops it and leaves the host off the network
+# until it reboots. The Azure image keeps NetworkManager off its NICs, so a file of the same
+# name in /etc/netplan keeps systemd-networkd in charge, whichever desktop is installed.
+echo "Keeping systemd-networkd in charge of the network..."
+cat > /etc/netplan/00-network-manager-all.yaml <<'EOF'
+# Managed by the Linux Broker host bootstrap. Shadows the NetworkManager default in
+# /usr/lib/netplan so that systemd-networkd keeps configuring the Azure NIC.
+network:
+  version: 2
+  renderer: networkd
+EOF
+chmod 600 /etc/netplan/00-network-manager-all.yaml
+
 echo "Installing the desktop, xrdp and the Linux Broker dependencies..."
 apt_get -y install jq nfs-common dconf-cli curl wget ufw libnotify-bin x11-utils dbus-user-session \
     xrdp xorgxrdp "${desktop_packages[@]}"
