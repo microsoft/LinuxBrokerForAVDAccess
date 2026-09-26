@@ -92,6 +92,7 @@ activationKey="${RHEL_ACTIVATION_KEY:-}"
 output_directory="/usr/local/bin"
 state_directory="/var/lib/linuxbroker-release-session"
 desktop_file="/etc/linuxbroker/desktop.conf"
+gnome_dconf_file="/etc/dconf/db/local.d/10-linuxbroker-gnome"
 
 SCRIPT_PATH="$output_directory/release-session.sh"
 WATCHER_SCRIPT_PATH="$output_directory/logind-session-watcher.sh"
@@ -155,6 +156,16 @@ case "$desktop" in
     gnome)
         echo "Installing 'Server with GUI' group..."
         sudo dnf groupinstall -y "Server with GUI"
+
+        # GNOME Shell asks every new user whether to take its tour. Marking the dialog as
+        # already shown keeps the first login free of prompts, as on Ubuntu hosts. The host
+        # settings step makes sure the dconf profile reads this local database.
+        echo "Turning off the GNOME welcome dialog for broker users..."
+        sudo mkdir -p "$(dirname "$gnome_dconf_file")"
+        printf '%s\n' '# Managed by the Linux Broker host bootstrap.' '[org/gnome/shell]' \
+            "welcome-dialog-last-shown-version='4294967295'" | sudo tee "$gnome_dconf_file" >/dev/null
+        sudo chmod 644 "$gnome_dconf_file"
+        sudo dconf update
         ;;
     xfce)
         # GDM is left out, as it brings GNOME Shell with it and xrdp needs no display manager.
