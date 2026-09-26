@@ -168,18 +168,21 @@ idle_disconnect_for_script() {
     local script="$1"
     local label="$2"
     local signalled="$WORK_DIR/signalled-$label"
+    local forked
+    local unforked
 
     reset_work
     # shellcheck source=/dev/null
     . "$script"
     LOG_FILE="$WORK_DIR/idle-$label.log"
+    STATE_DIRECTORY="$WORK_DIR"
+    IDLE_WARNED_USERS_FILE="$WORK_DIR/idle-warned-$label.tsv"
     : > "$signalled"
 
     get_session_display() { echo ":12"; }
     # 100 is the xrdp daemon. 200 and 300 are the connection processes it forked for this
     # session and for the one on display :120, and the daemon shares its stdout with 200.
-    ss() {
-        cat <<'SS'
+    forked=$(cat <<'SS'
 Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
 u_str ESTAB 0 0 /run/xrdp/2008/xrdp_display_12 669282 * 669904 users:(("Xorg",pid=500,fd=7))
 u_str ESTAB 0 0 * 669904 * 669282 users:(("xrdp",pid=200,fd=27))
@@ -187,8 +190,16 @@ u_str ESTAB 0 0 * 165288 * 165899 users:(("xrdp",pid=200,fd=2),("xrdp",pid=100,f
 u_str ESTAB 0 0 /run/xrdp/2009/xrdp_display_120 700001 * 700002 users:(("Xorg",pid=600,fd=7))
 u_str ESTAB 0 0 * 700002 * 700001 users:(("xrdp",pid=300,fd=27))
 SS
-    }
-    # Answers "ps -p PID -o comm=" and "ps -p PID -o ppid=".
+)
+    # With fork=false the daemon carries every connection itself.
+    unforked=$(printf '%s\n' \
+        'u_str ESTAB 0 0 /run/xrdp/2008/xrdp_display_12 669282 * 669904 users:(("Xorg",pid=500,fd=7))' \
+        'u_str ESTAB 0 0 * 669904 * 669282 users:(("xrdp",pid=100,fd=27))')
+    FAKE_SS="$forked"
+    ss() { printf '%s\n' "$FAKE_SS"; }
+    # Answers "ps -p PID -o comm=", "-o ppid=" and "-o etimes=". Connection 200 has been open
+    # for FAKE_CONNECTED_SECONDS.
+    FAKE_CONNECTED_SECONDS=5000
     ps() {
         case "$2:$4" in
             100:comm=|200:comm=|300:comm=) echo xrdp ;;
@@ -196,6 +207,9 @@ SS
             1:comm=) echo systemd ;;
             100:ppid=) echo 1 ;;
             200:ppid=|300:ppid=) echo 100 ;;
+            100:etimes=) echo 90000 ;;
+            200:etimes=) echo "$FAKE_CONNECTED_SECONDS" ;;
+            300:etimes=) echo 5 ;;
             *) return 1 ;;
         esac
     }
@@ -205,12 +219,8 @@ SS
     assert_eq "$(cat "$signalled")" "200" "$label signals only the connection process of display :12"
     assert_file_contains "$LOG_FILE" "Disconnected idle xrdp connection 200 for user bob."
 
-    # With fork=false the daemon carries every connection itself, so it is left alone.
-    ss() {
-        printf '%s\n' \
-            'u_str ESTAB 0 0 /run/xrdp/2008/xrdp_display_12 669282 * 669904 users:(("Xorg",pid=500,fd=7))' \
-            'u_str ESTAB 0 0 * 669904 * 669282 users:(("xrdp",pid=100,fd=27))'
-    }
+    # With fork=false the daemon carries every session on the host, so it is left alone.
+    FAKE_SS="$unforked"
     : > "$signalled"
     if disconnect_session bob 500; then
         fail "$label disconnected through the xrdp daemon"
@@ -228,9 +238,42 @@ SS
     warn_idle_user bob 500 90 || fail "$label idle warning was not delivered"
     assert_file_contains "$WORK_DIR/runuser-$label" "bob -- notify-send --app-name=Linux Broker Idle session warning Your session has been idle and will be disconnected in 90 seconds."
     assert_file_contains "$WORK_DIR/runuser-$label" "DISPLAY=:12 DBUS=unix:path=/run/user/3102/bus"
-    rm -f "$SHIM_DIR/notify-send"
+
+    # X keeps counting while a session sits disconnected, and reconnecting sends it no input,
+    # so the idle time is capped at how long the current connection has been open.
+    printf '#!/bin/bash\necho 2900000\n' > "$SHIM_DIR/xprintidle"
+    chmod +x "$SHIM_DIR/xprintidle"
+    FAKE_SS="$forked"
+    FAKE_CONNECTED_SECONDS=40
+    assert_eq "$(get_session_idle_seconds 500)" "40" "$label idle time of a connection opened 40 seconds ago"
+    FAKE_CONNECTED_SECONDS=5000
+    assert_eq "$(get_session_idle_seconds 500)" "2900" "$label idle time of a connection open for longer"
+    FAKE_SS="$unforked"
+    assert_eq "$(get_session_idle_seconds 500)" "2900" "$label idle time without a connection process"
+
+    # A user who reconnects after an idle disconnect is not disconnected again straight away.
+    # The new connection is warned and then disconnected on the usual schedule.
+    IDLE_TIMEOUT_SECONDS=300
+    IDLE_WARNING_SECONDS=120
+    FAKE_SS="$forked"
+    : > "$signalled"
+    : > "$WORK_DIR/runuser-$label"
+    FAKE_CONNECTED_SECONDS=40
+    enforce_idle_session bob 500
+    assert_eq "$(cat "$signalled")" "" "$label disconnected a user who had just reconnected"
+    assert_eq "$(cat "$WORK_DIR/runuser-$label")" "" "$label warned a user who had just reconnected"
+    FAKE_CONNECTED_SECONDS=200
+    enforce_idle_session bob 500
+    assert_file_contains "$WORK_DIR/runuser-$label" "will be disconnected in 100 seconds."
+    assert_eq "$(cat "$signalled")" "" "$label disconnected a user inside the warning window"
+    FAKE_CONNECTED_SECONDS=400
+    enforce_idle_session bob 500
+    assert_eq "$(cat "$signalled")" "200" "$label idle disconnect after reconnecting"
+    assert_file_contains "$LOG_FILE" "User bob has been idle for 400 seconds."
+    rm -f "$SHIM_DIR/notify-send" "$SHIM_DIR/xprintidle"
 
     unset -f get_session_display get_session_xauthority ss ps kill id runuser
+    unset FAKE_SS FAKE_CONNECTED_SECONDS
 }
 
 idle_disconnect_for_script "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh" agent

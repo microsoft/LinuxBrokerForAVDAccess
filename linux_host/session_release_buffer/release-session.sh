@@ -549,6 +549,8 @@ get_session_idle_seconds() {
     local display
     local xauthority
     local idle_milliseconds
+    local idle_seconds
+    local connected_seconds
 
     if ! command -v xprintidle >/dev/null 2>&1; then
         return 1
@@ -571,7 +573,17 @@ get_session_idle_seconds() {
         return 1
     fi
 
-    echo $((idle_milliseconds / 1000))
+    idle_seconds=$((idle_milliseconds / 1000))
+
+    # X keeps counting while a session sits disconnected, and reconnecting sends it no input,
+    # so the idle time would carry over into the new connection and disconnect the user again
+    # as soon as they reconnected. No connection has been idle for longer than it has been open.
+    connected_seconds=$(session_connected_seconds "${display#:}" "$xorg_pid")
+    if [ -n "$connected_seconds" ] && [ "$connected_seconds" -lt "$idle_seconds" ]; then
+        idle_seconds="$connected_seconds"
+    fi
+
+    echo "$idle_seconds"
 }
 
 warn_idle_user() {
@@ -627,6 +639,53 @@ xrdp_connection_pids() {
         }' | sort -u
 }
 
+# Prints the PID of each xrdp process serving a client connection to a session's display.
+# Each connection has its own process, forked from the xrdp daemon. The daemon itself is
+# never included: with fork=false it carries every session on the host.
+xrdp_session_connections() {
+    local display_number="$1"
+    local xorg_pid="$2"
+    local pid
+    local parent_pid
+
+    while read -r pid; do
+        [ -z "$pid" ] && continue
+        [ "$pid" = "$xorg_pid" ] && continue
+
+        if [ "$(ps -p "$pid" -o comm= 2>/dev/null | xargs)" != "xrdp" ]; then
+            continue
+        fi
+
+        parent_pid=$(ps -p "$pid" -o ppid= 2>/dev/null | xargs)
+        if [ -z "$parent_pid" ] || [ "$(ps -p "$parent_pid" -o comm= 2>/dev/null | xargs)" != "xrdp" ]; then
+            continue
+        fi
+
+        echo "$pid"
+    done < <(xrdp_connection_pids "$display_number" "$xorg_pid")
+}
+
+# Prints how many seconds ago the session's current client connected, which is the age of
+# its newest connection process, or nothing when no connection process is found.
+session_connected_seconds() {
+    local display_number="$1"
+    local xorg_pid="$2"
+    local pid
+    local age
+    local newest=""
+
+    while read -r pid; do
+        age=$(ps -p "$pid" -o etimes= 2>/dev/null | xargs)
+        [[ "$age" =~ ^[0-9]+$ ]] || continue
+
+        if [ -z "$newest" ] || [ "$age" -lt "$newest" ]; then
+            newest="$age"
+        fi
+    done < <(xrdp_session_connections "$display_number" "$xorg_pid")
+
+    echo "$newest"
+}
+
 # Drops the client connection while leaving Xorg running, so the session survives and the
 # user can reconnect inside the grace period. Only the xrdp process holding the other end of
 # the session's display connection is terminated, and closing that connection is the same
@@ -635,10 +694,7 @@ disconnect_session() {
     local username="$1"
     local xorg_pid="$2"
     local display
-    local display_number
     local pid
-    local parent_pid
-    local process_name
     local disconnected="false"
 
     display=$(get_session_display "$xorg_pid")
@@ -647,31 +703,14 @@ disconnect_session() {
         return 1
     fi
 
-    display_number="${display#:}"
-
     while read -r pid; do
-        [ -z "$pid" ] && continue
-        [ "$pid" = "$xorg_pid" ] && continue
-
-        process_name=$(ps -p "$pid" -o comm= 2>/dev/null | xargs)
-        if [ "$process_name" != "xrdp" ]; then
-            continue
-        fi
-
-        # Each connection has its own process, forked from the xrdp daemon. The daemon itself
-        # is never signalled: with fork=false it carries every session on the host.
-        parent_pid=$(ps -p "$pid" -o ppid= 2>/dev/null | xargs)
-        if [ -z "$parent_pid" ] || [ "$(ps -p "$parent_pid" -o comm= 2>/dev/null | xargs)" != "xrdp" ]; then
-            continue
-        fi
-
         if kill -TERM "$pid" 2>/dev/null; then
             disconnected="true"
             log "Disconnected idle xrdp connection $pid for user $username."
         else
             log "ERROR: Failed to disconnect xrdp connection $pid for user $username."
         fi
-    done < <(xrdp_connection_pids "$display_number" "$xorg_pid")
+    done < <(xrdp_session_connections "${display#:}" "$xorg_pid")
 
     if [ "$disconnected" != "true" ]; then
         log "No xrdp connection process was found for user $username on display $display."
