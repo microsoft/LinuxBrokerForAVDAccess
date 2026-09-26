@@ -12,7 +12,7 @@ setup_case() {
     install_basic_shims
     export FAKE_CALLS="$WORK_DIR/calls.log"
     : > "$FAKE_CALLS"
-    mkdir -p /awipsprofiles /var/lib/linuxbroker-release-session/leases
+    mkdir -p /nfs_profiles /var/lib/linuxbroker-release-session/leases
     rm -f /var/log/createuser.log
 }
 
@@ -36,7 +36,9 @@ new_form_success() {
     assert_eq "$(cat "$lease_file")" "$LEASE"
     assert_eq "$(stat -c %a "$lease_file")" "600"
     assert_not_contains_file /var/log/createuser.log 'S3cret!pass'
-    assert_file_contains "$FAKE_CALLS" "umount /awipsprofiles"
+    assert_file_contains "$FAKE_CALLS" "mount -t nfs nfs.example:/profiles /nfs_profiles"
+    assert_file_contains "$FAKE_CALLS" "umount /nfs_profiles"
+    assert_file_contains /var/log/createuser.log "Mount NFS root on /nfs_profiles"
     cleanup_user "$user"
 }
 

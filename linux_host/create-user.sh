@@ -8,7 +8,7 @@
 LINUXBROKER_AGENT_VERSION="1.2.0"
 
 # Constants
-NFS_MOUNT_ROOT="/awipsprofiles"
+NFS_MOUNT_ROOT="/nfs_profiles"
 NFS_OPTIONS="vers=4,minorversion=1,sec=sys,nconnect=4"
 LOGFILE=/var/log/createuser.log
 LEASE_DIRECTORY="/var/lib/linuxbroker-release-session/leases"
@@ -150,7 +150,7 @@ if [ ! -d "$NFS_MOUNT_ROOT" ]; then
 fi
 
 # Mount NFS root if not already mounted
-log "Mount NFS root on /awipsprofiles"
+log "Mount NFS root on $NFS_MOUNT_ROOT"
 if ! mountpoint -q "$NFS_MOUNT_ROOT"; then
     if [ "$PASSWORD_MODE" = "true" ]; then
         run_checked "Failed to mount NFS share: $NFS_SHARE" mount -t nfs "$NFS_SHARE" "$NFS_MOUNT_ROOT" -o "$NFS_OPTIONS"

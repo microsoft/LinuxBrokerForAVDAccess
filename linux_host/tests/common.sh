@@ -24,7 +24,7 @@ cleanup_user() {
     if id "$username" >/dev/null 2>&1; then
         userdel -r "$username" >/dev/null 2>&1 || userdel "$username" >/dev/null 2>&1 || true
     fi
-    rm -rf "/home/$username" "/awipsprofiles/$username" "/var/lib/linuxbroker-release-session/leases/$username.lease"
+    rm -rf "/home/$username" "/nfs_profiles/$username" "/var/lib/linuxbroker-release-session/leases/$username.lease"
 }
 
 install_basic_shims() {

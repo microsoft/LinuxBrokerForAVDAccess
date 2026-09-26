@@ -1,6 +1,8 @@
 #!/bin/bash
-# Verbatim copy of linux_host/create-user.sh before --password-stdin support.
-# CI checks out with depth 1, so tests keep this fixture to prove old hosts reject the new form.# Usage: ./create-user.sh <NFS_SHARE> <USERID> <USERNAME> [LEASE_ID]
+# Copy of linux_host/create-user.sh before --password-stdin support; only the NFS mount root has
+# since been renamed. CI checks out with depth 1, so tests keep this fixture to prove old hosts
+# reject the new form.
+# Usage: ./create-user.sh <NFS_SHARE> <USERID> <USERNAME> [LEASE_ID]
 
 if [ $# -lt 3 ] || [ $# -gt 4 ]; then
     echo "Usage: $0 <NFS_SHARE> <USERID> <USERNAME> [LEASE_ID]"
@@ -13,7 +15,7 @@ USERNAME="$3"
 LEASE_ID="${4:-}"
 
 # Constants
-NFS_MOUNT_ROOT="/awipsprofiles"
+NFS_MOUNT_ROOT="/nfs_profiles"
 NFS_OPTIONS="vers=4,minorversion=1,sec=sys,nconnect=4"
 NFS_USERHOME="$NFS_MOUNT_ROOT/$USERNAME"
 LOCAL_USERHOME="/home/$USERNAME"
@@ -30,7 +32,7 @@ if [ ! -d "$NFS_MOUNT_ROOT" ]; then
 fi
 
 # Mount NFS root if not already mounted
-echo "Mount NFS root on /awipsprofiles" >> $LOGFILE
+echo "Mount NFS root on /nfs_profiles" >> $LOGFILE
 if ! mountpoint -q "$NFS_MOUNT_ROOT"; then
     mount -t nfs "$NFS_SHARE" "$NFS_MOUNT_ROOT" -o "$NFS_OPTIONS"
     if [ $? -ne 0 ]; then
