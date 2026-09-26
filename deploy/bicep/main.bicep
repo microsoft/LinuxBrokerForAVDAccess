@@ -261,6 +261,7 @@ output apiAppName string = resources.outputs.apiAppName
 output apiUrl string = resources.outputs.apiUrl
 output taskAppName string = resources.outputs.taskAppName
 output keyVaultName string = resources.outputs.keyVaultName
+output keyringVaultName string = resources.outputs.keyringVaultName
 output containerRegistryName string = resources.outputs.containerRegistryName
 output sqlServerName string = resources.outputs.sqlServerName
 output sqlDatabaseName string = resources.outputs.sqlDatabaseName

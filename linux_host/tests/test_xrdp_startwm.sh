@@ -15,7 +15,8 @@ FAKE_SESMAN_PID=""
 # Everything the tests create. Whatever was there before is set aside and put back.
 TOUCHED=(/etc/xrdp /usr/libexec/xrdp /etc/polkit-1 /etc/X11 /usr/share/gnome-session /etc/linuxbroker
     "$LAUNCHER" "$SHIM_DIR/systemctl" "$SHIM_DIR/gnome-session" "$SHIM_DIR/startxfce4" "$SHIM_DIR/mate-session"
-    "$SHIM_DIR/logger")
+    "$SHIM_DIR/logger" "$SHIM_DIR/gnome-keyring-daemon" "$SHIM_DIR/gdbus" "$SHIM_DIR/pgrep" "$SHIM_DIR/pkill"
+    /run/linuxbroker-keyring)
 
 stop_fake_sesman() {
     if [ -n "$FAKE_SESMAN_PID" ]; then
@@ -123,7 +124,8 @@ fake_session_script() {
 {
   echo "ran=$label"
   echo "args=\$*"
-  for name in DESKTOP_SESSION XDG_SESSION_DESKTOP XDG_CURRENT_DESKTOP XDG_SESSION_TYPE GNOME_SHELL_SESSION_MODE LBTEST_PROFILE; do
+  for name in DESKTOP_SESSION XDG_SESSION_DESKTOP XDG_CURRENT_DESKTOP XDG_SESSION_TYPE GNOME_SHELL_SESSION_MODE LBTEST_PROFILE \
+      GNOME_KEYRING_CONTROL SSH_AUTH_SOCK; do
     echo "\$name=\${!name:-}"
   done
 } > "\${LBTEST_SESSION_OUT:-/dev/null}"
@@ -339,10 +341,11 @@ install_desktop_shim() {
 }
 
 # Starts a session the way xrdp-sesman does: as the user, in their home, with no arguments.
+# Arguments are extra NAME=VALUE pairs for the session's environment.
 run_session() {
     rm -f "$WORK_DIR/session.out"
     (cd "$WORK_DIR/home" && env -i PATH="$SHIM_DIR:/usr/bin:/bin" HOME="$WORK_DIR/home" FAKE_CALLS="$FAKE_CALLS" \
-        LBTEST_SESSION_OUT="$WORK_DIR/session.out" bash "$LAUNCHER")
+        LBTEST_SESSION_OUT="$WORK_DIR/session.out" "$@" bash "$LAUNCHER")
     [ -f "$WORK_DIR/session.out" ] || fail "no session script ran"
 }
 
@@ -527,6 +530,200 @@ test_an_unusable_record_falls_back() {
     assert_eq "$(session_value args)" ""
 }
 
+# ---------------------------------------------------------------------------
+# The login keyring.
+
+KEY="Lbt3stKeyringKey_AAAAAAAAAAAAAAAAAAAAAAAAAA"
+BUS="unix:path=/run/user/0/bus"
+KEYRING="$WORK_DIR/home/.local/share/keyrings/login.keyring"
+BACKUPS="$WORK_DIR/home/.local/share/linuxbroker/keyring-backup"
+
+# Stand-ins for gnome-keyring-daemon and the Secret Service. A keyring file holds the key that
+# opens it, or UNENCRYPTED; $FAKE_GKD_STATE records whether a daemon runs and the keyring is open.
+install_keyring_shims() {
+    export FAKE_GKD_STATE="$WORK_DIR/gkd"
+    mkdir -p "$FAKE_GKD_STATE"
+    cat > "$SHIM_DIR/gnome-keyring-daemon" <<'SHIM'
+#!/bin/bash
+state="$FAKE_GKD_STATE"
+ring="$HOME/.local/share/keyrings/login.keyring"
+echo "gnome-keyring-daemon $* bus=${DBUS_SESSION_BUS_ADDRESS:-} runtime=${XDG_RUNTIME_DIR:-}" >> "$FAKE_CALLS"
+case "$1" in
+  --unlock)
+    if [ "${FAKE_GKD_HANG:-0}" = "1" ]; then sleep 30; fi
+    IFS= read -r key || true
+    : > "$state/running"
+    if [ ! -e "$ring" ]; then
+      mkdir -p "$(dirname "$ring")"
+      printf '%s' "$key" > "$ring"
+    fi
+    content=$(cat "$ring")
+    if [ "$content" = "$key" ] || [ "$content" = "UNENCRYPTED" ]; then : > "$state/unlocked"; else rm -f "$state/unlocked"; fi
+    ;;
+  --start)
+    : > "$state/running"
+    echo "GNOME_KEYRING_CONTROL=${XDG_RUNTIME_DIR:-}/keyring"
+    echo "SSH_AUTH_SOCK=${XDG_RUNTIME_DIR:-}/keyring/ssh"
+    ;;
+esac
+exit 0
+SHIM
+    cat > "$SHIM_DIR/gdbus" <<'SHIM'
+#!/bin/bash
+echo "gdbus $* bus=${DBUS_SESSION_BUS_ADDRESS:-}" >> "$FAKE_CALLS"
+if [ "${FAKE_GDBUS_FAIL:-0}" = "1" ] || [ ! -e "$FAKE_GKD_STATE/running" ]; then exit 1; fi
+case "$*" in
+  *" Collections"*) echo "(<[objectpath '/org/freedesktop/secrets/collection/login']>,)" ;;
+  *" Locked"*) if [ -e "$FAKE_GKD_STATE/unlocked" ]; then echo "(<false>,)"; else echo "(<true>,)"; fi ;;
+esac
+SHIM
+    cat > "$SHIM_DIR/pgrep" <<'SHIM'
+#!/bin/bash
+echo "pgrep $*" >> "$FAKE_CALLS"
+[ -e "$FAKE_GKD_STATE/running" ]
+SHIM
+    cat > "$SHIM_DIR/pkill" <<'SHIM'
+#!/bin/bash
+echo "pkill $*" >> "$FAKE_CALLS"
+rm -f "$FAKE_GKD_STATE/running" "$FAKE_GKD_STATE/unlocked"
+SHIM
+    chmod 755 "$SHIM_DIR/gnome-keyring-daemon" "$SHIM_DIR/gdbus" "$SHIM_DIR/pgrep" "$SHIM_DIR/pkill"
+}
+
+write_key() {
+    mkdir -p /run/linuxbroker-keyring
+    printf '%s\n' "$1" > /run/linuxbroker-keyring/root
+    chmod 400 /run/linuxbroker-keyring/root
+}
+
+# The daemon of a previous session has gone.
+end_keyring_daemon() {
+    rm -f "$FAKE_GKD_STATE/running" "$FAKE_GKD_STATE/unlocked"
+}
+
+setup_keyring_case() {
+    setup_case
+    setup_debian_session
+    printf 'DESKTOP=gnome\n' > "$DESKTOP_FILE"
+    install_keyring_shims
+    write_key "$KEY"
+}
+
+assert_desktop_started() {
+    assert_eq "$(session_value ran)" "xsession" "${1:-}"
+    assert_eq "$(session_value args)" "gnome-session --session=ubuntu" "${1:-}"
+}
+
+backup_count() {
+    find "$BACKUPS" -name 'login-*.keyring' 2>/dev/null | wc -l | tr -d ' '
+}
+
+test_the_login_keyring_opens_with_the_brokers_key() {
+    setup_keyring_case
+
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE"
+    assert_desktop_started
+    assert_eq "$(cat "$KEYRING")" "$KEY" "the first session creates the keyring with the key"
+    assert_file_contains "$FAKE_CALLS" "gnome-keyring-daemon --unlock bus=$BUS runtime=/run/user/0"
+    assert_file_contains "$FAKE_CALLS" "gnome-keyring-daemon --start --components=secrets bus=$BUS"
+    assert_file_contains "$FAKE_CALLS" "Unlocked the login keyring of root."
+    assert_eq "$(session_value GNOME_KEYRING_CONTROL)" "" "the desktop's environment is unchanged"
+    assert_eq "$(session_value SSH_AUTH_SOCK)" ""
+    assert_not_contains_file "$FAKE_CALLS" "$KEY"
+
+    # The next session, with the same key, opens the same keyring.
+    end_keyring_daemon
+    : > "$FAKE_CALLS"
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE"
+    assert_desktop_started
+    assert_file_contains "$FAKE_CALLS" "Unlocked the login keyring of root."
+    assert_eq "$(backup_count)" "0"
+
+    # An unencrypted keyring is always open, and is kept.
+    end_keyring_daemon
+    printf 'UNENCRYPTED' > "$KEYRING"
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE"
+    assert_eq "$(cat "$KEYRING")" "UNENCRYPTED"
+    assert_eq "$(backup_count)" "0"
+}
+
+test_a_keyring_the_key_cannot_open_is_moved_aside() {
+    local backup
+    setup_keyring_case
+    mkdir -p "$(dirname "$KEYRING")"
+    printf 'password-of-an-earlier-checkout' > "$KEYRING"
+
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE"
+    assert_desktop_started
+    assert_eq "$(backup_count)" "1"
+    backup=$(find "$BACKUPS" -name 'login-*.keyring')
+    assert_eq "$(cat "$backup")" "password-of-an-earlier-checkout" "the old keyring is kept"
+    assert_eq "$(stat -c %a "$BACKUPS")" "700"
+    assert_eq "$(cat "$KEYRING")" "$KEY" "a new keyring opens with the key"
+    assert_file_contains "$FAKE_CALLS" "systemctl --user stop gnome-keyring-daemon.service"
+    assert_file_contains "$FAKE_CALLS" "pkill -u 0 -x gnome-keyring-d"
+    assert_file_contains "$FAKE_CALLS" "Moved a login keyring the key does not open to $backup, and created a new one for root."
+    assert_not_contains_file "$FAKE_CALLS" "$KEY"
+}
+
+test_a_keyring_in_use_elsewhere_is_left_alone() {
+    setup_keyring_case
+    mkdir -p "$(dirname "$KEYRING")"
+    printf 'a-password-the-user-chose' > "$KEYRING"
+    # Another session of the user already runs a keyring daemon.
+    : > "$FAKE_GKD_STATE/running"
+
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE"
+    assert_desktop_started
+    assert_eq "$(cat "$KEYRING")" "a-password-the-user-chose"
+    assert_eq "$(backup_count)" "0"
+    assert_not_contains_file "$FAKE_CALLS" "pkill"
+    assert_file_contains "$FAKE_CALLS" "The login keyring of root stays locked: the key does not open it."
+
+    # When the keyring's state cannot be read, nothing is moved either.
+    end_keyring_daemon
+    : > "$FAKE_CALLS"
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE" FAKE_GDBUS_FAIL=1
+    assert_desktop_started
+    assert_eq "$(backup_count)" "0"
+    assert_file_contains "$FAKE_CALLS" "Could not tell whether the login keyring of root is unlocked."
+}
+
+test_without_a_usable_key_the_desktop_starts_as_before() {
+    local started elapsed
+    setup_keyring_case
+
+    rm -f /run/linuxbroker-keyring/root
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE"
+    assert_desktop_started "no key"
+    assert_not_contains_file "$FAKE_CALLS" "gnome-keyring-daemon"
+
+    write_key "not a key!"
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE"
+    assert_desktop_started "a malformed key"
+    assert_not_contains_file "$FAKE_CALLS" "gnome-keyring-daemon"
+    assert_file_contains "$FAKE_CALLS" "Ignoring /run/linuxbroker-keyring/root: it does not hold a keyring key."
+
+    # No session bus: /run/user/0/bus is not a socket here.
+    write_key "$KEY"
+    run_session FAKE_GKD_STATE="$FAKE_GKD_STATE"
+    assert_desktop_started "no session bus"
+    assert_not_contains_file "$FAKE_CALLS" "gnome-keyring-daemon"
+    assert_file_contains "$FAKE_CALLS" "the session has no D-Bus session bus"
+
+    rm -f "$SHIM_DIR/gnome-keyring-daemon"
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE"
+    assert_desktop_started "no keyring daemon installed"
+
+    # A daemon that hangs delays the desktop by the step timeout, no more.
+    install_keyring_shims
+    started=$(date +%s)
+    run_session DBUS_SESSION_BUS_ADDRESS="$BUS" FAKE_GKD_STATE="$FAKE_GKD_STATE" FAKE_GKD_HANG=1
+    elapsed=$(( $(date +%s) - started ))
+    assert_desktop_started "a hung keyring daemon"
+    [ "$elapsed" -lt 20 ] || fail "a hung keyring daemon held the desktop for $elapsed seconds"
+}
+
 test_install_on_ubuntu
 test_install_on_rhel
 test_install_reads_sesman_ini_as_xrdp_does
@@ -537,5 +734,9 @@ test_xfce_and_mate_on_debian
 test_rhel_runs_its_own_script_for_gnome
 test_xfce_and_mate_on_rhel
 test_an_unusable_record_falls_back
+test_the_login_keyring_opens_with_the_brokers_key
+test_a_keyring_the_key_cannot_open_is_moved_aside
+test_a_keyring_in_use_elsewhere_is_left_alone
+test_without_a_usable_key_the_desktop_starts_as_before
 
 echo "xrdp-startwm.sh tests passed"

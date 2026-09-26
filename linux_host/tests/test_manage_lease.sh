@@ -6,6 +6,7 @@ set -uo pipefail
 SCRIPT="$ROOT_DIR/linux_host/manage-lease.sh"
 LEASE_DIR="/var/lib/linuxbroker-release-session/leases"
 LEASE="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+KEY_FILE="/run/linuxbroker-keyring/lbmluser"
 
 setup_case() {
     reset_work
@@ -14,8 +15,10 @@ setup_case() {
     install_process_shims
     export FAKE_CALLS="$WORK_DIR/calls.log"
     : > "$FAKE_CALLS"
-    mkdir -p "$LEASE_DIR" /home/lbmluser
+    mkdir -p "$LEASE_DIR" /home/lbmluser /run/linuxbroker-keyring
     rm -f "$LEASE_DIR"/*.lease
+    # The keyring key create-user.sh left at checkout.
+    printf 'Lbt3stKeyringKey_AAAAAAAAAAAAAAAA\n' > "$KEY_FILE"
 }
 
 write_lease() { printf '%s\n' "$LEASE" > "$LEASE_DIR/$1.lease"; }
@@ -43,6 +46,7 @@ export FAKE_LOGINCTL_STATE=active
 out=$(bash "$SCRIPT" clear lbmluser "$LEASE")
 assert_contains "$out" "__LEASE_ACTION=in-use__"
 assert_file_exists "$LEASE_DIR/lbmluser.lease"
+assert_file_exists "$KEY_FILE"
 ! grep -Fq "loginctl terminate-user lbmluser" "$FAKE_CALLS" || fail "signed-in user should not be terminated"
 ! grep -Fq "pkill -KILL -u lbmluser" "$FAKE_CALLS" || fail "signed-in user processes should not be killed"
 unset FAKE_LOGINCTL_STATE
@@ -55,6 +59,7 @@ out=$(bash "$SCRIPT" clear lbmluser "$LEASE")
 unset FAKE_MOUNTPOINT_SEQUENCE
 assert_contains "$out" "__LEASE_ACTION=cleared__"
 assert_not_exists "$LEASE_DIR/lbmluser.lease"
+assert_not_exists "$KEY_FILE"
 assert_call_before "loginctl terminate-user lbmluser" "umount -l /home/lbmluser"
 assert_call_before "pkill -KILL -u lbmluser" "umount -l /home/lbmluser"
 
@@ -66,6 +71,7 @@ out=$(bash "$SCRIPT" clear-any lbmluser)
 unset FAKE_MOUNTPOINT_SEQUENCE
 assert_contains "$out" "__LEASE_ACTION=cleared__"
 assert_not_exists "$LEASE_DIR/lbmluser.lease"
+assert_not_exists "$KEY_FILE"
 assert_call_before "loginctl terminate-user lbmluser" "umount -l /home/lbmluser"
 assert_call_before "pkill -KILL -u lbmluser" "umount -l /home/lbmluser"
 
@@ -74,6 +80,7 @@ write_lease lbmluser
 out=$(bash "$SCRIPT" clear lbmluser "ffffffff-1111-2222-3333-444444444444")
 assert_contains "$out" "__LEASE_ACTION=mismatch__"
 assert_file_exists "$LEASE_DIR/lbmluser.lease"
+assert_file_exists "$KEY_FILE"
 
 setup_case
 out=$(bash "$SCRIPT" clear lbmluser "$LEASE")
@@ -81,3 +88,4 @@ assert_contains "$out" "__LEASE_ACTION=missing__"
 
 if bash "$SCRIPT" read '../bad' >/dev/null 2>&1; then fail "invalid username accepted"; fi
 if bash "$SCRIPT" clear lbmluser not-a-guid >/dev/null 2>&1; then fail "invalid lease accepted"; fi
+rm -rf /run/linuxbroker-keyring

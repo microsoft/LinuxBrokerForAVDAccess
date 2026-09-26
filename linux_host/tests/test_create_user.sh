@@ -124,9 +124,59 @@ legacy_fixture_rejects_new_form() {
     ! id "$user" >/dev/null 2>&1 || fail "$user should not exist"
 }
 
+# The broker sends the user's keyring key on a second line, for the xrdp session launcher.
+keyring_key_is_left_for_the_session() {
+    local user="lbtestcu10" key="Lbt3stKeyringKey_AAAAAAAAAAAAAAAAAAAAAAAAAA" key_file out
+    local saved=""
+    setup_case
+    cleanup_user "$user"
+    if [ -e /run/linuxbroker-keyring ]; then
+        saved="/run/linuxbroker-keyring.lbtest-saved"
+        rm -rf "$saved"
+        mv /run/linuxbroker-keyring "$saved"
+    fi
+    key_file="/run/linuxbroker-keyring/$user"
+
+    out=$(printf 'pw\n%s\n' "$key" | bash "$SCRIPT" --password-stdin nfs.example:/profiles 21010 "$user" "$LEASE") \
+        || fail "provisioning with a keyring key failed"
+    assert_contains "$out" "__CREATE_USER_RESULT=ok__"
+    assert_eq "$(cat "$key_file")" "$key"
+    assert_eq "$(stat -c '%a %U' "$key_file")" "400 $user"
+    assert_eq "$(stat -c '%a %U' /run/linuxbroker-keyring)" "711 root"
+    assert_eq "$(find /run/linuxbroker-keyring -name ".$user.*" | wc -l | tr -d ' ')" "0" "no temporary file is left"
+    assert_not_contains_file /var/log/createuser.log "$key"
+
+    # A reconnect sends the same key again; a new one replaces it.
+    printf 'pw\n%s\n' "${key/A/B}" | bash "$SCRIPT" --password-stdin nfs.example:/profiles 21010 "$user" "$LEASE" >/dev/null \
+        || fail "provisioning with a new keyring key failed"
+    assert_eq "$(cat "$key_file")" "${key/A/B}"
+
+    # Anything that is not a key is ignored, and removes the old one.
+    for bad in "short" "has space in it, which no key has" "$(printf 'x%.0s' {1..129})"; do
+        printf 'pw\n%s\n' "$key" | bash "$SCRIPT" --password-stdin nfs.example:/profiles 21010 "$user" "$LEASE" >/dev/null
+        printf 'pw\n%s\n' "$bad" | bash "$SCRIPT" --password-stdin nfs.example:/profiles 21010 "$user" "$LEASE" >/dev/null \
+            || fail "a malformed keyring key failed the checkout"
+        assert_not_exists "$key_file"
+    done
+    assert_file_contains /var/log/createuser.log "Ignoring a keyring key for $user that is not a valid key."
+
+    # A broker without a keyring vault sends none, which also removes a key left earlier.
+    printf 'pw\n%s\n' "$key" | bash "$SCRIPT" --password-stdin nfs.example:/profiles 21010 "$user" "$LEASE" >/dev/null
+    printf 'pw\n' | bash "$SCRIPT" --password-stdin nfs.example:/profiles 21010 "$user" "$LEASE" >/dev/null \
+        || fail "provisioning without a keyring key failed"
+    assert_not_exists "$key_file"
+
+    cleanup_user "$user"
+    rm -rf /run/linuxbroker-keyring
+    if [ -n "$saved" ]; then
+        mv "$saved" /run/linuxbroker-keyring
+    fi
+}
+
 new_form_success
 validation_failures
 mount_failure
 legacy_form_still_works
 existing_users_get_bash_instead_of_sh
 legacy_fixture_rejects_new_form
+keyring_key_is_left_for_the_session

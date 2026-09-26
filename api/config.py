@@ -66,6 +66,9 @@ GRAPH_API_ENDPOINT = os.environ.get('GRAPH_API_ENDPOINT') or f"{GRAPH_ENDPOINT}/
 DOMAIN_NAME = os.environ.get('DOMAIN_NAME')
 VAULT_URL = os.environ.get('VAULT_URL')
 KEY_NAME = os.environ.get('KEY_NAME')
+# The vault that keeps each user's login keyring key. Without it, checkouts send no key and
+# the hosts behave as before.
+KEYRING_VAULT_URL = (os.environ.get('KEYRING_VAULT_URL') or '').strip() or None
 DB_SERVER = os.environ.get('DB_SERVER')
 DB_DATABASE = os.environ.get('DB_DATABASE')
 DB_USERNAME = os.environ.get('DB_USERNAME')

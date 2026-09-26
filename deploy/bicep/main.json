@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "3452646503869980587"
+      "templateHash": "9307409657661009644"
     }
   },
   "parameters": {
@@ -567,7 +567,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "3838469552702841404"
+              "templateHash": "7015886803379737196"
             }
           },
           "parameters": {
@@ -840,6 +840,7 @@
             "sqlSuffix": "[toLower(uniqueString(subscription().subscriptionId, resourceGroup().id, parameters('appName'), parameters('environmentName'), variables('sqlLocation')))]",
             "storageAccountName": "[take(format('{0}{1}{2}', variables('sanitizedApp'), variables('sanitizedEnv'), variables('suffix')), 24)]",
             "keyVaultName": "[take(format('kv{0}{1}{2}', variables('sanitizedApp'), variables('sanitizedEnv'), variables('suffix')), 24)]",
+            "keyringVaultName": "[take(format('kr{0}{1}{2}', variables('sanitizedApp'), variables('sanitizedEnv'), variables('suffix')), 24)]",
             "containerRegistryName": "[take(format('{0}{1}{2}', variables('sanitizedApp'), variables('sanitizedEnv'), variables('suffix')), 50)]",
             "sqlServerName": "[take(format('sql-{0}-{1}-{2}', variables('sanitizedApp'), variables('sanitizedEnv'), variables('sqlSuffix')), 63)]",
             "sqlDatabaseName": "LinuxBroker",
@@ -856,6 +857,7 @@
             "privateEndpointSubnetName": "snet-private-endpoints",
             "effectiveVmResourceGroup": "[if(empty(parameters('vmHostResourceGroup')), resourceGroup().name, parameters('vmHostResourceGroup'))]",
             "keyVaultSecretsUserRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
+            "keyVaultSecretsOfficerRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')]",
             "acrPullRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
             "vmPowerRoleDefinitionGuid": "40c5ff49-9181-41f8-ae61-143b0e78555e",
             "databasePasswordSecretName": "db-password",
@@ -1038,6 +1040,20 @@
                 "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2025-04-01').outputs.principalId.value]",
                 "principalType": "ServicePrincipal",
                 "roleDefinitionId": "[variables('keyVaultSecretsUserRoleDefinitionId')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Resources/deployments', 'apiApp')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', variables('keyringVaultName'))]",
+              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('keyringVaultName')), variables('apiAppName'), 'api-keyring-vault-secrets-officer')]",
+              "properties": {
+                "principalId": "[reference(resourceId('Microsoft.Resources/deployments', 'apiApp'), '2025-04-01').outputs.principalId.value]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[variables('keyVaultSecretsOfficerRoleDefinitionId')]"
               },
               "dependsOn": [
                 "[resourceId('Microsoft.Resources/deployments', 'apiApp')]"
@@ -1876,6 +1892,88 @@
             {
               "type": "Microsoft.Resources/deployments",
               "apiVersion": "2025-04-01",
+              "name": "keyringVault",
+              "properties": {
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "location": {
+                    "value": "[parameters('location')]"
+                  },
+                  "tags": {
+                    "value": "[parameters('tags')]"
+                  },
+                  "keyVaultName": {
+                    "value": "[variables('keyringVaultName')]"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "15383843801216891735"
+                    }
+                  },
+                  "parameters": {
+                    "location": {
+                      "type": "string",
+                      "defaultValue": "[resourceGroup().location]"
+                    },
+                    "tags": {
+                      "type": "object",
+                      "defaultValue": {}
+                    },
+                    "keyVaultName": {
+                      "type": "string"
+                    }
+                  },
+                  "resources": [
+                    {
+                      "type": "Microsoft.KeyVault/vaults",
+                      "apiVersion": "2023-07-01",
+                      "name": "[parameters('keyVaultName')]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "tenantId": "[subscription().tenantId]",
+                        "enableRbacAuthorization": true,
+                        "enabledForDeployment": false,
+                        "enabledForDiskEncryption": false,
+                        "enabledForTemplateDeployment": false,
+                        "publicNetworkAccess": "Enabled",
+                        "sku": {
+                          "family": "A",
+                          "name": "standard"
+                        },
+                        "softDeleteRetentionInDays": 90
+                      }
+                    }
+                  ],
+                  "outputs": {
+                    "name": {
+                      "type": "string",
+                      "value": "[parameters('keyVaultName')]"
+                    },
+                    "id": {
+                      "type": "string",
+                      "value": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+                    },
+                    "vaultUri": {
+                      "type": "string",
+                      "value": "[reference(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), '2023-07-01').vaultUri]"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
               "name": "sql",
               "properties": {
                 "expressionEvaluationOptions": {
@@ -2374,6 +2472,7 @@
                       "DOMAIN_NAME": "[variables('effectiveDomainName')]",
                       "GRAPH_API_ENDPOINT": "[format('{0}/.default', variables('resolvedGraphEndpoint'))]",
                       "GRAPH_ENDPOINT": "[variables('resolvedGraphEndpoint')]",
+                      "KEYRING_VAULT_URL": "[reference(resourceId('Microsoft.Resources/deployments', 'keyringVault'), '2025-04-01').outputs.vaultUri.value]",
                       "KEY_NAME": "[variables('linuxHostPrivateKeySecretName')]",
                       "LINUX_HOST_ADMIN_LOGIN_NAME": "[parameters('linuxHostAdminLoginName')]",
                       "LINUX_HOST_GROUP_ID": "[parameters('linuxHostGroupId')]",
@@ -2559,6 +2658,7 @@
               "dependsOn": [
                 "[resourceId('Microsoft.Resources/deployments', 'appServicePlan')]",
                 "[resourceId('Microsoft.Resources/deployments', 'containerRegistry')]",
+                "[resourceId('Microsoft.Resources/deployments', 'keyringVault')]",
                 "[resourceId('Microsoft.Resources/deployments', 'keyVault')]",
                 "[resourceId('Microsoft.Resources/deployments', 'networking')]",
                 "[resourceId('Microsoft.Resources/deployments', 'observability')]",
@@ -3897,6 +3997,10 @@
               "type": "string",
               "value": "[variables('keyVaultName')]"
             },
+            "keyringVaultName": {
+              "type": "string",
+              "value": "[variables('keyringVaultName')]"
+            },
             "containerRegistryName": {
               "type": "string",
               "value": "[variables('containerRegistryName')]"
@@ -3957,6 +4061,10 @@
     "keyVaultName": {
       "type": "string",
       "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.keyVaultName.value]"
+    },
+    "keyringVaultName": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.keyringVaultName.value]"
     },
     "containerRegistryName": {
       "type": "string",

@@ -7,7 +7,8 @@
 # /etc/linuxbroker/desktop.conf names, which the host bootstrap writes: the distribution's own
 # script cannot start Ubuntu's session on Xorg, or choose between desktops installed side by
 # side. Anything this script does not handle, including a host without desktop.conf, runs the
-# distribution's script exactly as before.
+# distribution's script exactly as before. First, it unlocks the user's login keyring with the
+# key create-user.sh left for them, when there is one.
 #
 # --install, as root, points DefaultWindowManager in /etc/xrdp/sesman.ini at this script. It
 # records the script it replaces in /etc/linuxbroker/xrdp-startwm.conf, keeps the original
@@ -317,6 +318,135 @@ log_session() {
     fi
 }
 
+# The login keyring. xrdp-sesman has no keyring PAM module, and the account password changes
+# at every checkout anyway, so nothing else could unlock it: every application that stores a
+# secret would ask for a password the user never had. create-user.sh leaves a key the broker
+# keeps for the user instead, and the keyring is unlocked with it before the desktop starts.
+# Every step is best effort and bounded: the desktop starts whatever happens here.
+
+KEYRING_KEY_DIRECTORY="/run/linuxbroker-keyring"
+KEYRING_STEP_TIMEOUT_SECONDS=5
+KEYRING_RUNTIME_DIRECTORY=""
+KEYRING_BUS=""
+
+# Runs a keyring command on the user's session bus, which the desktop's own keyring components
+# use too, without changing the environment the desktop starts with.
+keyring_command() {
+    timeout "$KEYRING_STEP_TIMEOUT_SECONDS" env XDG_RUNTIME_DIR="$KEYRING_RUNTIME_DIRECTORY" \
+        DBUS_SESSION_BUS_ADDRESS="$KEYRING_BUS" "$@"
+}
+
+keyring_daemon_running() {
+    # The kernel keeps the first 15 characters of gnome-keyring-daemon as its name.
+    pgrep -u "$(id -u)" -x gnome-keyring-d >/dev/null 2>&1
+}
+
+# Unlocks the login keyring with the key, creating it when there is none, and starts the
+# Secret Service applications use. Both commands succeed even when the key is wrong.
+open_login_keyring() {
+    printf '%s' "$1" | keyring_command gnome-keyring-daemon --unlock >/dev/null 2>&1
+    keyring_command gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1
+}
+
+# Prints true or false for the login keyring's Locked property, or nothing when it cannot be
+# read. Asking for the collections first makes the daemon offer a keyring --unlock created.
+login_keyring_locked() {
+    local reply
+
+    keyring_command gdbus call --session --timeout 3 --dest org.freedesktop.secrets \
+        --object-path /org/freedesktop/secrets --method org.freedesktop.DBus.Properties.Get \
+        org.freedesktop.Secret.Service Collections >/dev/null 2>&1
+    reply=$(keyring_command gdbus call --session --timeout 3 --dest org.freedesktop.secrets \
+        --object-path /org/freedesktop/secrets/collection/login --method org.freedesktop.DBus.Properties.Get \
+        org.freedesktop.Secret.Collection Locked 2>/dev/null)
+    case "$reply" in
+        *true*) echo true ;;
+        *false*) echo false ;;
+    esac
+}
+
+stop_keyring_daemon() {
+    local attempts=0
+
+    # Ubuntu runs the daemon as a user service, which would otherwise restart it.
+    keyring_command systemctl --user stop gnome-keyring-daemon.service >/dev/null 2>&1
+    pkill -u "$(id -u)" -x gnome-keyring-d >/dev/null 2>&1
+    while keyring_daemon_running; do
+        [ "$attempts" -ge 10 ] && return 1
+        sleep 0.5
+        attempts=$((attempts + 1))
+    done
+}
+
+unlock_keyring() {
+    local user home key key_file keyring backup_directory backup started_here=0
+
+    user=$(id -un 2>/dev/null) || return 0
+    key_file="$KEYRING_KEY_DIRECTORY/$user"
+    [ -r "$key_file" ] || return 0
+    command -v gnome-keyring-daemon >/dev/null 2>&1 || return 0
+
+    key=$(head -c 256 "$key_file" 2>/dev/null | tr -d '\r\n')
+    if ! [[ "$key" =~ ^[A-Za-z0-9_-]{16,128}$ ]]; then
+        log_session "Ignoring $key_file: it does not hold a keyring key."
+        return 0
+    fi
+
+    KEYRING_RUNTIME_DIRECTORY="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    KEYRING_BUS="${DBUS_SESSION_BUS_ADDRESS:-}"
+    if [ -z "$KEYRING_BUS" ] && [ -S "$KEYRING_RUNTIME_DIRECTORY/bus" ]; then
+        KEYRING_BUS="unix:path=$KEYRING_RUNTIME_DIRECTORY/bus"
+    fi
+    if [ -z "$KEYRING_BUS" ]; then
+        log_session "The login keyring of $user was not unlocked: the session has no D-Bus session bus."
+        return 0
+    fi
+
+    keyring_daemon_running || started_here=1
+    open_login_keyring "$key"
+    case "$(login_keyring_locked)" in
+        false)
+            log_session "Unlocked the login keyring of $user."
+            return 0
+            ;;
+        true) ;;
+        *)
+            log_session "Could not tell whether the login keyring of $user is unlocked."
+            return 0
+            ;;
+    esac
+
+    # The keyring is protected by something other than the key: the password of an earlier
+    # checkout, or one the user chose. Nothing can open it, so it is moved aside and a new one
+    # created, unless a daemon this script did not start is using it.
+    home="${HOME:-$(getent passwd "$user" | cut -d: -f6)}"
+    keyring="${XDG_DATA_HOME:-$home/.local/share}/keyrings/login.keyring"
+    if [ "$started_here" -ne 1 ] || [ ! -f "$keyring" ]; then
+        log_session "The login keyring of $user stays locked: the key does not open it."
+        return 0
+    fi
+
+    backup_directory="$home/.local/share/linuxbroker/keyring-backup"
+    backup="$backup_directory/login-$(date -u +%Y%m%dT%H%M%SZ).keyring"
+    [ ! -e "$backup" ] || backup="${backup%.keyring}-$$.keyring"
+    if ! stop_keyring_daemon; then
+        log_session "The login keyring of $user stays locked: the keyring daemon did not stop."
+        return 0
+    fi
+    if ! mkdir -p "$backup_directory" || ! chmod 700 "$backup_directory" || ! mv "$keyring" "$backup"; then
+        log_session "The login keyring of $user stays locked: it could not be moved aside."
+        open_login_keyring "$key"
+        return 0
+    fi
+
+    open_login_keyring "$key"
+    if [ "$(login_keyring_locked)" = "false" ]; then
+        log_session "Moved a login keyring the key does not open to $backup, and created a new one for $user."
+    else
+        log_session "Moved a login keyring the key does not open to $backup, but the new one for $user is not unlocked."
+    fi
+}
+
 # The desktop desktop.conf names, or nothing when it names none this script starts. The file
 # is read, never sourced.
 configured_desktop() {
@@ -408,6 +538,7 @@ run_original() {
 start_session() {
     local desktop starter=""
 
+    unlock_keyring
     desktop=$(configured_desktop)
     if [ -n "$desktop" ]; then
         if [ -d /etc/X11/Xsession.d ] && [ -x /etc/X11/Xsession ]; then

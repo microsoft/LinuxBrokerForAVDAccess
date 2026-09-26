@@ -12,6 +12,8 @@ NFS_MOUNT_ROOT="/awipsprofiles"
 NFS_OPTIONS="vers=4,minorversion=1,sec=sys,nconnect=4"
 LOGFILE=/var/log/createuser.log
 LEASE_DIRECTORY="/var/lib/linuxbroker-release-session/leases"
+# The key that opens each user's login keyring, left on tmpfs for the xrdp session launcher.
+KEYRING_KEY_DIRECTORY="/run/linuxbroker-keyring"
 PASSWORD_MODE="false"
 SCRIPT_MOUNTED_NFS_ROOT="false"
 
@@ -78,6 +80,36 @@ ensure_user_group_membership() {
     run_checked "Failed to add $USERNAME to group $group_name." usermod -aG "$group_name" "$USERNAME"
 }
 
+# Leaves the user's keyring key where the xrdp session launcher reads it, or removes a key an
+# earlier checkout left when none was sent. The key only unlocks the keyring, so a failure is
+# logged and the sign-in goes ahead.
+store_keyring_key() {
+    local key_file="$KEYRING_KEY_DIRECTORY/$USERNAME" tmp
+
+    if [ -z "$KEYRING_KEY" ]; then
+        rm -f "$key_file" 2>/dev/null || log "Could not remove the old keyring key of $USERNAME."
+        return 0
+    fi
+
+    # Anyone may open a key by name, but only its owner can read it and nobody can list them.
+    if ! mkdir -p "$KEYRING_KEY_DIRECTORY" || ! chown root:root "$KEYRING_KEY_DIRECTORY" \
+        || ! chmod 711 "$KEYRING_KEY_DIRECTORY"; then
+        log "Could not prepare $KEYRING_KEY_DIRECTORY, so the keyring of $USERNAME stays locked."
+        return 0
+    fi
+    if ! tmp=$(mktemp "$KEYRING_KEY_DIRECTORY/.$USERNAME.XXXXXX"); then
+        log "Could not write the keyring key of $USERNAME."
+        return 0
+    fi
+    if ! printf '%s\n' "$KEYRING_KEY" > "$tmp" || ! chown "$USERNAME" "$tmp" || ! chmod 400 "$tmp" \
+        || ! mv -f "$tmp" "$key_file"; then
+        rm -f "$tmp"
+        log "Could not write the keyring key of $USERNAME."
+        return 0
+    fi
+    log "Stored the keyring key of $USERNAME."
+}
+
 if [ "${1:-}" = "--password-stdin" ]; then
     if [ $# -ne 5 ]; then
         usage
@@ -140,6 +172,14 @@ if [ "$PASSWORD_MODE" = "true" ]; then
 
     if [ -z "$PASSWORD" ]; then
         fail "Password was not supplied on stdin."
+    fi
+
+    # The broker sends the user's keyring key on a second line when it has a keyring vault.
+    KEYRING_KEY=""
+    IFS= read -r KEYRING_KEY || true
+    if [ -n "$KEYRING_KEY" ] && ! [[ "$KEYRING_KEY" =~ ^[A-Za-z0-9_-]{16,128}$ ]]; then
+        log "Ignoring a keyring key for $USERNAME that is not a valid key."
+        KEYRING_KEY=""
     fi
 fi
 
@@ -229,6 +269,8 @@ fi
 if [ "$PASSWORD_MODE" = "true" ]; then
     printf '%s:%s\n' "$USERNAME" "$PASSWORD" | chpasswd || fail "Failed to set password for $USERNAME."
     unset PASSWORD
+    store_keyring_key
+    unset KEYRING_KEY
     if [ "$SCRIPT_MOUNTED_NFS_ROOT" = "true" ]; then
         run_checked "Failed to unmount $NFS_MOUNT_ROOT." umount "$NFS_MOUNT_ROOT"
         SCRIPT_MOUNTED_NFS_ROOT="false"
