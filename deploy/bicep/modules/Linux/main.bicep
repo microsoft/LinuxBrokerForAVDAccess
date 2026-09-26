@@ -24,9 +24,10 @@ param adminPassword string
 param sshPublicKey string = ''
 
 @allowed([
-  '7-LVM'
   '8-LVM'
   '9-LVM'
+  'rocky-9'
+  'alma-9'
   '24_04-lts'
 ])
 param OSVersion string
@@ -34,12 +35,23 @@ param OSVersion string
 @description('Root URL the host bootstrap scripts are downloaded from. Point this at a reachable mirror for sovereign or air-gapped clouds.')
 param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
 
-@description('Disable the GNOME screen saver and screen lock on RHEL hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control. Has no effect on the Ubuntu server image, which has no desktop.')
+@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
 param disableScreenLock bool = true
+
+@allowed([
+  'gnome'
+  'xfce'
+  'mate'
+])
+@description('Desktop the hosts run in xrdp sessions. Changing it changes the extension command, which runs the bootstrap again on existing hosts.')
+param desktop string = 'gnome'
 
 var normalizedScriptSourceRoot = endsWith(scriptSourceRoot, '/') ? take(scriptSourceRoot, length(scriptSourceRoot) - 1) : scriptSourceRoot
 var bootstrapArgs = '"${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
-var bootstrapEnv = 'LINUXBROKER_SCRIPT_SOURCE_ROOT="${normalizedScriptSourceRoot}" LINUXBROKER_DISABLE_SCREEN_LOCK="${disableScreenLock ? 'true' : 'false'}"'
+// GNOME is what the bootstrap installs without LINUXBROKER_DESKTOP, so leaving the variable out
+// keeps the extension command, and with it existing hosts, unchanged.
+var desktopEnv = desktop == 'gnome' ? '' : ' LINUXBROKER_DESKTOP="${desktop}"'
+var bootstrapEnv = 'LINUXBROKER_SCRIPT_SOURCE_ROOT="${normalizedScriptSourceRoot}" LINUXBROKER_DISABLE_SCREEN_LOCK="${disableScreenLock ? 'true' : 'false'}"${desktopEnv}'
 
 var vmNames = [for i in range(1, numberOfVMs): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
 var adminCredentials = authType == 'Password' ? {
@@ -62,20 +74,14 @@ var linuxConfiguration = authType == 'SSH'
     }
 
 // The VMs below use Trusted Launch, which requires Generation 2 images. The RHEL SKUs named
-// by OSVersion (7-LVM, 8-LVM, 9-LVM) are Generation 1, so each maps to its Gen2 equivalent.
+// by OSVersion (8-LVM, 9-LVM) are Generation 1, so each maps to its Gen2 equivalent.
+// Rocky Linux and AlmaLinux, rebuilds of RHEL, run the RHEL 9 bootstrap. Their images have
+// 10 GB and 30 GB disks, so their hosts get the 64 GB OS disk of RHEL hosts, and cloud-init
+// grows the root partition at first boot. Rocky's is a Marketplace image with a purchase plan:
+// it costs nothing, but the subscription must accept its terms and be allowed to buy
+// Marketplace images. The other images set no plan or size, which keeps existing hosts as
+// they are.
 var imageConfigs = {
-  '7-LVM': {
-    image: {
-      publisher: 'RedHat'
-      offer: 'RHEL'
-      sku: '7lvm-gen2'
-      version: 'latest'
-    }
-    script: {
-      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL7-Host.sh'
-      cmd: '${bootstrapEnv} bash Configure-RHEL7-Host.sh ${bootstrapArgs}'
-    }
-  }
   '8-LVM': {
     image: {
       publisher: 'RedHat'
@@ -95,6 +101,37 @@ var imageConfigs = {
       sku: '9-lvm-gen2'
       version: 'latest'
     }
+    script: {
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL9-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL9-Host.sh ${bootstrapArgs}'
+    }
+  }
+  'rocky-9': {
+    image: {
+      publisher: 'resf'
+      offer: 'rockylinux-x86_64'
+      sku: '9-base'
+      version: 'latest'
+    }
+    plan: {
+      name: '9-base'
+      product: 'rockylinux-x86_64'
+      publisher: 'resf'
+    }
+    osDiskSizeGB: 64
+    script: {
+      uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL9-Host.sh'
+      cmd: '${bootstrapEnv} bash Configure-RHEL9-Host.sh ${bootstrapArgs}'
+    }
+  }
+  'alma-9': {
+    image: {
+      publisher: 'almalinux'
+      offer: 'almalinux-x86_64'
+      sku: '9-gen2'
+      version: 'latest'
+    }
+    osDiskSizeGB: 64
     script: {
       uri: '${normalizedScriptSourceRoot}/custom_script_extensions/Configure-RHEL9-Host.sh'
       cmd: '${bootstrapEnv} bash Configure-RHEL9-Host.sh ${bootstrapArgs}'
@@ -156,6 +193,7 @@ resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
     name: name
     location: location
     tags: tags
+    plan: selectedConfig.?plan
     identity: {
       type: 'SystemAssigned'
     }
@@ -179,6 +217,7 @@ resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
         imageReference: selectedConfig.image
         osDisk: {
           createOption: 'FromImage'
+          diskSizeGB: selectedConfig.?osDiskSizeGB
         }
       }
       securityProfile: {

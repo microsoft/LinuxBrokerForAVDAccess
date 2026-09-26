@@ -65,12 +65,14 @@ heartbeat_for_script() {
     hostname="testhost"
     SETTINGS_VERSION=7
     RUN_MODE="systemd-timer"
+    DESKTOP_FILE="$WORK_DIR/desktop-$label.conf"
     mkdir -p "$STATE_DIRECTORY" "$bin"
     : > "$LOG_FILE"
 
-    [ "$LINUXBROKER_AGENT_VERSION" = "1.1.0" ] || fail "$label declares agent version $LINUXBROKER_AGENT_VERSION"
+    [ "$LINUXBROKER_AGENT_VERSION" = "1.2.0" ] || fail "$label declares agent version $LINUXBROKER_AGENT_VERSION"
     [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" session-control.sh "* ]] || fail "$label does not report session-control.sh"
     [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" patch-host.sh "* ]] || fail "$label does not report patch-host.sh"
+    [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" xrdp-startwm.sh "* ]] || fail "$label does not report xrdp-startwm.sh"
 
     # One script is current and one predates the version constant.
     printf '#!/bin/bash\nLINUXBROKER_AGENT_VERSION="1.0.0"\n' > "$bin/release-session.sh"
@@ -83,7 +85,7 @@ heartbeat_for_script() {
     assert_json "$session" '(.sessionStart | type) == "number" and .idleSeconds == null' "$label session times"
 
     payload=$(build_heartbeat "[$session]")
-    assert_json "$payload" '.agentVersion == "1.1.0" and .settingsVersion == 7' "$label versions"
+    assert_json "$payload" '.agentVersion == "1.2.0" and .settingsVersion == 7' "$label versions"
     assert_json "$payload" '.scriptVersions["manage-lease.sh"] == null and .scriptVersions["release-session.sh"] == "1.0.0"' "$label scripts"
     assert_json "$payload" '(.os.id | type) == "string" and (.kernel | type) == "string"' "$label os"
     assert_json "$payload" '.desktop == "none" and .xrdp.version == null and .xrdp.active == true' "$label desktop and xrdp"
@@ -91,6 +93,22 @@ heartbeat_for_script() {
     assert_json "$payload" '.memoryTotalMb > 0 and .cpuCount >= 1 and (.loadAverage | type) == "number"' "$label resources"
     assert_json "$payload" '.rootDiskFreePct >= 0 and .rootDiskFreePct <= 100 and .uptimeSeconds >= 0' "$label disk and uptime"
     assert_json "$payload" '.sessions | length == 1' "$label sessions"
+
+    # The desktop desktop.conf names is reported when it is installed. The file is never
+    # sourced.
+    printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/gnome-shell"
+    printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/xfce4-session"
+    chmod 755 "$SHIM_DIR/gnome-shell" "$SHIM_DIR/xfce4-session"
+    assert_eq "$(detect_desktop)" "gnome" "$label without desktop.conf"
+    printf '# Written by the bootstrap.\nDESKTOP="XFCE"\n' > "$DESKTOP_FILE"
+    assert_eq "$(detect_desktop)" "xfce" "$label desktop.conf"
+    printf 'DESKTOP=mate\n' > "$DESKTOP_FILE"
+    assert_eq "$(detect_desktop)" "gnome" "$label desktop.conf names a desktop that is not installed"
+    # shellcheck disable=SC2016 # the command must reach the file unexpanded
+    printf 'DESKTOP=$(touch %s/pwned)\n' "$WORK_DIR" > "$DESKTOP_FILE"
+    assert_eq "$(detect_desktop)" "gnome" "$label unusable desktop.conf"
+    assert_not_exists "$WORK_DIR/pwned"
+    rm -f "$SHIM_DIR/gnome-shell" "$SHIM_DIR/xfce4-session" "$DESKTOP_FILE"
 
     # A wedged X server cannot stall the run: the idle lookup gives up after the probe timeout
     # and the session is reported without an idle time.
@@ -149,5 +167,4 @@ heartbeat_for_script() {
     assert_file_contains "$LOG_FILE" "accepting heartbeats again"
 }
 
-heartbeat_for_script "$ROOT_DIR/linux_host/session_release_buffer/Ubuntu/release-session.sh" ubuntu
-heartbeat_for_script "$ROOT_DIR/linux_host/session_release_buffer/RHEL/release-session.sh" rhel
+heartbeat_for_script "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh" agent

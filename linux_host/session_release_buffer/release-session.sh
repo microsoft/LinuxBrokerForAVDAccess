@@ -1,18 +1,20 @@
 #!/bin/bash
 
-# Support for RHEL systems
+# The Linux Broker session release agent. The same script runs on every supported
+# distribution, RHEL-like and Ubuntu.
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # The Linux Broker host agent version. Every script in linux_host/ declares the same value
 # and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
-LINUXBROKER_AGENT_VERSION="1.1.0"
+LINUXBROKER_AGENT_VERSION="1.2.0"
 
 LOG_FILE="/var/log/release-session.log"
 LOCATION_PATH="/usr/local/bin"
 XORG_USERS_INFO_SCRIPT="$LOCATION_PATH/xrdp-who-xorg.sh"
 APPLY_SETTINGS_SCRIPT="$LOCATION_PATH/apply-host-settings.sh"
 SETTINGS_FILE="/etc/linuxbroker/host-settings.conf"
+DESKTOP_FILE="/etc/linuxbroker/desktop.conf"
 STATE_DIRECTORY="/var/lib/linuxbroker-release-session"
 LEASE_DIRECTORY="$STATE_DIRECTORY/leases"
 CURRENT_USERS_DETAILS="$STATE_DIRECTORY/current_users.txt"
@@ -81,6 +83,33 @@ release_reconcile_lock() {
         eval "exec ${LOCK_FD}>&-"
         LOCK_FD=""
     fi
+}
+
+# The bootstrap and the host migration install jq. This puts it back on a host where it was
+# removed, since nothing else in a run works without it.
+ensure_jq_installed() {
+    if command -v jq >/dev/null 2>&1; then
+        return 0
+    fi
+
+    log "jq not found. Installing jq..."
+
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y jq >/dev/null 2>&1 \
+            || { apt-get -o DPkg::Lock::Timeout=120 update >/dev/null 2>&1 \
+                && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y jq >/dev/null 2>&1; }
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y jq >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y jq >/dev/null 2>&1
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        log "ERROR: Failed to install jq."
+        exit 1
+    fi
+
+    log "jq installed successfully."
 }
 
 resolve_xrdp_users_info_script() {
@@ -278,10 +307,21 @@ xorg_processes_for_user() {
     ps h -C Xorg -o pid=,user=,comm= 2>/dev/null | awk -v user="$username" '$2 == user {print $1 ":" $3}'
 }
 
+# A killed Xorg can take a moment to exit and be reaped by xrdp-sesman, so it gets a few
+# seconds before it counts as remaining.
+XORG_EXIT_WAIT_SECONDS=5
+
 xorg_processes_remaining() {
     local username="$1"
+    local waited=0
 
-    [ -n "$(xorg_processes_for_user "$username")" ]
+    while [ -n "$(xorg_processes_for_user "$username")" ]; do
+        [ "$waited" -ge "$XORG_EXIT_WAIT_SECONDS" ] && return 0
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
 }
 
 terminate_session_processes() {
@@ -509,6 +549,8 @@ get_session_idle_seconds() {
     local display
     local xauthority
     local idle_milliseconds
+    local idle_seconds
+    local connected_seconds
 
     if ! command -v xprintidle >/dev/null 2>&1; then
         return 1
@@ -531,7 +573,17 @@ get_session_idle_seconds() {
         return 1
     fi
 
-    echo $((idle_milliseconds / 1000))
+    idle_seconds=$((idle_milliseconds / 1000))
+
+    # X keeps counting while a session sits disconnected, and reconnecting sends it no input,
+    # so the idle time would carry over into the new connection and disconnect the user again
+    # as soon as they reconnected. No connection has been idle for longer than it has been open.
+    connected_seconds=$(session_connected_seconds "${display#:}" "$xorg_pid")
+    if [ -n "$connected_seconds" ] && [ "$connected_seconds" -lt "$idle_seconds" ]; then
+        idle_seconds="$connected_seconds"
+    fi
+
+    echo "$idle_seconds"
 }
 
 warn_idle_user() {
@@ -551,7 +603,7 @@ warn_idle_user() {
 
     if command -v notify-send >/dev/null 2>&1 && [ -n "$user_id" ] && command -v runuser >/dev/null 2>&1; then
         if DISPLAY="$display" XAUTHORITY="$xauthority" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$user_id/bus" \
-            runuser -u "$username" -- notify-send "Idle session warning" "$message" >/dev/null 2>&1; then
+            runuser -u "$username" -- notify-send --app-name="Linux Broker" "Idle session warning" "$message" >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -564,17 +616,85 @@ warn_idle_user() {
     return 1
 }
 
+# Prints the PIDs holding the client end of each connection to a session's display socket.
+# ss prints a Unix socket's path only on the listening end, which is Xorg's, and shows the
+# client end as "* <inode> * <peer inode>". So the client end is the socket whose inode is the
+# peer inode of one of Xorg's connections on the display socket.
+xrdp_connection_pids() {
+    local display_number="$1"
+    local xorg_pid="$2"
+
+    # Columns: Netid State Recv-Q Send-Q Local-Address Port Peer-Address Port Process
+    ss -xp 2>/dev/null | awk -v socket="/xrdp_display_${display_number}\$" -v owner="pid=${xorg_pid}," '
+        { holders[$6] = $0 }
+        $5 ~ socket && index($0, owner) { peers[$8] = 1 }
+        END {
+            for (inode in peers) {
+                rest = holders[inode]
+                while (match(rest, /pid=[0-9]+/)) {
+                    print substr(rest, RSTART + 4, RLENGTH - 4)
+                    rest = substr(rest, RSTART + RLENGTH)
+                }
+            }
+        }' | sort -u
+}
+
+# Prints the PID of each xrdp process serving a client connection to a session's display.
+# Each connection has its own process, forked from the xrdp daemon. The daemon itself is
+# never included: with fork=false it carries every session on the host.
+xrdp_session_connections() {
+    local display_number="$1"
+    local xorg_pid="$2"
+    local pid
+    local parent_pid
+
+    while read -r pid; do
+        [ -z "$pid" ] && continue
+        [ "$pid" = "$xorg_pid" ] && continue
+
+        if [ "$(ps -p "$pid" -o comm= 2>/dev/null | xargs)" != "xrdp" ]; then
+            continue
+        fi
+
+        parent_pid=$(ps -p "$pid" -o ppid= 2>/dev/null | xargs)
+        if [ -z "$parent_pid" ] || [ "$(ps -p "$parent_pid" -o comm= 2>/dev/null | xargs)" != "xrdp" ]; then
+            continue
+        fi
+
+        echo "$pid"
+    done < <(xrdp_connection_pids "$display_number" "$xorg_pid")
+}
+
+# Prints how many seconds ago the session's current client connected, which is the age of
+# its newest connection process, or nothing when no connection process is found.
+session_connected_seconds() {
+    local display_number="$1"
+    local xorg_pid="$2"
+    local pid
+    local age
+    local newest=""
+
+    while read -r pid; do
+        age=$(ps -p "$pid" -o etimes= 2>/dev/null | xargs)
+        [[ "$age" =~ ^[0-9]+$ ]] || continue
+
+        if [ -z "$newest" ] || [ "$age" -lt "$newest" ]; then
+            newest="$age"
+        fi
+    done < <(xrdp_session_connections "$display_number" "$xorg_pid")
+
+    echo "$newest"
+}
+
 # Drops the client connection while leaving Xorg running, so the session survives and the
-# user can reconnect inside the grace period. Only processes named xrdp that hold the
-# session's display socket are terminated, which is the same signal xrdp-who-xorg.sh uses to
-# decide whether a session is connected.
+# user can reconnect inside the grace period. Only the xrdp process holding the other end of
+# the session's display connection is terminated, and closing that connection is the same
+# signal xrdp-who-xorg.sh uses to decide that a session is disconnected.
 disconnect_session() {
     local username="$1"
     local xorg_pid="$2"
     local display
-    local display_number
     local pid
-    local process_name
     local disconnected="false"
 
     display=$(get_session_display "$xorg_pid")
@@ -583,30 +703,14 @@ disconnect_session() {
         return 1
     fi
 
-    display_number="${display#:}"
-
     while read -r pid; do
-        [ -z "$pid" ] && continue
-        [ "$pid" = "$xorg_pid" ] && continue
-
-        process_name=$(ps -p "$pid" -o comm= 2>/dev/null | xargs)
-        if [ "$process_name" != "xrdp" ]; then
-            continue
-        fi
-
         if kill -TERM "$pid" 2>/dev/null; then
             disconnected="true"
             log "Disconnected idle xrdp connection $pid for user $username."
         else
             log "ERROR: Failed to disconnect xrdp connection $pid for user $username."
         fi
-    done < <(
-        ss -xp 2>/dev/null \
-            | grep -E "xrdp_display_${display_number}([^0-9]|$)" \
-            | grep -oE 'pid=[0-9]+' \
-            | cut -d= -f2 \
-            | sort -u
-    )
+    done < <(xrdp_session_connections "${display#:}" "$xorg_pid")
 
     if [ "$disconnected" != "true" ]; then
         log "No xrdp connection process was found for user $username on display $display."
@@ -709,7 +813,7 @@ check_unmount_user_homes() {
 # reconciliation must never depend on it.
 # ---------------------------------------------------------------------------
 
-HEARTBEAT_SCRIPTS=(release-session.sh logind-session-watcher.sh xrdp-who-xorg.sh create-user.sh manage-lease.sh apply-host-settings.sh session-control.sh patch-host.sh)
+HEARTBEAT_SCRIPTS=(release-session.sh logind-session-watcher.sh xrdp-who-xorg.sh create-user.sh manage-lease.sh apply-host-settings.sh session-control.sh patch-host.sh xrdp-startwm.sh)
 HEARTBEAT_BACKOFF_SECONDS=900
 
 # The version an installed script declares, so a host that was only partly migrated shows up.
@@ -742,18 +846,28 @@ collect_script_versions() {
     echo "$versions"
 }
 
+# The desktop sessions start, which the host bootstrap records in desktop.conf, when it is
+# installed; otherwise the first desktop found. The file is read, never sourced.
 detect_desktop() {
-    if command -v gnome-shell >/dev/null 2>&1; then
-        echo "gnome"
-    elif command -v xfce4-session >/dev/null 2>&1; then
-        echo "xfce"
-    elif command -v mate-session >/dev/null 2>&1; then
-        echo "mate"
-    elif command -v startplasma-x11 >/dev/null 2>&1; then
-        echo "kde"
-    else
-        echo "none"
+    local configured candidate
+    local -a candidates=(gnome xfce mate kde)
+    local -A commands=([gnome]=gnome-shell [xfce]=xfce4-session [mate]=mate-session [kde]=startplasma-x11)
+
+    if [ -r "$DESKTOP_FILE" ]; then
+        configured=$(sed -n 's/^[[:space:]]*DESKTOP[[:space:]]*=//p' "$DESKTOP_FILE" 2>/dev/null | tail -n 1)
+        configured=$(printf '%s' "$configured" | tr -d "\"' \t\r" | tr '[:upper:]' '[:lower:]')
+        case "$configured" in
+            gnome|xfce|mate) candidates=("$configured" "${candidates[@]}") ;;
+        esac
     fi
+
+    for candidate in "${candidates[@]}"; do
+        if command -v "${commands[$candidate]}" >/dev/null 2>&1; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "none"
 }
 
 detect_xrdp_version() {
@@ -1008,6 +1122,7 @@ main() {
     declare -A user_start_times=()
 
     ensure_state_files
+    ensure_jq_installed
     load_settings
     refresh_settings
 

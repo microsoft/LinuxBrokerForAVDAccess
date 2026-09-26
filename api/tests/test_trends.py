@@ -178,7 +178,7 @@ def test_utilization_before_the_database_upgrade_answers_404(client, fake_db):
 
 def health_row(hostname, **values):
     row = {"VMID": 1, "Hostname": hostname, "PowerState": "On", "NetworkStatus": "Reachable", "VmStatus": "Available",
-           "HeartbeatAgeSeconds": 20, "ReconcileIntervalSeconds": 60, "AgentVersion": "1.1.0", "ScriptVersionsJson": None,
+           "HeartbeatAgeSeconds": 20, "ReconcileIntervalSeconds": 60, "AgentVersion": "1.2.0", "ScriptVersionsJson": None,
            "XrdpActive": True, "NfsReachable": True, "RootDiskFreePct": 50, "CurrentSettingsVersion": 3,
            "AppliedSettingsVersion": 3}
     row.update(values)

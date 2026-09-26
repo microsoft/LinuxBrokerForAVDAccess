@@ -14,9 +14,11 @@ set -u
 
 # The Linux Broker host agent version. Every script in linux_host/ declares the same value
 # and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
-LINUXBROKER_AGENT_VERSION="1.1.0"
+LINUXBROKER_AGENT_VERSION="1.2.0"
 
 LEASE_DIRECTORY="/var/lib/linuxbroker-release-session/leases"
+# Where create-user.sh leaves the key that opens each user's login keyring.
+KEYRING_KEY_DIRECTORY="/run/linuxbroker-keyring"
 HOME_ROOT="/home"
 
 usage() {
@@ -116,6 +118,7 @@ release_lease() {
     terminate_leftover_processes || exit 1
     unmount_user_home || exit 1
 
+    rm -f "$KEYRING_KEY_DIRECTORY/$USERNAME"
     rm -f "$LEASE_FILE"
     echo "__LEASE_ACTION=cleared__"
 }

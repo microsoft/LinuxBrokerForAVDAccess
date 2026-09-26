@@ -60,7 +60,7 @@ At a high level, the deployment provisions and configures the following:
 - Azure Container Registry for the `frontend`, `api`, and `task` images.
 - App Service apps for the frontend and API, plus a Function App for scheduled work.
 - Azure SQL Database and firewall rules.
-- Azure Key Vault.
+- Two Azure Key Vaults: one for the deployment's secrets, and one for the keys that unlock each user's login keyring.
 - App Service plan, storage account, Application Insights, Log Analytics, and networking.
 - A private DNS zone, `linuxbroker.internal`, linked to the virtual network with auto-registration, so the broker reaches each Linux host as `<hostname>.linuxbroker.internal`. It is skipped when you supply `domainName`.
 - A premium Azure Files NFS share for Linux home directories, reachable only through a private endpoint. It is skipped when you supply `nfsShare`, set `deployNfsShare` to `false`, or deploy no Linux hosts.
@@ -76,6 +76,7 @@ The deployment model now follows these runtime rules:
 - VM managed identities do not get direct API role assignments.
 - Instead, VM managed identities are added to Entra security groups, and those groups hold the `AvdHost` and `LinuxHost` API app roles.
 - Key Vault stores only two deployment secrets: `db-password` and `linux-host`.
+- The keyring vault holds one secret per user, `keyring-<uid>`, which the API creates at the user's first checkout. The template adds none.
 - Frontend and API auth secrets are stored in app settings, not in Key Vault.
 - Linux hosts are registered into SQL during `postprovision`. AVD hosts are not.
 - The API and function apps are integrated with the virtual network's app subnet, so the API reaches Linux hosts on their private IP addresses for SSH and the portal's connectivity test.
@@ -100,8 +101,9 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `avdSessionHostCount`: number of AVD hosts to provision.
 - `linuxHostVmSize`: Linux host VM size.
 - `avdVmSize`: AVD host VM size.
-- `linuxHostOsVersion`: Linux image SKU. The RHEL options (`7-LVM`, `8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires.
-- `linuxHostDisableScreenLock`: `true` or `false`. Disables the GNOME screen saver and screen lock on RHEL hosts. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
+- `linuxHostOsVersion`: Linux image SKU. Defaults to `9-LVM` (RHEL 9). The RHEL options (`8-LVM`, `9-LVM`) map to the Generation 2 images that Trusted Launch requires. `rocky-9` and `alma-9` deploy Rocky Linux 9 and AlmaLinux 9, rebuilds of RHEL 9 that need no Red Hat subscription, and run the RHEL 9 bootstrap, with CRB and EPEL from the distribution's own repositories; their hosts get the 64 GB OS disk that RHEL hosts have. Rocky Linux 9 is a free Azure Marketplace image with a purchase plan: `preprovision` accepts its terms in the deployment subscription, and the subscription must be allowed to buy Marketplace images. Where it is not, use `alma-9`, whose image has no plan; see [A Rocky Linux host deployment failed with `MarketplacePurchaseEligibilityFailed`](#a-rocky-linux-host-deployment-failed-with-marketplacepurchaseeligibilityfailed). `24_04-lts` deploys Canonical's Ubuntu 24.04 server image and adds the Ubuntu desktop, which xrdp sessions run as Ubuntu on Xorg.
+- `linuxHostDesktop`: `gnome`, `xfce` or `mate`. The desktop the Linux hosts run in xrdp sessions. Defaults to `gnome`, which is the `Server with GUI` group on RHEL, Rocky Linux and AlmaLinux, and the Ubuntu desktop on Ubuntu. Xfce and MATE come from EPEL on RHEL, Rocky Linux and AlmaLinux, and from Ubuntu's own packages on Ubuntu. Changing it on existing hosts runs their bootstrap again at the next `azd provision`, so drain them first. See [Upgrading To Distribution And Desktop Support](#upgrading-to-distribution-and-desktop-support).
+- `linuxHostDisableScreenLock`: `true` or `false`. Disables the screen saver and screen lock on the Linux hosts, whichever desktop they run. Defaults to `true`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - `azureCloudName`: `AzurePublic`, `AzureUSGovernment`, or `AzureCustom`. See [Choosing The Target Azure Cloud](#choosing-the-target-azure-cloud).
 - `scriptSourceRoot`: root URL the Linux host and AVD host bootstrap scripts are downloaded from.
 - `domainName`: DNS suffix the broker appends to Linux host names when it connects over SSH. Leave empty to use the deployment's private DNS zone, `linuxbroker.internal`. If you set it, you are responsible for DNS records that resolve `<hostname>.<domainName>` from the API's virtual network.
@@ -237,30 +239,45 @@ If you prefer to be prompted locally, leave both values unset and run `azd up` f
 
 ## Linux Host Screen Lock
 
-RHEL hosts install the `Server with GUI` group, so they run a GNOME desktop. By default the
-bootstrap script disables the GNOME screen saver and screen lock on those hosts.
+Linux hosts run GNOME unless `linuxHostDesktop` chooses Xfce or MATE. By default the bootstrap
+script disables the screen saver and screen lock on those hosts, whichever desktop they run.
 
-This is on by default because a locked GNOME greeter inside an xrdp or xpra session frequently
+This is on by default because a locked GNOME greeter inside an xrdp session frequently
 cannot be unlocked after a reconnect. When that happens the user cannot get back into the
-desktop, and the host stays leased until the lease is released manually.
+desktop, and the host stays leased until the lease is released manually. Xfce and MATE hosts get
+the same default, so the posture does not depend on the desktop a deployment chose.
 
-The configuration is applied through a dconf system database:
+The configuration is applied through a dconf system database, which GNOME and MATE read, and on
+Xfce hosts through a system xfconf file:
 
 | File on the host | Written by |
 | --- | --- |
 | `/etc/dconf/db/local.d/00-screensaver` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
 | `/etc/dconf/db/local.d/locks/screensaver` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
 | `/etc/dconf/profile/user` | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
+| `/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml`, on Xfce hosts | [linux_host/apply-host-settings.sh](../linux_host/apply-host-settings.sh) |
 
 These files were previously static and downloaded during bootstrap. They are now generated from
 the fleet-wide host settings profile, which is what makes the values editable in the portal after
 deployment. The bootstrap seeds that profile once, and the release agent keeps each host converged
 to it from then on. See [Linux Host Settings](../README.md#linux-host-settings).
 
-It sets `idle-delay` to `0` so the session never goes idle, sets `lock-enabled` to `false` so
-the screen saver never locks, and sets `disable-lock-screen` to `true` so the lock screen is
-removed entirely, including the `Super+L` shortcut and the `Lock` entry in the system menu. The
-lock list prevents users from changing any of those keys back.
+On GNOME it sets `idle-delay` to `0` so the session never goes idle, sets `lock-enabled` to
+`false` so the screen saver never locks, and sets `disable-lock-screen` to `true` so the lock
+screen is removed entirely, including the `Super+L` shortcut and the `Lock` entry in the system
+menu. The same database sets the matching MATE keys under `org/mate`, where
+`disable-lock-screen` in `org/mate/desktop/lockdown` stops MATE from locking the screen. On Xfce
+the xfconf file turns off xfce4-screensaver's blanking and locking; Xfce keeps its `Lock Screen`
+entry, which does nothing while locking is disabled. While **Prevent users from changing these
+screen lock settings** is on in **Host Settings**, as it is by default, the lock list stops users
+from changing any of the GNOME and MATE keys back, and each property in the xfconf file is marked
+`unlocked="root"`, so Xfce ignores the values users set for themselves.
+
+GNOME counts the blank and lock delays in seconds, as the portal does. MATE and Xfce count them
+in whole minutes, up to 8 hours, so the delays are converted for them: the blank delay rounds up,
+so a delay of a few seconds does not turn blanking off, and the lock delay rounds to the nearest
+minute. Xfce reads the file when a session starts, so a change reaches the Xfce sessions that
+start after it.
 
 RHEL does not ship `/etc/dconf/profile/user`, and a system dconf database is only read when a
 profile references it, so the bootstrap creates that file with `system-db:local`. An existing
@@ -276,14 +293,11 @@ azd env set linuxHostDisableScreenLock false
 ```
 
 The bootstrap then seeds the profile with the lock screen left enabled. You can also set
-`LINUXBROKER_DISABLE_SCREEN_LOCK=false` in the environment if you run `Configure-RHEL7-Host.sh`,
-`Configure-RHEL8-Host.sh`, or `Configure-RHEL9-Host.sh` by hand.
+`LINUXBROKER_DISABLE_SCREEN_LOCK=false` in the environment if you run `Configure-RHEL8-Host.sh`,
+`Configure-RHEL9-Host.sh` or `Configure-Ubuntu24_desktop-Host.sh` by hand.
 
 Because the values are part of the host settings profile, this posture can also be changed after
 deployment from **Host Settings** in the portal, without redeploying anything.
-
-This setting has no effect on the Ubuntu 24.04 image. That target uses the `server` SKU and does
-not install a desktop environment, so there is no GNOME screen lock to disable.
 
 ### Verifying on a host
 
@@ -292,14 +306,24 @@ not install a desktop environment, so there is no GNOME screen lock to disable.
 ls -l /etc/dconf/db/local
 grep system-db /etc/dconf/profile/user
 
-# The effective values, from inside a desktop session.
+# The effective values, from inside a GNOME session.
 gsettings get org.gnome.desktop.session idle-delay
 gsettings get org.gnome.desktop.screensaver lock-enabled
 gsettings get org.gnome.desktop.lockdown disable-lock-screen
+
+# From inside a MATE session.
+gsettings get org.mate.session idle-delay
+gsettings get org.mate.screensaver lock-enabled
+gsettings get org.mate.lockdown disable-lock-screen
+
+# From inside an Xfce session.
+xfconf-query -c xfce4-screensaver -p /saver/enabled
+xfconf-query -c xfce4-screensaver -p /lock/enabled
 ```
 
-Expect `uint32 0`, `false`, and `true`. If `gsettings` still reports the distribution defaults,
-check that `/etc/dconf/profile/user` contains `system-db:local` and rerun `sudo dconf update`.
+Expect `uint32 0`, `false`, and `true` on GNOME, `0`, `false`, and `true` on MATE, and `false`
+twice on Xfce. If `gsettings` still reports the distribution defaults, check that
+`/etc/dconf/profile/user` contains `system-db:local` and rerun `sudo dconf update`.
 
 ## Quick Start
 
@@ -348,6 +372,7 @@ It currently does all of the following:
 - When AVD hosts are deployed, enables Microsoft Entra authentication for RDP on the Windows Cloud Login service principal if it is not already enabled. The host pool turns on Entra single sign-on, which depends on this tenant-wide setting. `preprovision` never disables it.
 - Creates or reuses frontend and API client secrets.
 - Generates or reuses Linux host SSH keys.
+- When Linux hosts are deployed with `linuxHostOsVersion=rocky-9`, accepts the Azure Marketplace terms of the Rocky Linux 9 image in the deployment subscription unless they are accepted already.
 - Writes resolved values back into the azd environment in both uppercase and camelCase forms expected by the deployment.
 
 The API app registration is also configured with the Graph application permissions the API uses to validate host and group membership.
@@ -366,11 +391,12 @@ Important deployment characteristics:
 - Linux host auth defaults to `SSH`.
 - Linux hosts register their names in the `linuxbroker.internal` private DNS zone unless `domainName` is set, and the API's `DOMAIN_NAME` setting points at whichever suffix is in effect.
 - The API's `NFS_SHARE` setting points at the provisioned Azure Files share unless `nfsShare` is set. The storage account disables public network access and shared key access, and it allows non-HTTPS traffic because NFS does not use HTTPS; the private endpoint is the only path to it.
-- RHEL hosts use Generation 2 images so they can run with Trusted Launch.
+- RHEL, Rocky Linux and AlmaLinux hosts use Generation 2 images so they can run with Trusted Launch.
 - The AVD host pool prefers RemoteApp and sets RDP properties that enable Microsoft Entra single sign-on to the Microsoft Entra joined session hosts.
-- RHEL hosts have the GNOME screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
+- Linux hosts run the desktop that `linuxHostDesktop` names, GNOME by default, with the screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - Key Vault stores `db-password` and `linux-host`.
 - The API app receives Key Vault Secrets User access so it can read those secrets at runtime.
+- A second vault, `kr<app><env><suffix>`, holds the key that unlocks each user's login keyring. The API holds Key Vault Secrets Officer on that vault only, so it can create and rotate the keys without being able to change the deployment's secrets, and finds it through the `KEYRING_VAULT_URL` app setting. Like the main vault, it uses Azure RBAC, allows public network access, and keeps deleted secrets for 90 days.
 
 ## What Happens During `postprovision`
 
@@ -458,7 +484,7 @@ The migration also rewrites `/etc/sudoers.d/avdadmin`. Older hosts were provisio
 
 `apply-host-settings.sh` is the only way the broker API can change host configuration. It accepts a JSON settings document on stdin and nothing on argv, rejects unknown keys, and clamps every value to a supported range before writing anything, so a bad value cannot strand the fleet.
 
-The migration additionally installs `dconf` and, where available, `xprintidle`. `xprintidle` backs the optional idle session timeout; if it cannot be installed the migration still succeeds and idle enforcement is simply skipped on that host. Existing hosts keep any settings profile they already have, and hosts with no profile are seeded with the shipped defaults, which match the values that were previously hardcoded.
+The migration additionally installs `dconf` and, where available, `xprintidle`. `xprintidle` backs the optional idle session timeout; if it cannot be installed the migration still succeeds and idle enforcement is simply skipped on that host. RHEL, Rocky Linux and AlmaLinux do not package it, not even in EPEL, so only Ubuntu hosts enforce the idle timeout. Existing hosts keep any settings profile they already have, and hosts with no profile are seeded with the shipped defaults, which match the values that were previously hardcoded.
 
 The current host scripts also bring:
 
@@ -553,6 +579,44 @@ This release completes the admin console: sessions and users, broadcast messages
 3. On **Sessions**, send a message to one test session, then run a restart-only maintenance run over one idle host and confirm it comes back in service. Try **Security updates** on a single host before a larger run.
 
 Every layer tolerates the others being one release behind during the rollout. The previous API build keeps working against the new database: the changed procedures only add result columns, and scaling's normal call is unchanged. A portal that meets an older API hides the dashboard's trends and Attention panel, pages the host list itself, points the Scaling section at the scaling rules, and shows the new pages' errors. A task that meets an older API logs a `404` from the maintenance timer and carries on.
+
+## Upgrading To Distribution And Desktop Support
+
+This release changes which Linux distributions and desktops the deployment offers, and unlocks each user's login keyring (items 3.1–3.4, 3.6 and 3.7 of the [roadmap](../docs/ROADMAP.md)). Unlike the admin console releases, it adds an Azure resource and a role assignment, so it needs `azd provision`, and the Linux hosts need agent 1.2.0.
+
+- **RHEL 9 is the default Linux host.** New azd environments, and templates deployed without a value, now use `linuxHostOsVersion=9-LVM` instead of `24_04-lts`, which deployed an Ubuntu server with no desktop. An existing environment keeps the value it stored; check it with `azd env get-value linuxHostOsVersion`.
+- **RHEL 7 is no longer offered.** `7-LVM` is removed from `linuxHostOsVersion`, along with `Configure-RHEL7-Host.sh`; RHEL 7 left maintenance on June 30, 2024. An azd environment that still stores `linuxHostOsVersion=7-LVM` fails template validation at the next `azd provision`, even with `deployLinuxHosts=false`, so set it to a supported value first. A VM's image cannot be changed in place, so for existing RHEL 7 hosts either also set `deployLinuxHosts=false`, which leaves them as they are, or replace them: drain them, delete the VMs in Azure and their records in the portal, and run `azd provision`. Existing RHEL 7 hosts keep working with the broker, and `patch-host.sh` and the host migration still support them.
+- **One release agent for every distribution.** The separate RHEL and Ubuntu copies of `release-session.sh` are merged into `linux_host/session_release_buffer/release-session.sh`, and the unused `xrdp-who-xnc.sh` is deleted. Ubuntu hosts now also unmount orphaned NFS homes, as RHEL hosts did. Run [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) from this release: a copy from an earlier release downloads the old paths, which no longer exist, and stops before it changes anything.
+- **xrdp starts sessions through `xrdp-startwm.sh`.** The bootstrap and the host migration install `/usr/local/bin/xrdp-startwm.sh` and make it the `DefaultWindowManager` in `/etc/xrdp/sesman.ini`. The first change keeps the original file as `sesman.ini.linuxbroker-orig`, the previous value is recorded in `/etc/linuxbroker/xrdp-startwm.conf`, and xrdp-sesman reloads its configuration without ending any session. The launcher starts the desktop named in `/etc/linuxbroker/desktop.conf`, which the bootstrap writes; without that file, as on a migrated host, it runs the distribution's own session script as before. It also adds `/etc/polkit-1/rules.d/45-linuxbroker-xrdp.rules`, so members of `tsusers` are not asked for an administrator's password when their session creates a color profile or refreshes the package lists. Every maintenance patch run installs it again in case an update replaced `sesman.ini`, and security updates on Ubuntu now keep configuration files that were changed locally, as all updates already did.
+- **File indexing is off in broker sessions.** Tracker, GNOME's file indexer, keeps its index in each home directory, so on broker hosts it crawled the NFS share. Homes also move between hosts, and an index that one distribution's Tracker wrote does not open in another's: RHEL 9 then restarted its indexer every few seconds, reading the share each time. `xrdp-startwm.sh --install`, which the bootstrap, the host migration and every maintenance patch run call, now masks Tracker's user services with links to `/dev/null` in `/etc/systemd/user`. It also hides Tracker's autostart entries, which Xfce, and GNOME on RHEL 8, start directly: copies marked `Hidden=true` go in `/etc/linuxbroker/xdg/autostart`, which the launcher puts ahead of `/etc/xdg` for every session. The distribution's own files are not changed. Search in the Files app still works, without the index; the Xfce and MATE file managers never used it. Sessions already running on a migrated host keep any indexer they started. Existing indexes stay in each profile, in `~/.cache/tracker3` or, from RHEL 8, `~/.cache/tracker` and `~/.local/share/tracker`, and can be deleted.
+- **Ubuntu hosts run the Ubuntu desktop.** `24_04-lts` still deploys Canonical's Ubuntu 24.04 server image, and the bootstrap now adds `ubuntu-desktop-minimal`, which xrdp sessions run as Ubuntu on Xorg, so the screen lock and host settings apply to Ubuntu hosts too. The first-login wizard, crash reporting and update notifications are left out, because broker users cannot act on them. Firefox, a snap on Ubuntu, is installed on its own, and a host that cannot reach the Snap Store finishes without it. The bootstrap no longer adds Microsoft's package repository or installs the Azure CLI, and broker users get `/bin/bash` rather than Ubuntu's default `/bin/sh`; existing users are switched at their next sign-in. The previous bootstrap's package install failed on Ubuntu 24.04, because Microsoft's repository has no `azure-cli` package for it, so existing Ubuntu hosts lack `nfs-common`, `jq` and `dconf-cli` and cannot mount NFS homes. Replace them as described for RHEL 7 above, or drain each one and run the new bootstrap on it. Restarting xrdp ends the connections to the host, so it must be drained:
+
+  ```powershell
+  $root = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
+  $api = azd env get-value apiUrl
+  $clientId = azd env get-value apiClientId
+  az vm run-command invoke -g <resource-group> -n <vm-name> --command-id RunShellScript --scripts "curl -fsSL -o /tmp/linuxbroker-bootstrap.sh $root/custom_script_extensions/Configure-Ubuntu24_desktop-Host.sh && LINUXBROKER_SCRIPT_SOURCE_ROOT=$root bash /tmp/linuxbroker-bootstrap.sh $api $clientId"
+  ```
+
+- **Hosts can run Xfce or MATE.** The new `linuxHostDesktop` parameter chooses the desktop: `gnome`, the default and the only desktop until now, `xfce` or `mate`. The bootstrap installs it, from EPEL on RHEL and from Ubuntu's own packages on Ubuntu, and records it in `/etc/linuxbroker/desktop.conf`. `xrdp-startwm.sh` starts the desktop named there, and the heartbeat reports it in **Fleet health**. The host settings apply to all three desktops; see [Linux Host Screen Lock](#linux-host-screen-lock) for how MATE and Xfce count the screen delays in minutes and when Xfce sessions pick up a change. With `gnome` the extension command is unchanged, so an environment that keeps the default sees no change to its hosts. Changing the value changes the extension command, so the next `azd provision` runs the bootstrap again on existing hosts. It adds the new desktop next to the old one, and the sessions that start afterwards use the new desktop. Drain the hosts first, because the bootstrap also updates every package and reinstalls the release agent, and on Ubuntu it restarts xrdp. To choose Xfce or MATE when you run a bootstrap script by hand, set `LINUXBROKER_DESKTOP=xfce` or `LINUXBROKER_DESKTOP=mate` in its environment.
+- **xpra is removed.** The broker only ever connected through xrdp, and `Connect-LinuxBroker.ps1` never started an xpra application, so the bootstrap no longer adds the xpra repository, installs xpra or opens TCP 443; the host firewall allows only SSH and RDP. The RHEL 8 bootstrap is now built from the RHEL 9 one, so it also stops at the first step that fails, as the RHEL 9 bootstrap does. The extension command is unchanged, so `azd provision` does not run the bootstrap again on existing hosts. Instead, [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) from this release removes xpra from them: it stops and disables the xpra services and sockets, deletes `/etc/yum.repos.d/xpra.repo` and the xpra.org signing key, removes xpra's own packages but not the libraries they brought in, and closes TCP 443 in firewalld or ufw. Each step is best effort and reported in the migration output, and a host where one fails is still migrated. If a host serves something else on TCP 443, open it again after the migration. `Connect-LinuxBroker.ps1` now opens the desktop whatever `-Mode` it is given, and logs a warning for any value other than `desktop`.
+- **Rocky Linux 9 and AlmaLinux 9 hosts.** `linuxHostOsVersion` accepts `rocky-9` and `alma-9`. Both run the RHEL 9 bootstrap, which skips the subscription registration on them, enables their CRB repository, installs EPEL from their own `epel-release` package and adds firewalld, which their Azure images leave out. The existing values set no purchase plan or disk size, so the template leaves existing hosts as they are. A VM's image cannot be changed in place, so to move an environment to one of them, replace its hosts as described for RHEL 7 above. Rocky Linux 9 is an Azure Marketplace image with a purchase plan, so the subscription must be allowed to buy Marketplace images; see [A Rocky Linux host deployment failed with `MarketplacePurchaseEligibilityFailed`](#a-rocky-linux-host-deployment-failed-with-marketplacepurchaseeligibilityfailed).
+- **The login keyring unlocks.** Every checkout sets a new random password, which cannot protect a GNOME login keyring, and xrdp-sesman has no keyring PAM module, so until now applications that save passwords, such as browsers and Visual Studio Code, asked users for a keyring password at every sign-in. The broker now keeps a random key for each user, separate from the password, as the secret `keyring-<uid>` in a new Key Vault, `kr<app><env><suffix>`. A checkout reads the key, or creates it the first time, and hands it to the host, where `xrdp-startwm.sh` unlocks the login keyring with it before the desktop starts, or creates the keyring at the first sign-in. This works on every desktop the deployment offers. `azd provision` creates the vault, gives the API **Key Vault Secrets Officer** on that vault only, and sets `KEYRING_VAULT_URL` on the API. [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1) provisions no infrastructure, so run `azd provision` first. Until then, and on hosts older than agent 1.2.0, no key is used and keyrings behave as before. A Key Vault error never fails a checkout: the API logs a warning, and that worker sends no key for the next five minutes.
+
+  The first time a key meets a login keyring that something else protects, such as a password the user chose when an application first asked, the launcher moves that keyring to `~/.local/share/linuxbroker/keyring-backup/` and creates a new one. Passwords and tokens saved before the upgrade then have to be entered again. A profile reset writes a new version of the user's secret and keeps the old ones, which open the keyring kept with the old profile. Do not delete keyring secrets to reset a keyring: the vault keeps a deleted secret for 90 days, and until it is recovered or purged the API cannot create that user's key again, so their keyring stays locked.
+- **Host agent 1.2.0.** Every script in `linux_host/` declares 1.2.0 and the API expects it, so **Fleet health** flags every host as **Agent outdated** until [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) from this release has updated it. 1.2.0 carries the merged release agent, the session launcher and its keyring unlock, the keyring key in `create-user.sh` and `manage-lease.sh`, the xpra cleanup and the idle timeout fixes below, and its heartbeat also reports the launcher's version. The migration restarts only the release agent's own units and reloads xrdp-sesman's configuration, so sessions in progress keep running, and each session uses the launcher from the next time it starts. It now runs as a bash script. Run Command starts a script with no `#!` line with `/bin/sh`, which on Ubuntu is dash, so earlier migrations failed on every Ubuntu host and left it on its old agent. Hosts that are not running are skipped and named at the end; migrate each one with `-LinuxHostNames` once it is started, because until then it keeps its old agent.
+- **The idle timeout disconnects.** Before this release the idle timeout never disconnected anyone, on any distribution: the agent showed the warning, then logged `No xrdp connection process was found` every minute and left the session connected. Agent 1.2.0 finds the xrdp connection from the display socket's peer and ends it, which starts the grace period, and it never signals the xrdp daemon, which carries every connection on the host. It also counts idle time from the current connection at most. X keeps counting while a session is disconnected, and a reconnect sends it no input, so otherwise a user who reconnected after an idle disconnect would be disconnected again within a minute. An environment that already set an idle timeout starts enforcing it on each Ubuntu host as the host is migrated, so review **Idle timeout** in Host Settings first. RHEL, Rocky Linux and AlmaLinux do not package `xprintidle`, so their hosts still skip the timeout and log `Could not read idle time` instead. When a grace period ends with **Keep sessions alive** on, the agent also waits up to five seconds for the Xorg it ended to exit, instead of logging `ERROR: Xorg processes remain` for an Xorg that was still exiting.
+
+### Recommended order
+
+1. Run `azd env get-value linuxHostOsVersion`. If it returns `7-LVM`, set a supported value, as described above, before anything else.
+2. Run `azd provision`. It creates the keyring vault, its role assignment and `KEYRING_VAULT_URL`, and its `postprovision` step rebuilds the images and restarts the apps. With `linuxHostDesktop` left at `gnome`, the Linux hosts' images and extensions do not change, so no bootstrap runs again.
+3. Migrate one idle host with `.\Migrate-ExistingEnvironment.ps1 -EnvironmentName <environment-name> -SkipPostProvision -LinuxHostNames <host>`. Confirm that **Fleet health** shows it on 1.2.0, then sign in to it through AVD, open an application that saves a password, and check `sudo journalctl -t linuxbroker-startwm` on the host for `Unlocked the login keyring`.
+4. Migrate the remaining hosts with `-SkipPostProvision` and no `-LinuxHostNames`, then confirm no powered-on host is flagged **Agent outdated**.
+5. Replace, or bootstrap again, any Ubuntu hosts from earlier releases and any RHEL 7 hosts you are retiring.
+
+Every layer tolerates the others being one release behind during the rollout, and the database does not change. Hosts on agent 1.1.0 ignore the key the new API sends and keep working, flagged **Agent outdated**. A 1.2.0 host that meets the previous API, or an API without `KEYRING_VAULT_URL`, gets no key and starts the desktop as before. The previous API drops the launcher's version from the heartbeat.
+
 ## Manual Steps After `azd up`
 
 ### Admin consent
@@ -601,7 +665,7 @@ Verify that the expected resources exist in the target resource group:
 - API web app
 - task function app
 - ACR
-- Key Vault
+- Key Vault, and the keyring vault
 - SQL server and database
 - optional Linux and AVD VMs
 - the `linuxbroker.internal` private DNS zone with an A record for each Linux host, unless `domainName` was supplied
@@ -614,6 +678,8 @@ Confirm the vault contains:
 
 - `db-password`
 - `linux-host`
+
+The keyring vault, `kr<app><env><suffix>`, starts empty and gains a `keyring-<uid>` secret at each user's first checkout. The API app has **Key Vault Secrets Officer** on it and a `KEYRING_VAULT_URL` app setting that points at it.
 
 ### SQL
 
@@ -762,7 +828,18 @@ az functionapp start --name <task-app> --resource-group <resource-group>
 
 ### The Linux host deployment failed with a Trusted Launch error
 
-Trusted Launch requires Generation 2 images. The RHEL options map to Gen2 SKUs; if you customized the image, choose a Gen2 SKU.
+Trusted Launch requires Generation 2 images. The RHEL, Rocky Linux and AlmaLinux options map to Gen2 images; if you customized the image, choose a Gen2 SKU.
+
+### A Rocky Linux host deployment failed with `MarketplacePurchaseEligibilityFailed`
+
+The Rocky Linux 9 image is a free Azure Marketplace offer from the Rocky Enterprise Software Foundation, and Azure checks that the subscription may buy it before it creates the VM. `preprovision` accepts the image's terms, so when the check still fails, the subscription cannot buy Marketplace offers at all: its billing account turns off Azure Marketplace purchases, its offer type does not allow them, or a private Azure Marketplace does not list the offer. Confirm the terms with `az vm image terms show --urn resf:rockylinux-x86_64:9-base:latest --query accepted`, then either have the billing account's administrator allow the purchase, or switch to AlmaLinux 9, whose image has no purchase plan:
+
+```powershell
+azd env set linuxHostOsVersion alma-9
+azd provision
+```
+
+If the failed deployment left a Linux host VM behind, delete it before you run `azd provision` again, because Azure cannot change the image of an existing VM.
 
 ### A VM deployment failed with `SkuNotAvailable`
 
@@ -783,13 +860,38 @@ If the share is reachable but `df -h ~` inside a session shows the local disk, c
 
 Current hosts keep the home mounted while the host holds the user's lease, which lasts from checkout until the broker returns the host. At return, `manage-lease.sh` unmounts the home before the broker runs `userdel -r`, so only the empty local mount point is removed and the profile stays on the share. The API also refuses to run `userdel -r` while the home is still mounted, and logs `home directory is still mounted` instead. If a checkout fails after the host has written the lease, the API runs the same cleanup before it puts the host back in the pool.
 
-### `xpra.service` is disabled on a RHEL 9 host
-
-The system proxy service installed by the upstream xpra 6.5 packages exits during startup on RHEL 9. Its unit binds a QUIC socket, and the `aioquic` module it needs is not packaged for RHEL 9. Left enabled, the failed unit would mark the host as degraded, so the bootstrap disables `xpra.socket` and `xpra.service` and logs a warning. xrdp, which the **Linux Desktop** app uses, is not affected.
-
 ### A RHEL session is stuck on a lock screen that will not accept the password
 
-The GNOME lock screen inside an xrdp or xpra session often cannot be unlocked after a reconnect. Confirm the screen lock configuration actually applied on the host using the commands in [Linux Host Screen Lock](#linux-host-screen-lock). The most common cause is a missing `system-db:local` line in `/etc/dconf/profile/user`, which makes GNOME ignore the settings even though the files under `/etc/dconf/db/local.d/` are present.
+The GNOME lock screen inside an xrdp session often cannot be unlocked after a reconnect. Confirm the screen lock configuration actually applied on the host using the commands in [Linux Host Screen Lock](#linux-host-screen-lock). The most common cause is a missing `system-db:local` line in `/etc/dconf/profile/user`, which makes GNOME ignore the settings even though the files under `/etc/dconf/db/local.d/` are present.
+
+### A session starts a different desktop than `linuxHostDesktop` names
+
+`xrdp-startwm.sh` starts the desktop named in `/etc/linuxbroker/desktop.conf` and logs each start under the `linuxbroker-startwm` tag. When that desktop is not installed, it runs the distribution's own session script instead and logs that too. A host that was migrated rather than bootstrapped has no `desktop.conf`, so it always runs the distribution's session script. Drain such a host and run its bootstrap again, which installs the desktop and writes the file:
+
+```bash
+cat /etc/linuxbroker/desktop.conf
+sudo journalctl -t linuxbroker-startwm -n 20
+```
+
+### Applications ask for a password to unlock the login keyring
+
+The session launcher logs what it did with the user's keyring under the `linuxbroker-startwm` tag, and the key the broker sent, if any, is in `/run/linuxbroker-keyring/<user>`:
+
+```bash
+sudo journalctl -t linuxbroker-startwm -n 20
+sudo ls -l /run/linuxbroker-keyring/
+```
+
+- No key file means the host received no key. Check that the API app has the `KEYRING_VAULT_URL` setting, which `azd provision` adds, and that **Fleet health** shows the host on agent 1.2.0. The API logs `Could not use the keyring key` when Key Vault refused a request, for example while a new role assignment is still propagating, and then sends no key from that worker for five minutes. It logs `a deleted secret with that name must be recovered or purged first` when that user's secret was deleted; recover it, or purge it to give the user a new key.
+- `The login keyring of <user> stays locked: the key does not open it.` means another password protects the keyring, and the launcher left it alone because it did not start the keyring daemon itself, typically because one from an earlier session of the user was still running. The next session that starts without one moves the old keyring aside and creates a new one.
+- No `linuxbroker-startwm` entries for the session mean it did not start through the launcher; see the previous entry.
+
+### The idle timeout does not disconnect anyone
+
+Check `/var/log/release-session.log` on the host once the session has been idle for longer than the timeout:
+
+- `Could not read idle time for user <user>. Skipping idle enforcement.` means `xprintidle` is missing. RHEL, Rocky Linux and AlmaLinux do not package it, so only Ubuntu hosts enforce the timeout.
+- `No xrdp connection process was found for user <user> on display <display>` every minute means the host runs an agent older than 1.2.0, which never found the connection; migrate it. On agent 1.2.0 it means xrdp runs with `fork=false` in `/etc/xrdp/xrdp.ini`, so one xrdp process carries every connection on the host, and the agent does not end it.
 
 ### The Custom Script Extension failed on the screen lock step
 

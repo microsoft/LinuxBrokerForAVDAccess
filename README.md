@@ -4,7 +4,7 @@
 
 ## Purpose
 
-The **Linux Broker for AVD Access** is a solution designed to manage and broker user access to Linux hosts via Azure Virtual Desktop (AVD). It provides a scalable and efficient way to connect users to Linux virtual machines (VMs) using either Remote Desktop Protocol (RDP) for full desktop experiences or xpra (X Remote Application) for virtualized applications.
+The **Linux Broker for AVD Access** is a solution designed to manage and broker user access to Linux hosts via Azure Virtual Desktop (AVD). It provides a scalable and efficient way to connect users to full desktops on Linux virtual machines (VMs) over the Remote Desktop Protocol (RDP), which the hosts serve with xrdp.
 
 This solution leverages Azure services such as managed identities, security groups, Azure App Service, Azure Functions, and Azure SQL Database to provide secure and efficient brokering, session management, and scaling of Linux hosts.
 
@@ -15,7 +15,7 @@ The solution consists of the following components:
 
 - **Azure Virtual Desktop (AVD)**: Provides the interface for users to access Linux hosts. Users can connect via the AVD web client or any supported AVD client.
 
-- **Broker Agent (`Connect-LinuxBroker.ps1`)**: A PowerShell script running on each AVD host that acts as an agent to broker connections to Linux hosts. It connects to the Broker API using managed identity to check out a Linux VM and initiate the appropriate connection (RDP or xpra).
+- **Broker Agent (`Connect-LinuxBroker.ps1`)**: A PowerShell script running on each AVD host that acts as an agent to broker connections to Linux hosts. It connects to the Broker API using managed identity to check out a Linux VM and opens a Remote Desktop connection to it.
 
 - **Linux Hosts Cluster**: A set of Linux VMs that users connect to. Each Linux host has managed identity enabled and runs a Session Release Agent.
 
@@ -37,7 +37,7 @@ The solution consists of the following components:
 
 - **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as finding and acting on hosts in bulk, importing hosts from Azure, helping users with their sessions, scheduling scaling, patching hosts in rolling maintenance runs, charting capacity and unmet demand, and viewing logs. It is a React 18 and TypeScript single-page app built with Vite and Tailwind CSS, served by a Flask backend-for-frontend that holds the Entra ID token server-side and calls the Broker API on the administrator's behalf.
 
-- **Azure Key Vault**: Stores sensitive information such as SSH keys and database passwords, accessed securely by the Broker API using managed identity.
+- **Azure Key Vault**: Stores sensitive information such as SSH keys and database passwords, accessed securely by the Broker API using managed identity. A second vault holds the key that unlocks each user's login keyring.
 
 - **Managed Identities and Security Groups**: Used throughout the solution to securely authenticate and authorize different components. AVD hosts and Linux hosts have managed identities and are members of respective security groups.
 
@@ -55,7 +55,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 - **Broker Database**: Azure SQL Database for storing VM and scaling data.
 - **Azure Function for Scaling Tasks**: Manages scaling of Linux hosts.
 - **Service Management Portal**: React and TypeScript front-end application for administrators, served by a Flask backend-for-frontend.
-- **Azure Key Vault**: Secure storage for SSH keys and passwords.
+- **Azure Key Vault**: Secure storage for SSH keys, passwords and each user's login keyring key.
 - **Managed Identities**: Used for secure authentication between components.
 - **Security Groups**: Controls access permissions for managed identities.
 
@@ -67,8 +67,9 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
    - The Broker Agent script (`Connect-LinuxBroker.ps1`) connects to the Broker API using the AVD host's managed identity.
    - It checks out an available Linux VM for the user.
    - The user's ID is added to the Linux host with a unique 25-character password.
-   - The user is added to appropriate user groups on the Linux host for RDP or xpra access.
-4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP or xpra and can work as needed.
+   - The user is added to appropriate user groups on the Linux host for RDP access.
+   - The host also receives the key that unlocks the user's login keyring, so applications that save passwords do not ask for one.
+4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP and can work as needed.
 5. **Session Management**:
    - If the user disconnects or logs off, the Session Release Agent on the Linux host reconciles the XRDP/Xorg session state immediately when possible and otherwise on the next safety-net poll.
    - A reconnect timer is initiated, 20 minutes by default and configurable from the portal.
@@ -185,12 +186,22 @@ The custom script extension for the AVD host:
 
 The custom script extensions support the following Linux distributions:
 
-- **Red Hat Enterprise Linux (RHEL) 7, 8, and 9**
-- **Ubuntu 24 Desktop**
+- **Red Hat Enterprise Linux (RHEL) 8 and 9**
+- **Rocky Linux 9 and AlmaLinux 9**: rebuilds of RHEL 9 that need no Red Hat subscription, set up by the RHEL 9 script
+- **Ubuntu 24.04**: Canonical's server image, with a desktop added
+
+Each deployment chooses the desktop its hosts run with `linuxHostDesktop`:
+
+- **GNOME**, the default: the `Server with GUI` group on RHEL and its rebuilds, and on Ubuntu the Ubuntu desktop, which xrdp sessions run as Ubuntu on Xorg
+- **Xfce**
+- **MATE**
+
+On RHEL, Rocky Linux and AlmaLinux, Xfce and MATE come from EPEL. Rocky Linux and AlmaLinux install EPEL from their own repositories.
 
 These scripts:
 
-- **Install XRDP and xpra**: Set up XRDP for full desktop access (RDP) and xpra for application virtualization, enabling users to connect via AVD.
+- **Install xrdp**: Set up xrdp for full desktop access over RDP, enabling users to connect via AVD. The host firewall allows only SSH and RDP.
+- **Start the desktop**: xrdp starts every session through `xrdp-startwm.sh`, which unlocks the user's login keyring and runs the desktop the deployment chose. GNOME's file indexer is turned off, because it would crawl the home directories on the NFS share.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the timer-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.
 - **Install the Host Settings Agent**: Installs `apply-host-settings.sh` and seeds the settings profile, so screen lock policy and session timings are applied consistently on every supported distribution rather than only on RHEL 8. `LINUXBROKER_DISABLE_SCREEN_LOCK` still chooses the screen lock posture that is seeded; from then on the values are managed from the portal.
@@ -217,7 +228,7 @@ Every run first reads each host's power state from Azure and corrects the broker
 - **Session Monitoring**: The Session Release Agent reconciles XRDP/Xorg session state on a timer (60 seconds by default) and can also wake early from `systemd-logind` session signals.
 - **Release State**: When a session is disconnected, the VM enters a 'released' state, allowing the user to reconnect within the configured grace period (20 minutes by default). The desktop itself is closed at disconnect unless **Keep sessions alive during the grace period** is turned on, in which case it keeps running until the grace period expires.
 - **Session Termination**: If the user does not reconnect within that window, the host signs them off. The broker returns the VM once the grace period, one reconcile interval and a further 60 seconds have passed, then keeps it **Cleanup pending** until the user's account has been removed and the home unmounted. Cleanup is retried automatically about every two minutes while the host is on and reachable, and operators can retry it from the portal. Only then can the VM be checked out by someone else.
-- **Idle Sessions**: When an idle timeout is configured, a user who stays connected but inactive is disconnected, which starts the same grace period. With **Keep sessions alive** turned on they can reconnect and resume; otherwise they get a fresh desktop on the same host. If they do not reconnect, the VM is reclaimed. This is disabled by default.
+- **Idle Sessions**: When an idle timeout is configured, a user who stays connected but inactive is disconnected, which starts the same grace period. With **Keep sessions alive** turned on they can reconnect and resume; otherwise they get a fresh desktop on the same host. If they do not reconnect, the VM is reclaimed. Idle time never counts from before the user's latest connection, so a user who reconnects is not disconnected again straight away. This is disabled by default. The agent reads idle time with `xprintidle`, which only Ubuntu packages, so RHEL, Rocky Linux and AlmaLinux hosts do not enforce the timeout or show its warning.
 
 ### Linux Host Settings
 
@@ -230,17 +241,19 @@ Administrators manage host behavior from the **Host Settings** page in the Servi
 | Reconcile interval | 60 s | 30–900 | How often each host re-checks session state |
 | Watcher debounce | 10 s | 1–300 | Minimum gap between `logind`-triggered reconciliations |
 | Watcher settle | 2 s | 0–60 | Pause after a `logind` signal before reconciling |
-| Idle timeout | 0 (disabled) | 0, or 300–86400 | Inactivity before a connected user is disconnected |
+| Idle timeout | 0 (disabled) | 0, or 300–86400 | Inactivity before a connected user is disconnected. Only Ubuntu hosts enforce it; see **Idle Sessions** above |
 | Idle warning lead time | 120 s | 0–900 | On-screen warning before the idle timeout, must be less than the timeout |
-| Remove the lock screen | true | boolean | Disables the Super+L shortcut and the Lock menu entry |
+| Remove the lock screen | true | boolean | Stops the screen from locking at all. On GNOME it also removes the Super+L shortcut and the Lock menu entry |
 | Screen lock enabled | false | boolean | Whether the screen locks when the screensaver activates |
 | Screen blank delay | 0 (never) | 0–86400 | Inactivity before the screen blanks |
 | Screen lock delay | 0 (immediate) | 0–86400 | Delay between blanking and locking |
-| Lock screen settings | true | boolean | Applies dconf locks so users cannot override the screen lock values |
+| Lock screen settings | true | boolean | Locks the screen lock values in dconf, and in xfconf on Xfce hosts, so users cannot override them |
 
 The session lifecycle defaults match the values that were previously hardcoded, so adopting this feature changes no behavior until an administrator edits the profile.
 
 The screen lock defaults preserve the posture set by `LINUXBROKER_DISABLE_SCREEN_LOCK`: the lock screen is removed, because a locked GNOME greeter inside an xrdp session frequently cannot be unlocked after a reconnect, which strands the host's lease. That environment variable still chooses the posture seeded at provisioning time; from then on the values are managed from the portal. Set **Screen lock enabled** on and **Remove the lock screen** off to satisfy a STIG or CIS idle-lock control.
+
+The same values apply to every desktop. Xfce and MATE count the screen blank and lock delays in whole minutes, up to 8 hours, so the blank delay is rounded up and the lock delay to the nearest minute, and Xfce sessions pick up a change when they start. **Host Settings** notes this when the fleet has Xfce or MATE hosts. See [Linux Host Screen Lock](deploy/DEPLOYMENT.md#linux-host-screen-lock) for the files each desktop reads.
 
 **Keep sessions alive during the grace period** and **Screen lock enabled** are mutually exclusive: a resumed session behind a lock screen cannot be unlocked, because users never know the password the broker sets at each checkout. Hosts that have not been updated with `deploy/Migrate-LinuxHostReleaseAgent.ps1` keep closing desktops at disconnect and show as pending in the drift table once the setting is on.
 
@@ -259,6 +272,7 @@ Because the profile is versioned, the portal shows which hosts have applied the 
 
 - **Managed Identities**: Used for secure authentication between Azure resources without storing credentials.
 - **Azure Key Vault**: Stores SSH keys and database passwords securely, accessed via managed identities.
+- **Login keyring**: The Linux password changes at every checkout, so it cannot protect a user's GNOME login keyring. The broker keeps a separate random key for each user in a vault of its own, where the API can write secrets but cannot change the deployment's, and `xrdp-startwm.sh` unlocks the keyring with it before the desktop starts. The key reaches the host over the checkout's SSH session and stays in memory-backed storage under `/run`, readable only by the user, until the host is returned.
 - **API Permissions**: Specific API permissions are granted to components to restrict access based on roles.
 - **Logging and Monitoring**: All activities are logged to Azure Application Insights and Log Analytics Workspace.
 
@@ -339,9 +353,17 @@ The admin console foundations (audit log, host actions and drain, fleet health) 
 
 The rest of the admin console (sessions, broadcast messages, scaling schedules, trends, rolling maintenance and the new host list) needs no new Azure resources or roles either, but the Linux hosts need agent 1.1.0 for sign-out, messages, profile resets and patching. See [Upgrading To The Complete Admin Console](deploy/DEPLOYMENT.md#upgrading-to-the-complete-admin-console).
 
+The distribution and desktop support release needs `azd provision` and agent 1.2.0. See [Upgrading To Distribution And Desktop Support](deploy/DEPLOYMENT.md#upgrading-to-distribution-and-desktop-support).
+
+- **RHEL 7 is no longer offered.** An azd environment that still stores `linuxHostOsVersion=7-LVM` fails validation, so change it before you provision.
+- **Run `azd provision`.** It creates the keyring vault, gives the API access to it and sets `KEYRING_VAULT_URL`. The existing hosts keep their image and extension, unless you change `linuxHostDesktop`.
+- **Update the Linux hosts to agent 1.2.0.** Fleet health flags every host as outdated until `deploy/Migrate-LinuxHostReleaseAgent.ps1` from this release has updated it. The migration also removes xpra and closes TCP 443.
+- **Review the idle timeout.** It had never disconnected anyone before this release, and migrated Ubuntu hosts now enforce any timeout already set.
+- **Replace or bootstrap again any Ubuntu hosts.** Earlier releases deployed them with no desktop and without the packages NFS homes need.
+
 ## Roadmap
 
-Planned work beyond this release, including Ubuntu desktop and RHEL 10 support, starting a host on demand, golden images and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
+Planned work beyond this release, including RHEL 10 and Ubuntu 26.04 support, starting a host on demand, golden images and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contributing
 

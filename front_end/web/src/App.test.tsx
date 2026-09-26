@@ -366,6 +366,7 @@ let session: typeof SESSION = SESSION;
 let dashboard: Omit<typeof DASHBOARD, 'stats'> & { stats: DashboardStats; fleetHealth?: unknown } = DASHBOARD;
 let trends: 'off' | 'on' = 'off';
 let attention: unknown = NOTHING_NEEDS_ATTENTION;
+let fleetHealth: unknown = FLEET_HEALTH;
 let maintenance: unknown = maintenancePage();
 let legacyHostList = false;
 const requests: string[] = [];
@@ -419,7 +420,7 @@ function stubFetch() {
     if (url.startsWith('/api/ui/scaling/schedules')) {
       return jsonResponse({ ScheduleID: 5, message: "Saved 'Evening'. It applies from the next scaling run." });
     }
-    if (url.startsWith('/api/ui/hosts/health')) return jsonResponse(FLEET_HEALTH);
+    if (url.startsWith('/api/ui/hosts/health')) return jsonResponse(fleetHealth);
     if (url === '/api/ui/hosts/settings/apply') {
       return jsonResponse({ settingsVersion: 3, targetCount: 1, succeededCount: 1, unreachable: [], message: 'Applied settings v3 to 1 host.', tone: 'success' });
     }
@@ -472,6 +473,7 @@ beforeEach(() => {
   dashboard = DASHBOARD;
   trends = 'off';
   attention = NOTHING_NEEDS_ATTENTION;
+  fleetHealth = FLEET_HEALTH;
   maintenance = maintenancePage();
   legacyHostList = false;
   window.localStorage.removeItem('lb-host-columns');
@@ -1219,6 +1221,28 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Version history' })).toBeInTheDocument();
     expect(await screen.findByText('Saved by alice@contoso.com', { exact: false })).toBeInTheDocument();
     expect(screen.getByText('600 s (10 minutes)', { exact: false })).toBeInTheDocument();
+  });
+
+  it('notes how Xfce hosts count the screen delays when the fleet has them', async () => {
+    fleetHealth = {
+      ...FLEET_HEALTH,
+      Hosts: FLEET_HEALTH.Hosts.map((host, index) => (index === 0 ? { ...host, Desktop: 'xfce' } : host)),
+    };
+    renderApp('/settings/hosts');
+
+    expect(await screen.findByText(/^Xfce hosts count these delays in whole minutes, up to 8 hours/)).toHaveTextContent(
+      'On Xfce, a change reaches the sessions that start after it.',
+    );
+  });
+
+  it('leaves the Xfce timing out of the note when the fleet runs only MATE', async () => {
+    fleetHealth = {
+      ...FLEET_HEALTH,
+      Hosts: FLEET_HEALTH.Hosts.map((host) => ({ ...host, Desktop: 'mate' })),
+    };
+    renderApp('/settings/hosts');
+
+    expect(await screen.findByText(/^MATE hosts count these delays in whole minutes/)).not.toHaveTextContent('On Xfce');
   });
 
   it('lists sessions with what an operator needs to know', async () => {

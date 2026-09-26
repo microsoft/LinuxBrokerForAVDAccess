@@ -731,8 +731,8 @@ def health_row(hostname, **values):
         "VMID": 1, "Hostname": hostname, "PowerState": "On", "NetworkStatus": "Reachable", "VmStatus": "Available",
         "DrainRequested": False, "CleanupPending": False, "Username": None, "AppliedSettingsVersion": 7,
         "CurrentSettingsVersion": 7, "ReconcileIntervalSeconds": 60, "LastHeartbeatUtc": "2026-09-24T12:00:00Z",
-        "HeartbeatAgeSeconds": 30, "AgentVersion": "1.1.0",
-        "ScriptVersionsJson": '{"release-session.sh": "1.1.0", "create-user.sh": "1.1.0"}',
+        "HeartbeatAgeSeconds": 30, "AgentVersion": "1.2.0",
+        "ScriptVersionsJson": '{"release-session.sh": "1.2.0", "create-user.sh": "1.2.0"}',
         "ReportedSettingsVersion": 7, "OsId": "rhel", "OsVersion": "9.4", "OsName": "RHEL 9.4", "KernelVersion": "5.14",
         "Desktop": "gnome", "XrdpVersion": "0.10.1", "XrdpActive": True, "NfsReachable": True, "NfsMountCount": 1,
         "LoadAverage": 0.5, "CpuCount": 4, "MemoryAvailableMb": 8000, "MemoryTotalMb": 16000, "RootDiskFreePct": 60,
@@ -750,7 +750,7 @@ def test_fleet_health_flags_what_an_operator_must_act_on(client, fake_db):
         health_row("off", PowerState="Off", HeartbeatAgeSeconds=9000, AppliedSettingsVersion=3),
         health_row("broken", XrdpActive=False, NfsReachable=False, RootDiskFreePct=4),
         health_row("old", AgentVersion="0.9.0"),
-        health_row("half", ScriptVersionsJson='{"release-session.sh": "1.1.0", "manage-lease.sh": null}'),
+        health_row("half", ScriptVersionsJson='{"release-session.sh": "1.2.0", "manage-lease.sh": null}'),
         health_row("drift", AppliedSettingsVersion=None),
     ]
 
@@ -776,8 +776,8 @@ def test_fleet_health_flags_what_an_operator_must_act_on(client, fake_db):
     }
     healthy = body["Hosts"][0]
     assert healthy["Sessions"] == [{"username": "alice", "state": "active"}]
-    assert healthy["ScriptVersions"]["create-user.sh"] == "1.1.0"
-    assert body["ExpectedAgentVersion"] == "1.1.0" and body["StaleAfterSeconds"] == 180
+    assert healthy["ScriptVersions"]["create-user.sh"] == "1.2.0"
+    assert body["ExpectedAgentVersion"] == "1.2.0" and body["StaleAfterSeconds"] == 180
 
 
 def test_fleet_health_for_one_host(client, fake_db):

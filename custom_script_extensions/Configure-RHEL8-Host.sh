@@ -5,50 +5,29 @@
 LINUXBROKER_API_BASE_URL="${1:-}"
 LINUXBROKER_API_CLIENT_ID="${2:-}"
 
-if [ -z "$LINUXBROKER_API_BASE_URL" ] || [ -z "$LINUXBROKER_API_CLIENT_ID" ]; then
+if [[ -z "$LINUXBROKER_API_BASE_URL" || -z "$LINUXBROKER_API_CLIENT_ID" ]]; then
     echo "Linux Broker API base URL and client ID are required."
     exit 1
 fi
 
-case "$LINUXBROKER_API_BASE_URL" in
-    https://*) ;;
-    *)
-        echo "Linux Broker API base URL must start with https://"
-        exit 1
-        ;;
-esac
+if [[ "$LINUXBROKER_API_BASE_URL" != https://* ]]; then
+    echo "Linux Broker API base URL must start with https://"
+    exit 1
+fi
 
 LINUXBROKER_API_BASE_URL="${LINUXBROKER_API_BASE_URL%/}"
 
 # ===============================
 # Variables
 
-# Default definition for the main project
-GH_OWNER="microsoft"
-GH_REPO="LinuxBrokerForAVDAccess"
-GH_BRANCH="main"
-
-# if GIT repo, parse out the config data
-remote_url=$(git config --get remote.origin.url 2>/dev/null)
-branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-
-# if current repo is a different fork/branch, change it accordingly
-if [[ "$remote_url" =~ github.com[/:]([^/]+)/([^/.]+) ]]; then
-    GH_OWNER="${BASH_REMATCH[1]}"
-    GH_REPO="${BASH_REMATCH[2]}"
-    GH_BRANCH="$branch"
-fi
-
 epel_url="https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
-xpra_repo_path="/etc/yum.repos.d/xpra.repo"
-xpra_url="https://raw.githubusercontent.com/Xpra-org/xpra/master/packaging/repos/almalinux/xpra.repo"
 microsoft_packages_url="https://packages.microsoft.com/config/rhel/8/packages-microsoft-prod.rpm"
 
 # Override for sovereign or air-gapped clouds where raw.githubusercontent.com is unreachable.
-script_source_root="${LINUXBROKER_SCRIPT_SOURCE_ROOT:-https://raw.githubusercontent.com/$GH_OWNER/$GH_REPO/refs/heads/$GH_BRANCH}"
+script_source_root="${LINUXBROKER_SCRIPT_SOURCE_ROOT:-https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/main}"
 script_source_root="${script_source_root%/}"
 
-release_session_url="$script_source_root/linux_host/session_release_buffer/RHEL/release-session.sh"
+release_session_url="$script_source_root/linux_host/session_release_buffer/release-session.sh"
 xrdp_who_xorg_url="$script_source_root/linux_host/session_release_buffer/xrdp-who-xorg.sh"
 logind_watcher_url="$script_source_root/linux_host/session_release_buffer/logind-session-watcher.sh"
 create_user_script_url="$script_source_root/linux_host/create-user.sh"
@@ -61,13 +40,13 @@ session_control_script_url="$script_source_root/linux_host/session-control.sh"
 session_control_script="/usr/local/bin/session-control.sh"
 patch_host_script_url="$script_source_root/linux_host/patch-host.sh"
 patch_host_script="/usr/local/bin/patch-host.sh"
-xrdp_ini="/etc/xrdp/xrdp.ini"
+xrdp_startwm_script_url="$script_source_root/linux_host/xrdp-startwm.sh"
+xrdp_startwm_script="/usr/local/bin/xrdp-startwm.sh"
 
 arch=$( /bin/arch )
-remoteAccessTool="both"  # Options: "xrdp", "xpra", or "both"
 
-# Disable the GNOME screen saver and screen lock on this host. Enabled by default because a
-# locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which
+# Disable the screen saver and screen lock on this host. Enabled by default because a
+# locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which
 # strands the host's lease. Set LINUXBROKER_DISABLE_SCREEN_LOCK=false to keep the lock screen.
 disableScreenLock="${LINUXBROKER_DISABLE_SCREEN_LOCK:-true}"
 disableScreenLock=$(printf '%s' "$disableScreenLock" | tr '[:upper:]' '[:lower:]')
@@ -81,11 +60,25 @@ case "$disableScreenLock" in
         ;;
 esac
 
+# The desktop xrdp sessions run: gnome, the Server with GUI group, or xfce or mate, both from
+# EPEL. Bicep sets LINUXBROKER_DESKTOP only for xfce and mate.
+desktop="${LINUXBROKER_DESKTOP:-gnome}"
+desktop=$(printf '%s' "$desktop" | tr '[:upper:]' '[:lower:]')
+
+case "$desktop" in
+    gnome|xfce|mate) ;;
+    *)
+        echo "Unsupported LINUXBROKER_DESKTOP value: $desktop (expected gnome, xfce or mate)"
+        exit 1
+        ;;
+esac
+
 orgId="${RHEL_ORG_ID:-}"
 activationKey="${RHEL_ACTIVATION_KEY:-}"
 
 output_directory="/usr/local/bin"
 state_directory="/var/lib/linuxbroker-release-session"
+desktop_file="/etc/linuxbroker/desktop.conf"
 
 SCRIPT_PATH="$output_directory/release-session.sh"
 WATCHER_SCRIPT_PATH="$output_directory/logind-session-watcher.sh"
@@ -106,6 +99,8 @@ YOUR_LINUXBROKER_API_BASE_URL="$LINUXBROKER_API_BASE_URL"
 # ===============================
 # Execution
 
+set -e  # Exit immediately if a command exits with a non-zero status
+
 if [ -n "$orgId" ] && [ -n "$activationKey" ]; then
     echo "Registering the system..."
     sudo subscription-manager register --org="$orgId" --activationkey="$activationKey"
@@ -117,36 +112,46 @@ fi
 echo "Updating and upgrading system packages..."
 sudo dnf update -y && sudo dnf upgrade -y
 
+echo "Installing EPEL repository..."
 sudo dnf install -y "$epel_url"
+
+echo "Installing Microsoft repository..."
 sudo dnf install -y "$microsoft_packages_url"
-sudo wget -O "$xpra_repo_path" "$xpra_url"
+
+echo "Installing essential packages..."
 sudo dnf install -y wget util-linux azure-cli xorgxrdp nfs-utils curl jq dconf
 
 # Idle session enforcement degrades gracefully without xprintidle, so a host that cannot
 # install it must still finish provisioning rather than fail the extension.
 echo "Installing idle detection support..."
 sudo dnf install -y xprintidle || echo "xprintidle is unavailable. Idle session enforcement will be skipped on this host."
-sudo dnf groupinstall -y "Server with GUI"
 
-case "$remoteAccessTool" in
-    "xrdp")
-        remoteAccessPackages=("xrdp")
+case "$desktop" in
+    gnome)
+        echo "Installing 'Server with GUI' group..."
+        sudo dnf groupinstall -y "Server with GUI"
         ;;
-    "xpra")
-        remoteAccessPackages=("xpra")
+    xfce)
+        # GDM is left out, as it brings GNOME Shell with it and xrdp needs no display manager.
+        # xfce4-screensaver is the screen saver the host settings configure, and GNOME Keyring
+        # keeps passwords for applications as it does on the other desktops.
+        echo "Installing the Xfce desktop..."
+        sudo dnf install -y --exclude=gdm @base-x @xfce-desktop xfce4-screensaver xfce4-notifyd \
+            gnome-keyring gnome-keyring-pam
         ;;
-    "both")
-        remoteAccessPackages=("xrdp" "xpra")
-        ;;
-    *)
-        echo "Unsupported remote access tool: $remoteAccessTool"
-        exit 1
+    mate)
+        echo "Installing the MATE desktop..."
+        sudo dnf install -y @base-x mate-session-manager mate-panel marco caja mate-settings-daemon \
+            mate-control-center mate-terminal mate-screensaver mate-notification-daemon mate-polkit \
+            mate-power-manager mate-desktop mate-menus mate-themes mate-icon-theme mate-backgrounds \
+            mate-media pluma eom engrampa
+        # Atril, the document viewer, needs a package from CodeReady Builder on RHEL 8.
+        sudo dnf install -y atril || echo "Atril is unavailable without CodeReady Builder, so MATE has no document viewer on this host."
         ;;
 esac
 
-for pkg in "${remoteAccessPackages[@]}"; do
-    sudo dnf install -y "$pkg"
-done
+echo "Installing xrdp..."
+sudo dnf install -y xrdp
 
 echo "Setting default target to graphical..."
 sudo systemctl set-default graphical.target
@@ -161,33 +166,20 @@ else
     sudo systemctl enable --now firewalld
 fi
 
-echo "Configuring firewall to allow $remoteAccessTool connections..."
+echo "Configuring firewall to allow SSH and xrdp connections..."
 sudo firewall-cmd --permanent --add-port=22/tcp  # Always allow SSH
+sudo firewall-cmd --permanent --add-port=3389/tcp
+sudo firewall-cmd --permanent --add-service=ms-wbt || echo "Service 'ms-wbt' may not be available. Skipping."
 
-if [ "$remoteAccessTool" = "xrdp" ] || [ "$remoteAccessTool" = "both" ]; then
-    sudo firewall-cmd --permanent --add-port=3389/tcp
-    sudo firewall-cmd --permanent --add-service=ms-wbt
-    sudo firewall-cmd --permanent --add-port=443/tcp
-    if systemctl is-active --quiet xrdp; then
-        echo "xrdp service is already active."
-    else
-        echo "Starting and enabling xrdp service..."
-        sudo systemctl start xrdp
-        sudo systemctl enable xrdp --now
-    fi
+if systemctl is-active --quiet xrdp; then
+    echo "xrdp service is already active."
+else
+    echo "Starting and enabling xrdp service..."
+    sudo systemctl start xrdp
+    sudo systemctl enable xrdp --now
 fi
 
-if [ "$remoteAccessTool" = "xpra" ] || [ "$remoteAccessTool" = "both" ]; then
-    sudo firewall-cmd --permanent --add-port=443/tcp
-    if systemctl is-active --quiet xpra; then
-        echo "xpra service is already active."
-    else
-        echo "Starting and enabling xpra service..."
-        sudo systemctl start xpra
-        sudo systemctl enable xpra --now
-    fi
-fi
-
+echo "Reloading firewall configurations..."
 sudo firewall-cmd --reload
 echo "Firewall configuration completed."
 
@@ -209,11 +201,54 @@ sudo wget -O "$output_directory/xrdp-who-xorg.sh" "$xrdp_who_xorg_url"
 echo "Downloading logind-session-watcher.sh..."
 sudo wget -O "$WATCHER_SCRIPT_PATH" "$logind_watcher_url"
 
-sudo chmod +x "$SCRIPT_PATH" 
+echo "Downloading create-user.sh..."
+sudo wget -O "$create_user_script" "$create_user_script_url"
+
+echo "Downloading manage-lease.sh..."
+sudo wget -O "$manage_lease_script" "$manage_lease_script_url"
+
+echo "Downloading apply-host-settings.sh..."
+sudo wget -O "$apply_settings_script" "$apply_settings_script_url"
+
+echo "Downloading session-control.sh..."
+sudo wget -O "$session_control_script" "$session_control_script_url"
+
+echo "Downloading patch-host.sh..."
+sudo wget -O "$patch_host_script" "$patch_host_script_url"
+
+echo "Downloading xrdp-startwm.sh..."
+sudo wget -O "$xrdp_startwm_script" "$xrdp_startwm_script_url"
+
+echo "Setting execute permissions for downloaded scripts..."
+sudo chmod +x "$SCRIPT_PATH"
 sudo chmod +x "$output_directory/xrdp-who-xorg.sh"
 sudo chmod +x "$WATCHER_SCRIPT_PATH"
+sudo chmod +x "$create_user_script"
+sudo chmod +x "$manage_lease_script"
+sudo chmod +x "$apply_settings_script"
+sudo chmod +x "$session_control_script"
+sudo chmod +x "$patch_host_script"
+sudo chmod +x "$xrdp_startwm_script"
 echo "Downloaded scripts are now executable."
 
+# xrdp starts every session through xrdp-startwm.sh, which starts the desktop named here. For
+# GNOME that is the distribution's own session script, as before.
+echo "Configuring xrdp to start sessions through xrdp-startwm.sh..."
+sudo mkdir -p "$(dirname "$desktop_file")"
+sudo chmod 755 "$(dirname "$desktop_file")"
+cat <<EOF | sudo tee "$desktop_file" >/dev/null
+# Written by the Linux Broker host bootstrap: the desktop xrdp-startwm.sh starts in every
+# xrdp session.
+DESKTOP=$desktop
+EOF
+sudo chmod 644 "$desktop_file"
+
+if ! sudo "$xrdp_startwm_script" --install; then
+    echo "ERROR: Could not configure xrdp to start sessions through $xrdp_startwm_script."
+    exit 1
+fi
+
+echo "Creating log and user details files..."
 sudo mkdir -p "$state_directory"
 sudo touch "$LOG_FILE" "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE"
 sudo chown root:root "$LOG_FILE" "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE"
@@ -302,31 +337,10 @@ sudo systemctl enable --now "$WATCHER_SERVICE_NAME"
 sudo systemctl start "$SYSTEMD_SERVICE_NAME"
 echo "Systemd timer and logind watcher configured successfully."
 
-# Copy Unique User creation script before generating sudoers rules
-echo "Downloading create-user.sh..."
-sudo wget -O "$create_user_script" "$create_user_script_url"
-sudo chmod +x "$create_user_script"
-
-echo "Downloading manage-lease.sh..."
-sudo wget -O "$manage_lease_script" "$manage_lease_script_url"
-
-echo "Downloading apply-host-settings.sh..."
-sudo wget -O "$apply_settings_script" "$apply_settings_script_url"
-
-echo "Downloading session-control.sh..."
-sudo wget -O "$session_control_script" "$session_control_script_url"
-
-echo "Downloading patch-host.sh..."
-sudo wget -O "$patch_host_script" "$patch_host_script_url"
-sudo chmod +x "$manage_lease_script"
-sudo chmod +x "$apply_settings_script"
-sudo chmod +x "$session_control_script"
-sudo chmod +x "$patch_host_script"
-
-# Create AVD user and give limited sudo rights
 if ! id avdadmin >/dev/null 2>&1; then
     sudo useradd avdadmin
 fi
+
 # Only the commands the broker API actually invokes with sudo. Privileged file work
 # (mount, chown, chmod, lease markers, host settings) happens inside the allowlisted
 # scripts, each of which validates its own input.
@@ -342,19 +356,18 @@ else
     echo "ERROR: Generated sudoers policy failed validation."
     exit 1
 fi
-# Note: public ssh key is still needed for avdadmin
 echo "avdadmin user is created and permissioned"
 
-# Seed the Linux Broker host settings profile. This writes the dconf screen lock policy,
-# the dconf profile that makes it take effect, the release agent's settings file, and the
-# systemd drop-ins, then compiles the dconf database. LINUXBROKER_DISABLE_SCREEN_LOCK still
-# chooses the screen lock posture; from here on the values are managed from the portal and
-# the release agent converges the host to the configured profile on its next run.
+# Seed the Linux Broker host settings profile. This writes the screen lock policy for each
+# desktop, the dconf profile that makes it take effect, the release agent's settings file,
+# and the systemd drop-ins, then compiles the dconf database. LINUXBROKER_DISABLE_SCREEN_LOCK
+# still chooses the screen lock posture; from here on the values are managed from the portal
+# and the release agent converges the host to the configured profile on its next run.
 if [ "$disableScreenLock" = "true" ]; then
-    echo "Seeding host settings with the Gnome Desktop screen saver and screen lock disabled..."
+    echo "Seeding host settings with the screen saver and screen lock disabled..."
     settings_seed='{"ScreenLockEnabled":false,"DisableLockScreen":true}'
 else
-    echo "Seeding host settings with the Gnome Desktop screen lock left enabled (LINUXBROKER_DISABLE_SCREEN_LOCK=false)."
+    echo "Seeding host settings with the screen lock left enabled (LINUXBROKER_DISABLE_SCREEN_LOCK=false)."
     settings_seed='{"ScreenLockEnabled":true,"DisableLockScreen":false}'
 fi
 
@@ -363,5 +376,4 @@ if ! printf '%s' "$settings_seed" | sudo "$apply_settings_script"; then
     exit 1
 fi
 
-# Complete
 echo "System configuration complete."

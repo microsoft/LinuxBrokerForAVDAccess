@@ -31,17 +31,25 @@ install_deps() {
     fi
 }
 
+# The host scripts, plus the bootstrap scripts the Custom Script Extension runs.
+lint_targets() {
+    find "$ROOT_DIR/linux_host" -type f -name '*.sh'
+    if [ -d "$ROOT_DIR/custom_script_extensions" ]; then
+        find "$ROOT_DIR/custom_script_extensions" -type f -name '*.sh'
+    fi
+}
+
 syntax_check() {
     local file
 
     while IFS= read -r file; do
         bash -n "$file"
-    done < <(find "$ROOT_DIR/linux_host" -type f -name '*.sh' | sort)
+    done < <(lint_targets | sort)
 
     if command -v shellcheck >/dev/null 2>&1; then
         while IFS= read -r file; do
             shellcheck --severity=error "$file"
-        done < <(find "$ROOT_DIR/linux_host" -type f -name '*.sh' | sort)
+        done < <(lint_targets | sort)
     else
         echo "shellcheck not available; skipping optional lint"
     fi

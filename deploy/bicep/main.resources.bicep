@@ -81,15 +81,24 @@ param linuxHostCount int = 0
 param linuxHostAuthType string = 'SSH'
 param linuxHostSshPublicKey string = ''
 @allowed([
-  '7-LVM'
   '8-LVM'
   '9-LVM'
+  'rocky-9'
+  'alma-9'
   '24_04-lts'
 ])
-param linuxHostOsVersion string = '24_04-lts'
+param linuxHostOsVersion string = '9-LVM'
 
-@description('Disable the GNOME screen saver and screen lock on RHEL hosts. Set to false to keep the lock screen.')
+@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Set to false to keep the lock screen.')
 param linuxHostDisableScreenLock bool = true
+
+@allowed([
+  'gnome'
+  'xfce'
+  'mate'
+])
+@description('Desktop the Linux hosts run in xrdp sessions.')
+param linuxHostDesktop string = 'gnome'
 
 param avdHostPoolName string = ''
 param avdSessionHostCount int = 0
@@ -115,6 +124,7 @@ var suffix = toLower(uniqueString(subscription().subscriptionId, resourceGroup()
 var sqlSuffix = toLower(uniqueString(subscription().subscriptionId, resourceGroup().id, appName, environmentName, sqlLocation))
 var storageAccountName = take('${sanitizedApp}${sanitizedEnv}${suffix}', 24)
 var keyVaultName = take('kv${sanitizedApp}${sanitizedEnv}${suffix}', 24)
+var keyringVaultName = take('kr${sanitizedApp}${sanitizedEnv}${suffix}', 24)
 var containerRegistryName = take('${sanitizedApp}${sanitizedEnv}${suffix}', 50)
 var sqlServerName = take('sql-${sanitizedApp}-${sanitizedEnv}-${sqlSuffix}', 63)
 var sqlDatabaseName = 'LinuxBroker'
@@ -131,6 +141,8 @@ var avdSubnetName = 'snet-avd-hosts'
 var privateEndpointSubnetName = 'snet-private-endpoints'
 var effectiveVmResourceGroup = empty(vmHostResourceGroup) ? resourceGroup().name : vmHostResourceGroup
 var keyVaultSecretsUserRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+// Key Vault Secrets Officer: the API creates and rotates the keyring secrets.
+var keyVaultSecretsOfficerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')
 var acrPullRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 // Desktop Virtualization Power On Off Contributor: start, power off, and read VMs, without write or run command.
 var vmPowerRoleDefinitionGuid = '40c5ff49-9181-41f8-ae61-143b0e78555e'
@@ -211,6 +223,17 @@ module keyVault 'modules/core/key-vault.bicep' = {
   }
 }
 
+// A vault of its own, so the API can write the keyring keys without being able to change the
+// database password or the host SSH key.
+module keyringVault 'modules/core/keyring-vault.bicep' = {
+  name: 'keyringVault'
+  params: {
+    location: location
+    tags: tags
+    keyVaultName: keyringVaultName
+  }
+}
+
 module sql 'modules/core/sql-database.bicep' = {
   name: 'sql'
   params: {
@@ -241,6 +264,10 @@ resource acrResource 'Microsoft.ContainerRegistry/registries@2023-07-01' existin
 
 resource keyVaultResource 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
   name: keyVaultName
+}
+
+resource keyringVaultResource 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+  name: keyringVaultName
 }
 
 resource storageAccountResource 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
@@ -378,6 +405,7 @@ var apiSettings = {
   DOMAIN_NAME: effectiveDomainName
   GRAPH_API_ENDPOINT: '${resolvedGraphEndpoint}/.default'
   GRAPH_ENDPOINT: resolvedGraphEndpoint
+  KEYRING_VAULT_URL: keyringVault.outputs.vaultUri
   KEY_NAME: linuxHostPrivateKeySecretName
   LINUX_HOST_ADMIN_LOGIN_NAME: linuxHostAdminLoginName
   LINUX_HOST_GROUP_ID: linuxHostGroupId
@@ -507,6 +535,16 @@ resource apiKeyVaultSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04
   }
 }
 
+resource apiKeyringVaultSecretsOfficer 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(keyringVaultResource.id, apiAppName, 'api-keyring-vault-secrets-officer')
+  scope: keyringVaultResource
+  properties: {
+    principalId: apiApp.outputs.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: keyVaultSecretsOfficerRoleDefinitionId
+  }
+}
+
 // The API starts and stops hosts from the portal and for scaling rules.
 module apiVmPowerRole 'modules/core/resource-group-role-assignment.bicep' = {
   name: 'apiVmPowerRole'
@@ -540,6 +578,7 @@ module linuxHosts 'modules/Linux/main.bicep' = if (deployLinuxHosts && linuxHost
     linuxBrokerApiClientId: apiClientId
     scriptSourceRoot: scriptSourceRoot
     disableScreenLock: linuxHostDisableScreenLock
+    desktop: linuxHostDesktop
   }
 }
 
@@ -573,6 +612,7 @@ output apiAppName string = apiAppName
 output apiUrl string = 'https://${apiAppName}.${resolvedAppServiceDomain}/api'
 output taskAppName string = taskAppName
 output keyVaultName string = keyVaultName
+output keyringVaultName string = keyringVaultName
 output containerRegistryName string = containerRegistryName
 output sqlServerName string = sql.outputs.sqlServerName
 output sqlDatabaseName string = sql.outputs.databaseName

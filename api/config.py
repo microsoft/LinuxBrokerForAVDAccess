@@ -66,6 +66,9 @@ GRAPH_API_ENDPOINT = os.environ.get('GRAPH_API_ENDPOINT') or f"{GRAPH_ENDPOINT}/
 DOMAIN_NAME = os.environ.get('DOMAIN_NAME')
 VAULT_URL = os.environ.get('VAULT_URL')
 KEY_NAME = os.environ.get('KEY_NAME')
+# The vault that keeps each user's login keyring key. Without it, checkouts send no key and
+# the hosts behave as before.
+KEYRING_VAULT_URL = (os.environ.get('KEYRING_VAULT_URL') or '').strip() or None
 DB_SERVER = os.environ.get('DB_SERVER')
 DB_DATABASE = os.environ.get('DB_DATABASE')
 DB_USERNAME = os.environ.get('DB_USERNAME')
@@ -134,7 +137,7 @@ LINUX_HOST_SETTING_BOUNDS = {
 }
 
 LINUX_HOST_SETTING_BOOLEANS = {
-    # Defaults disable the lock screen. A locked GNOME greeter inside an xrdp/xpra session
+    # Defaults disable the lock screen. A locked GNOME greeter inside an xrdp session
     # frequently cannot be unlocked after a reconnect, which strands the host's lease.
     # DisableLockScreen also removes the Super+L shortcut and the Lock menu entry, so a user
     # cannot lock manually either.
@@ -201,7 +204,7 @@ ATTENTION_DENIED_MINUTES = 60
 # with any change to those scripts; api/tests checks they agree. Fleet health flags a host
 # whose reported agent or scripts are older. The override exists so an operator can silence
 # the flag during a staged rollout.
-HOST_AGENT_VERSION = '1.1.0'
+HOST_AGENT_VERSION = '1.2.0'
 EXPECTED_HOST_AGENT_VERSION = (os.environ.get('EXPECTED_HOST_AGENT_VERSION') or '').strip() or HOST_AGENT_VERSION
 
 HEARTBEAT_MAX_BYTES = 32 * 1024

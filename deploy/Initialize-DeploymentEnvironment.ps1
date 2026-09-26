@@ -452,6 +452,36 @@ function Ensure-LinuxHostSshKeys {
     }
 }
 
+# Linux host images sold through Azure Marketplace with a purchase plan, by linuxHostOsVersion.
+# Azure creates a VM from one only after the subscription accepts its terms.
+$linuxHostMarketplaceImages = @{
+    'rocky-9' = 'resf:rockylinux-x86_64:9-base:latest'
+}
+
+function Ensure-LinuxHostImageTerms {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$OsVersion,
+        [Parameter(Mandatory = $true)][string]$SubscriptionId
+    )
+
+    $urn = $linuxHostMarketplaceImages[$OsVersion]
+    if (-not $urn) {
+        return
+    }
+
+    $terms = az vm image terms show --urn $urn --subscription $SubscriptionId --output json 2>$null | ConvertFrom-Json
+    if ($LASTEXITCODE -eq 0 -and $terms.accepted) {
+        Write-Host "The Azure Marketplace terms of '$urn' are already accepted in subscription '$SubscriptionId'."
+        return
+    }
+
+    Write-Host "Accepting the Azure Marketplace terms of '$urn' in subscription '$SubscriptionId', which linuxHostOsVersion '$OsVersion' needs."
+    az vm image terms accept --urn $urn --subscription $SubscriptionId --output none
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to accept the Azure Marketplace terms of '$urn' in subscription '$SubscriptionId'. Accept them with 'az vm image terms accept --urn $urn --subscription $SubscriptionId', or set linuxHostOsVersion to alma-9, which has no Marketplace terms."
+    }
+}
+
 function Ensure-DefaultEnvValue {
     param(
         [Parameter(Mandatory = $true)][string]$Key,
@@ -1054,8 +1084,9 @@ Ensure-DefaultEnvValue -Key 'LINUX_HOST_SSH_PUBLIC_KEY' -ValueFactory { '' } | O
 Ensure-DefaultEnvValue -Key 'LINUX_HOST_SSH_PRIVATE_KEY' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostSshPublicKey' -ValueFactory { Get-AzdEnvValue -Key 'LINUX_HOST_SSH_PUBLIC_KEY' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostSshPrivateKey' -ValueFactory { Get-AzdEnvValue -Key 'LINUX_HOST_SSH_PRIVATE_KEY' } | Out-Null
-Ensure-DefaultEnvValue -Key 'linuxHostOsVersion' -ValueFactory { '24_04-lts' } | Out-Null
+Ensure-DefaultEnvValue -Key 'linuxHostOsVersion' -ValueFactory { '9-LVM' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostDisableScreenLock' -ValueFactory { 'true' } | Out-Null
+Ensure-DefaultEnvValue -Key 'linuxHostDesktop' -ValueFactory { 'gnome' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostVmSize' -ValueFactory { 'Standard_D2s_v5' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdVmSize' -ValueFactory { 'Standard_D8s_v5' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdMaxSessionLimit' -ValueFactory { '5' } | Out-Null
@@ -1098,6 +1129,16 @@ if ($deployLinuxHostsValue -eq 'true' -and $linuxHostAuthTypeValue -ne 'SSH') {
 
 if ($deployLinuxHostsValue -eq 'true') {
     [void](Ensure-LinuxHostSshKeys)
+}
+
+if ($deployLinuxHostsValue -eq 'true' -and (ConvertTo-IntParameterValue -Key 'linuxHostCount') -gt 0) {
+    # The Linux hosts deploy to the subscription azd provisions, not to vmSubscriptionId.
+    $linuxHostSubscriptionId = Get-FirstNonEmptyValue -Values @(
+        (Get-AzdEnvValue -Key 'AZURE_SUBSCRIPTION_ID'),
+        $env:AZURE_SUBSCRIPTION_ID,
+        $subscription.id
+    )
+    Ensure-LinuxHostImageTerms -OsVersion (Get-AzdEnvValue -Key 'linuxHostOsVersion') -SubscriptionId $linuxHostSubscriptionId
 }
 
 $apiApp = Ensure-ApiApplication -CloudContext $cloudContext -DisplayName $apiAppDisplayName
@@ -1236,6 +1277,7 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostAuthType' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostAuthType')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostOsVersion' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostOsVersion')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostDisableScreenLock' -Value (ConvertTo-BoolParameterValue -Key 'linuxHostDisableScreenLock' -DefaultValue $true)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostDesktop' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostDesktop').Trim().ToLowerInvariant()
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdHostPoolName' -Value (Get-RequiredAzdEnvValue -Key 'avdHostPoolName')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdSessionHostCount' -Value (ConvertTo-IntParameterValue -Key 'avdSessionHostCount')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'avdMaxSessionLimit' -Value (ConvertTo-IntParameterValue -Key 'avdMaxSessionLimit' -DefaultValue 5)

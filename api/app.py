@@ -44,7 +44,7 @@ except ImportError:  # pragma: no cover - only when the telemetry package is abs
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.170'
+app.config['VERSION'] = '0.171'
 
 # Backs is_member_of_group_cached, which keeps token validation off the Graph API on
 # every request.
@@ -202,6 +202,74 @@ def get_ssh_key_path():
         _ssh_key_state['fetched_at'] = time.monotonic()
         return path
 
+# The account password changes at every checkout, so it cannot protect the user's login
+# keyring. A key the broker keeps in the keyring vault does instead: create-user.sh leaves it
+# where the xrdp session launcher unlocks the keyring with it.
+KEYRING_SECRET_CONTENT_TYPE = 'linuxbroker-keyring'
+KEYRING_KEY_PATTERN = re.compile(r'^[A-Za-z0-9_-]{16,128}$')
+KEYRING_VAULT_BACKOFF_SECONDS = 300
+
+_keyring_lock = threading.Lock()
+_keyring_state = {'client': None, 'unavailable_until': 0.0}
+
+def get_keyring_secret_client():
+    with _keyring_lock:
+        if _keyring_state['client'] is None:
+            # A checkout waits on this client, so it gives up sooner than the SDK's defaults.
+            _keyring_state['client'] = SecretClient(
+                vault_url=KEYRING_VAULT_URL, credential=get_azure_credential(),
+                retry_total=2, connection_timeout=5, read_timeout=10
+            )
+        return _keyring_state['client']
+
+def get_keyring_key(uid, rotate=False):
+    """The key that opens the user's login keyring, or None when there is none to send.
+
+    The secret keyring-<uid> is read from the keyring vault, or created on first use.
+    rotate=True writes a new version, for a profile that was just reset; the older versions
+    stay in the vault so the keyring moved aside with the old profile can still be opened.
+
+    Never raises, because a keyring must not stop anyone signing in. Without
+    KEYRING_VAULT_URL no key is sent, and after a Key Vault error checkouts send none for five
+    minutes rather than each waiting on the vault.
+    """
+    if not KEYRING_VAULT_URL or isinstance(uid, bool) or not isinstance(uid, int):
+        return None
+    if time.monotonic() < _keyring_state['unavailable_until']:
+        return None
+
+    name = f"keyring-{uid}"
+    try:
+        client = get_keyring_secret_client()
+        if not rotate:
+            try:
+                value = client.get_secret(name).value
+            except Exception as e:
+                if getattr(e, 'status_code', None) != 404:
+                    raise
+                value = None
+            if value and KEYRING_KEY_PATTERN.match(value):
+                return value
+            if value:
+                # No host was ever sent this value, so replacing it loses nothing.
+                logger.warning("The keyring key %s in the keyring vault is not a valid key; a new version replaces it.", name)
+        value = secrets.token_urlsafe(32)
+        client.set_secret(name, value, content_type=KEYRING_SECRET_CONTENT_TYPE)
+        return value
+    except Exception as e:
+        if getattr(e, 'status_code', None) == 409:
+            # Only this user is affected, so other checkouts keep using the vault.
+            logger.warning(
+                "Could not write the keyring key %s: a deleted secret with that name must be recovered or purged first.", name
+            )
+            return None
+        _keyring_state['unavailable_until'] = time.monotonic() + KEYRING_VAULT_BACKOFF_SECONDS
+        logger.warning(
+            "Could not use the keyring key %s in the keyring vault, so checkouts send no keyring key for the next %d minutes: %s",
+            name, KEYRING_VAULT_BACKOFF_SECONDS // 60, e
+        )
+        return None
+
 _graph_token_lock = threading.Lock()
 _graph_token_state = {'token': None, 'expires_at': 0.0}
 
@@ -246,6 +314,8 @@ def reset_caches():
         _graph_token_state.update({'token': None, 'expires_at': 0.0})
     with _ssh_key_lock:
         _ssh_key_state.update({'path': None, 'fetched_at': 0.0})
+    with _keyring_lock:
+        _keyring_state.update({'client': None, 'unavailable_until': 0.0})
     _checkout_event_state['missing_logged'] = False
     cache.clear()
 
@@ -584,13 +654,15 @@ def run_remote_command(hostname: str, command: str, stdin_input: str = None, tim
     )
     return result, host_fqdn
 
-def create_or_update_remote_user(hostname: str, username: str, password: str, lease_id: str) -> bool:
+def create_or_update_remote_user(hostname: str, username: str, password: str, lease_id: str, rotate_keyring_key: bool = False) -> bool:
     """Provision the user on the host in a single SSH session.
 
     create-user.sh --password-stdin creates the account, mounts the home, writes the lease,
-    adds the remote access groups and sets the password read from stdin. A host still
-    running the previous script rejects the extra argument with its usage text before
-    changing anything, and is provisioned the old way instead.
+    adds the remote access groups and sets the password read from stdin. The user's login
+    keyring key follows on a second line when the keyring vault is configured; a script that
+    predates it reads only the first. A host still running the previous script rejects the
+    extra argument with its usage text before changing anything, and is provisioned the old
+    way instead.
     """
     normalized_lease_id = normalize_lease_id(lease_id)
     if not normalized_lease_id:
@@ -611,8 +683,13 @@ def create_or_update_remote_user(hostname: str, username: str, password: str, le
             lease_id=shlex.quote(normalized_lease_id)
         )
 
-        # Sent over stdin so the credential never appears in the remote process list or auth logs.
-        result, host_fqdn = run_remote_command(hostname, create_user_command, stdin_input=f"{password}\n")
+        # Sent over stdin so neither secret appears in the remote process list or auth logs.
+        stdin_input = f"{password}\n"
+        keyring_key = get_keyring_key(uid, rotate=rotate_keyring_key)
+        if keyring_key:
+            stdin_input += f"{keyring_key}\n"
+
+        result, host_fqdn = run_remote_command(hostname, create_user_command, stdin_input=stdin_input)
         if result.returncode == 0 and CREATE_USER_RESULT_MARKER in (result.stdout or ''):
             return True
 
@@ -2063,11 +2140,13 @@ def _checkout_vm(event):
             return error_response("No hostname or LeaseId found for the checked-out VM.", 500)
 
         # A requested profile reset is applied on a new assignment only, before create-user.sh
-        # mounts the home. It never stops the user signing in.
+        # mounts the home. It never stops the user signing in. The fresh profile gets a new
+        # keyring key; the old one still opens the keyring kept with the old profile.
+        rotate_keyring_key = False
         if checked_out_vm.get('ProfileResetRequested') and checked_out_vm.get('CheckoutType') == 'Assigned':
-            apply_pending_profile_reset(vmid, vm_hostname, username)
+            rotate_keyring_key = apply_pending_profile_reset(vmid, vm_hostname, username) == 'profile-reset'
 
-        if not create_or_update_remote_user(vm_hostname, username, user_password, lease_id):
+        if not create_or_update_remote_user(vm_hostname, username, user_password, lease_id, rotate_keyring_key):
             # create-user.sh may already have written the lease and mounted the home. The VM
             # goes back CleanupPending, so it cannot be handed to anyone else until the user
             # has actually been removed; the scheduled sweep retries if this attempt fails.
@@ -4333,7 +4412,7 @@ HEARTBEAT_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
 HEARTBEAT_SCRIPTS = (
     'release-session.sh', 'logind-session-watcher.sh', 'xrdp-who-xorg.sh',
     'create-user.sh', 'manage-lease.sh', 'apply-host-settings.sh', 'session-control.sh',
-    'patch-host.sh',
+    'patch-host.sh', 'xrdp-startwm.sh',
 )
 HEARTBEAT_DESKTOPS = ('gnome', 'xfce', 'mate', 'kde', 'other', 'none', 'unknown')
 HEARTBEAT_SESSION_STATES = ('active', 'disconnected', 'unknown')

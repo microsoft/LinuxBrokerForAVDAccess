@@ -143,16 +143,25 @@ param linuxHostAuthType string = 'SSH'
 param linuxHostSshPublicKey string = ''
 
 @allowed([
-  '7-LVM'
   '8-LVM'
   '9-LVM'
+  'rocky-9'
+  'alma-9'
   '24_04-lts'
 ])
-@description('Linux host OS image SKU.')
-param linuxHostOsVersion string = '24_04-lts'
+@description('Linux host image: 8-LVM (RHEL 8), 9-LVM (RHEL 9), rocky-9 (Rocky Linux 9), alma-9 (AlmaLinux 9) or 24_04-lts (Ubuntu 24.04). Rocky Linux 9 is a Marketplace image: the subscription must accept its terms once and be allowed to buy Marketplace images, even though it costs nothing.')
+param linuxHostOsVersion string = '9-LVM'
 
-@description('Disable the GNOME screen saver and screen lock on RHEL hosts. Enabled by default because a locked greeter inside an xrdp/xpra session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control. Has no effect on the Ubuntu server image, which has no desktop.')
+@description('Disable the screen saver and screen lock on the Linux hosts, whichever desktop they run. Enabled by default because a locked GNOME greeter inside an xrdp session often cannot be unlocked after a reconnect, which strands the host lease. Set to false to keep the lock screen, for example to satisfy a STIG or CIS idle-lock control.')
 param linuxHostDisableScreenLock bool = true
+
+@allowed([
+  'gnome'
+  'xfce'
+  'mate'
+])
+@description('Desktop the Linux hosts run in xrdp sessions: gnome (the RHEL Server with GUI group, or the Ubuntu desktop), xfce or mate. Changing it on existing hosts runs their bootstrap again at the next provision, so drain them first.')
+param linuxHostDesktop string = 'gnome'
 
 @description('AVD host pool name.')
 param avdHostPoolName string = ''
@@ -236,6 +245,7 @@ module resources 'main.resources.bicep' = {
     linuxHostSshPublicKey: linuxHostSshPublicKey
     linuxHostOsVersion: linuxHostOsVersion
     linuxHostDisableScreenLock: linuxHostDisableScreenLock
+    linuxHostDesktop: linuxHostDesktop
     avdHostPoolName: avdHostPoolName
     avdSessionHostCount: avdSessionHostCount
     avdMaxSessionLimit: avdMaxSessionLimit
@@ -251,6 +261,7 @@ output apiAppName string = resources.outputs.apiAppName
 output apiUrl string = resources.outputs.apiUrl
 output taskAppName string = resources.outputs.taskAppName
 output keyVaultName string = resources.outputs.keyVaultName
+output keyringVaultName string = resources.outputs.keyringVaultName
 output containerRegistryName string = resources.outputs.containerRegistryName
 output sqlServerName string = resources.outputs.sqlServerName
 output sqlDatabaseName string = resources.outputs.sqlDatabaseName
