@@ -580,7 +580,7 @@ warn_idle_user() {
 
     if command -v notify-send >/dev/null 2>&1 && [ -n "$user_id" ] && command -v runuser >/dev/null 2>&1; then
         if DISPLAY="$display" XAUTHORITY="$xauthority" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$user_id/bus" \
-            runuser -u "$username" -- notify-send "Idle session warning" "$message" >/dev/null 2>&1; then
+            runuser -u "$username" -- notify-send --app-name="Linux Broker" "Idle session warning" "$message" >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -593,16 +593,40 @@ warn_idle_user() {
     return 1
 }
 
+# Prints the PIDs holding the client end of each connection to a session's display socket.
+# ss prints a Unix socket's path only on the listening end, which is Xorg's, and shows the
+# client end as "* <inode> * <peer inode>". So the client end is the socket whose inode is the
+# peer inode of one of Xorg's connections on the display socket.
+xrdp_connection_pids() {
+    local display_number="$1"
+    local xorg_pid="$2"
+
+    # Columns: Netid State Recv-Q Send-Q Local-Address Port Peer-Address Port Process
+    ss -xp 2>/dev/null | awk -v socket="/xrdp_display_${display_number}\$" -v owner="pid=${xorg_pid}," '
+        { holders[$6] = $0 }
+        $5 ~ socket && index($0, owner) { peers[$8] = 1 }
+        END {
+            for (inode in peers) {
+                rest = holders[inode]
+                while (match(rest, /pid=[0-9]+/)) {
+                    print substr(rest, RSTART + 4, RLENGTH - 4)
+                    rest = substr(rest, RSTART + RLENGTH)
+                }
+            }
+        }' | sort -u
+}
+
 # Drops the client connection while leaving Xorg running, so the session survives and the
-# user can reconnect inside the grace period. Only processes named xrdp that hold the
-# session's display socket are terminated, which is the same signal xrdp-who-xorg.sh uses to
-# decide whether a session is connected.
+# user can reconnect inside the grace period. Only the xrdp process holding the other end of
+# the session's display connection is terminated, and closing that connection is the same
+# signal xrdp-who-xorg.sh uses to decide that a session is disconnected.
 disconnect_session() {
     local username="$1"
     local xorg_pid="$2"
     local display
     local display_number
     local pid
+    local parent_pid
     local process_name
     local disconnected="false"
 
@@ -623,19 +647,20 @@ disconnect_session() {
             continue
         fi
 
+        # Each connection has its own process, forked from the xrdp daemon. The daemon itself
+        # is never signalled: with fork=false it carries every session on the host.
+        parent_pid=$(ps -p "$pid" -o ppid= 2>/dev/null | xargs)
+        if [ -z "$parent_pid" ] || [ "$(ps -p "$parent_pid" -o comm= 2>/dev/null | xargs)" != "xrdp" ]; then
+            continue
+        fi
+
         if kill -TERM "$pid" 2>/dev/null; then
             disconnected="true"
             log "Disconnected idle xrdp connection $pid for user $username."
         else
             log "ERROR: Failed to disconnect xrdp connection $pid for user $username."
         fi
-    done < <(
-        ss -xp 2>/dev/null \
-            | grep -E "xrdp_display_${display_number}([^0-9]|$)" \
-            | grep -oE 'pid=[0-9]+' \
-            | cut -d= -f2 \
-            | sort -u
-    )
+    done < <(xrdp_connection_pids "$display_number" "$xorg_pid")
 
     if [ "$disconnected" != "true" ]; then
         log "No xrdp connection process was found for user $username on display $display."

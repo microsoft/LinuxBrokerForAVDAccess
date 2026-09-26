@@ -150,6 +150,80 @@ INFO
 run_for_script "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh" agent
 aggregation_for_script "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh" agent
 
+# ss prints a Unix socket's path only on the listening end, which is Xorg's, so an idle
+# disconnect finds the xrdp end of the display connection by its inode. The ss lines are
+# trimmed from RHEL 8 with xrdp 0.10; Ubuntu with xrdp 0.9 prints the same shape.
+idle_disconnect_for_script() {
+    local script="$1"
+    local label="$2"
+    local signalled="$WORK_DIR/signalled-$label"
+
+    reset_work
+    # shellcheck source=/dev/null
+    . "$script"
+    LOG_FILE="$WORK_DIR/idle-$label.log"
+    : > "$signalled"
+
+    get_session_display() { echo ":12"; }
+    # 100 is the xrdp daemon. 200 and 300 are the connection processes it forked for this
+    # session and for the one on display :120, and the daemon shares its stdout with 200.
+    ss() {
+        cat <<'SS'
+Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+u_str ESTAB 0 0 /run/xrdp/2008/xrdp_display_12 669282 * 669904 users:(("Xorg",pid=500,fd=7))
+u_str ESTAB 0 0 * 669904 * 669282 users:(("xrdp",pid=200,fd=27))
+u_str ESTAB 0 0 * 165288 * 165899 users:(("xrdp",pid=200,fd=2),("xrdp",pid=100,fd=2))
+u_str ESTAB 0 0 /run/xrdp/2009/xrdp_display_120 700001 * 700002 users:(("Xorg",pid=600,fd=7))
+u_str ESTAB 0 0 * 700002 * 700001 users:(("xrdp",pid=300,fd=27))
+SS
+    }
+    # Answers "ps -p PID -o comm=" and "ps -p PID -o ppid=".
+    ps() {
+        case "$2:$4" in
+            100:comm=|200:comm=|300:comm=) echo xrdp ;;
+            500:comm=|600:comm=) echo Xorg ;;
+            1:comm=) echo systemd ;;
+            100:ppid=) echo 1 ;;
+            200:ppid=|300:ppid=) echo 100 ;;
+            *) return 1 ;;
+        esac
+    }
+    kill() { echo "${*: -1}" >> "$signalled"; }
+
+    disconnect_session bob 500 || fail "$label found no xrdp connection for display :12"
+    assert_eq "$(cat "$signalled")" "200" "$label signals only the connection process of display :12"
+    assert_file_contains "$LOG_FILE" "Disconnected idle xrdp connection 200 for user bob."
+
+    # With fork=false the daemon carries every connection itself, so it is left alone.
+    ss() {
+        printf '%s\n' \
+            'u_str ESTAB 0 0 /run/xrdp/2008/xrdp_display_12 669282 * 669904 users:(("Xorg",pid=500,fd=7))' \
+            'u_str ESTAB 0 0 * 669904 * 669282 users:(("xrdp",pid=100,fd=27))'
+    }
+    : > "$signalled"
+    if disconnect_session bob 500; then
+        fail "$label disconnected through the xrdp daemon"
+    fi
+    assert_eq "$(cat "$signalled")" "" "$label leaves the xrdp daemon alone"
+    assert_file_contains "$LOG_FILE" "No xrdp connection process was found for user bob on display :12."
+
+    # The idle warning goes to the session's display as its owner, under the same name as the
+    # other broker notifications.
+    printf '#!/bin/bash\nexit 0\n' > "$SHIM_DIR/notify-send"
+    chmod +x "$SHIM_DIR/notify-send"
+    id() { echo 3102; }
+    get_session_xauthority() { echo /home/bob/.Xauthority; }
+    runuser() { printf '%s DISPLAY=%s DBUS=%s\n' "$*" "$DISPLAY" "$DBUS_SESSION_BUS_ADDRESS" >> "$WORK_DIR/runuser-$label"; }
+    warn_idle_user bob 500 90 || fail "$label idle warning was not delivered"
+    assert_file_contains "$WORK_DIR/runuser-$label" "bob -- notify-send --app-name=Linux Broker Idle session warning Your session has been idle and will be disconnected in 90 seconds."
+    assert_file_contains "$WORK_DIR/runuser-$label" "DISPLAY=:12 DBUS=unix:path=/run/user/3102/bus"
+    rm -f "$SHIM_DIR/notify-send"
+
+    unset -f get_session_display get_session_xauthority ss ps kill id runuser
+}
+
+idle_disconnect_for_script "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh" agent
+
 # The agent runs on every distribution. jq is put back when it is missing, with the
 # distribution's package manager.
 jq_install_for() {
