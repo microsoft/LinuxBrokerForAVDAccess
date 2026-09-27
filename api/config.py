@@ -235,7 +235,7 @@ AVD_HOST_SCRIPT_VERSION = '2.0.0'
 # with any change to those scripts; api/tests checks they agree. Fleet health flags a host
 # whose reported agent or scripts are older. The override exists so an operator can silence
 # the flag during a staged rollout.
-HOST_AGENT_VERSION = '1.2.0'
+HOST_AGENT_VERSION = '1.3.0'
 EXPECTED_HOST_AGENT_VERSION = (os.environ.get('EXPECTED_HOST_AGENT_VERSION') or '').strip() or HOST_AGENT_VERSION
 
 HEARTBEAT_MAX_BYTES = 32 * 1024

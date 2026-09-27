@@ -7,7 +7,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # The Linux Broker host agent version. Every script in linux_host/ declares the same value
 # and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
-LINUXBROKER_AGENT_VERSION="1.2.0"
+LINUXBROKER_AGENT_VERSION="1.3.0"
 
 LOG_FILE="/var/log/release-session.log"
 # The users signed in to the host must not read the log, which names them. Azure Monitor Agent may
