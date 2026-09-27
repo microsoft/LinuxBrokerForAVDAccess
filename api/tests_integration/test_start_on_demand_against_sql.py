@@ -123,8 +123,10 @@ def test_the_waiting_user_is_given_the_host_as_soon_as_it_answers(client, db, re
     assert (stats["Total"], stats["Assigned"], stats["Starting"]) == (1, 1, 2)
     assert (stats["Waits"], stats["WaitsServed"], stats["WaitingNow"]) == (1, 1, 0)
     assert 85 <= stats["WaitP50Seconds"] <= 120
+    # Alice asked twice while she waited and counts once in each bucket she asked in: one bucket,
+    # or two when a 15-minute boundary fell during her 90-second wait.
     series = client.get("/api/metrics/utilization").get_json()["Series"]
-    assert sum(point["Waited"] for point in series) == 1
+    assert [point["Waited"] for point in series if point["Waited"]] in ([1], [1, 1])
 
 
 def test_starts_for_waiting_users_stop_at_the_pending_limit(client, db, remote, compute, probes):
