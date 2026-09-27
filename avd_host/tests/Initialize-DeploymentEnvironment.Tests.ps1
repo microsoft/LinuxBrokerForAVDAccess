@@ -23,7 +23,7 @@ BeforeAll {
             'Get-AzdEnvValue', 'Get-FirstNonEmptyValue', 'ConvertTo-IntParameterValue', 'Get-PropertyValue', 'Get-VmTagValue',
             'ConvertTo-TimeOfDayParameterValue', 'ConvertTo-PercentParameterValue', 'Assert-AvdScalingPlanTimeOrder',
             'ConvertTo-PositiveIntParameterValue', 'ConvertTo-EmailListParameterValue',
-            'Resolve-PortalSessionStore', 'ConvertTo-PortalRedisSkuParameterValue', 'Resolve-AppServicePlanCapacity',
+            'Resolve-PortalSessionStore', 'ConvertTo-PortalRedisSkuParameterValue', 'ConvertTo-PortalRedisLocationParameterValue', 'Resolve-AppServicePlanCapacity',
             'Resolve-WindowsTimeZoneId', 'Get-HostPowerStateSnapshot', 'Resolve-AvdServicePrincipalObjectId',
             'Invoke-ArmGetRequest', 'Get-AvdAutoscaleRoleState', 'Test-ActionPermitted', 'Test-CanAssignSubscriptionRole',
             'Resolve-AvdAutoscaleRolePlan')) {
@@ -405,6 +405,27 @@ Describe 'Initialize-DeploymentEnvironment.ps1' {
             $script:AzdValues['portalRedisSku'] = $Value
 
             { ConvertTo-PortalRedisSkuParameterValue -CloudName $Cloud } | Should -Throw -ExpectedMessage "*'portalRedisSku' must be an $Service size*'$Value'*"
+        }
+
+        It 'reads the session cache region <Value> as <Expected>' -TestCases @(
+            @{ Value = ''; Expected = '' }
+            @{ Value = 'eastus'; Expected = 'eastus' }
+            @{ Value = ' East US 2 '; Expected = 'eastus2' }
+            @{ Value = 'USGovVirginia'; Expected = 'usgovvirginia' }
+        ) {
+            $script:AzdValues['portalRedisLocation'] = $Value
+
+            ConvertTo-PortalRedisLocationParameterValue | Should -BeExactly $Expected
+        }
+
+        It 'refuses the session cache region <Value>' -TestCases @(
+            @{ Value = 'east-us' }
+            @{ Value = '2eastus' }
+            @{ Value = 'eastus;x' }
+        ) {
+            $script:AzdValues['portalRedisLocation'] = $Value
+
+            { ConvertTo-PortalRedisLocationParameterValue } | Should -Throw -ExpectedMessage "*'portalRedisLocation' must be an Azure region name*'$Value'*"
         }
 
         It 'reads the plan capacity <Value> as <Expected>' -TestCases @(
@@ -981,7 +1002,7 @@ Describe 'The deployment settings and the Bicep they feed' {
     }
 
     It 'writes the plan capacity and portal session parameters and passes them on' {
-        foreach ($name in @('appServicePlanCapacity', 'portalSessionStore', 'portalRedisSku')) {
+        foreach ($name in @('appServicePlanCapacity', 'portalSessionStore', 'portalRedisSku', 'portalRedisLocation')) {
             $script:ScriptParameters | Should -Contain $name
             $script:MainBicepParameters | Should -Contain $name
             $script:MainBicep | Should -Match "(?m)^\s+${name}: ${name}$"
@@ -990,7 +1011,19 @@ Describe 'The deployment settings and the Bicep they feed' {
 
         $script:ResourcesBicep | Should -Match '(?m)^\s+capacity: appServicePlanCapacity$'
         $script:ResourcesBicep | Should -Match '(?m)^\s+skuName: portalRedisSku$'
+        $script:ResourcesBicep | Should -Match ([regex]::Escape('cacheLocation: empty(portalRedisLocation) ? location : portalRedisLocation'))
         (Read-RepositoryText -RelativePath 'deploy\bicep\modules\core\app-service-plan.bicep') | Should -Match '(?m)^\s+capacity: capacity$'
+    }
+
+    It 'puts the session cache in its own region but its private endpoint in the virtual network''s' {
+        $redisBicep = Read-RepositoryText -RelativePath 'deploy\bicep\modules\core\redis-session-store.bicep'
+        $redisBicep | Should -Match '(?m)^param cacheLocation string = location$'
+        foreach ($resource in @('managedRedis', 'cache')) {
+            $block = [regex]::Match($redisBicep, "(?s)\nresource $resource '[^']+' = if \([^)]*\) \{.*?\n\}").Value
+            $block | Should -Match '(?m)^  location: cacheLocation$'
+        }
+        $endpoint = [regex]::Match($redisBicep, "(?s)\nresource privateEndpoint '[^']+' = \{.*?\n\}").Value
+        $endpoint | Should -Match '(?m)^  location: location$'
     }
 
     It 'allows the plan capacities the script allows' {

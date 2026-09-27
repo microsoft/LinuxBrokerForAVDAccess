@@ -132,6 +132,9 @@ param portalSessionStore string = 'redis'
 @description('Size of the portal session cache. Leave empty for the default: Balanced_B0 for Azure Managed Redis, Standard_C1 for Azure Cache for Redis.')
 param portalRedisSku string = ''
 
+@description('Region of the portal session cache, such as eastus. Leave empty, the default, for the deployment\'s region. Set it where that region does not offer the cache or has no capacity for it: the portal reaches a cache in another region through the same private endpoint in the virtual network.')
+param portalRedisLocation string = ''
+
 @description('Deploy Linux broker host VMs.')
 param deployLinuxHosts bool = false
 
@@ -339,6 +342,7 @@ module resources 'main.resources.bicep' = {
     appServicePlanCapacity: appServicePlanCapacity
     portalSessionStore: portalSessionStore
     portalRedisSku: portalRedisSku
+    portalRedisLocation: portalRedisLocation
     deployLinuxHosts: deployLinuxHosts
     deployAvdHosts: deployAvdHosts
     linuxHostVmNamePrefix: linuxHostVmNamePrefix

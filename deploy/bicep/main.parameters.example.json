@@ -20,6 +20,9 @@
     "portalRedisSku": {
       "value": ""
     },
+    "portalRedisLocation": {
+      "value": ""
+    },
     "appName": {
       "value": "linuxbroker"
     },

@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "9535906777353691330"
+      "templateHash": "18348097897885014198"
     }
   },
   "parameters": {
@@ -282,6 +282,13 @@
       "defaultValue": "",
       "metadata": {
         "description": "Size of the portal session cache. Leave empty for the default: Balanced_B0 for Azure Managed Redis, Standard_C1 for Azure Cache for Redis."
+      }
+    },
+    "portalRedisLocation": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Region of the portal session cache, such as eastus. Leave empty, the default, for the deployment's region. Set it where that region does not offer the cache or has no capacity for it: the portal reaches a cache in another region through the same private endpoint in the virtual network."
       }
     },
     "deployLinuxHosts": {
@@ -738,6 +745,9 @@
           "portalRedisSku": {
             "value": "[parameters('portalRedisSku')]"
           },
+          "portalRedisLocation": {
+            "value": "[parameters('portalRedisLocation')]"
+          },
           "deployLinuxHosts": {
             "value": "[parameters('deployLinuxHosts')]"
           },
@@ -821,7 +831,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "5634257958381046464"
+              "templateHash": "11506867499235198244"
             }
           },
           "parameters": {
@@ -1017,6 +1027,13 @@
               "defaultValue": "",
               "metadata": {
                 "description": "Size of the portal session cache. Leave empty for the default."
+              }
+            },
+            "portalRedisLocation": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Region of the portal session cache. Leave empty for the deployment's region."
               }
             },
             "deployLinuxHosts": {
@@ -3389,6 +3406,7 @@
                   "location": {
                     "value": "[parameters('location')]"
                   },
+                  "cacheLocation": "[if(empty(parameters('portalRedisLocation')), createObject('value', parameters('location')), createObject('value', parameters('portalRedisLocation')))]",
                   "tags": {
                     "value": "[parameters('tags')]"
                   },
@@ -3412,7 +3430,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "7516536256275555487"
+                      "templateHash": "11134019957083360765"
                     }
                   },
                   "parameters": {
@@ -3436,7 +3454,17 @@
                     },
                     "location": {
                       "type": "string",
-                      "defaultValue": "[resourceGroup().location]"
+                      "defaultValue": "[resourceGroup().location]",
+                      "metadata": {
+                        "description": "Region of the private endpoint, which must be the virtual network's region."
+                      }
+                    },
+                    "cacheLocation": {
+                      "type": "string",
+                      "defaultValue": "[parameters('location')]",
+                      "metadata": {
+                        "description": "Region of the cache. Defaults to the virtual network's region. The portal reaches a cache in another region through the same private endpoint."
+                      }
                     },
                     "tags": {
                       "type": "object",
@@ -3480,7 +3508,7 @@
                       "type": "Microsoft.Cache/redisEnterprise",
                       "apiVersion": "2025-07-01",
                       "name": "[parameters('name')]",
-                      "location": "[parameters('location')]",
+                      "location": "[parameters('cacheLocation')]",
                       "tags": "[parameters('tags')]",
                       "sku": {
                         "name": "[variables('effectiveSku')]"
@@ -3511,7 +3539,7 @@
                       "type": "Microsoft.Cache/redis",
                       "apiVersion": "2024-11-01",
                       "name": "[parameters('name')]",
-                      "location": "[parameters('location')]",
+                      "location": "[parameters('cacheLocation')]",
                       "tags": "[parameters('tags')]",
                       "properties": {
                         "sku": {

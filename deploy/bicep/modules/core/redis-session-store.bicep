@@ -9,7 +9,12 @@ param kind string
 @minLength(1)
 @maxLength(60)
 param name string
+
+@description('Region of the private endpoint, which must be the virtual network\'s region.')
 param location string = resourceGroup().location
+
+@description('Region of the cache. Defaults to the virtual network\'s region. The portal reaches a cache in another region through the same private endpoint.')
+param cacheLocation string = location
 param tags object = {}
 
 @description('Leave empty for the default size: Balanced_B0 for Azure Managed Redis, Standard_C1 for Azure Cache for Redis. Azure Cache for Redis sizes are written <tier>_<family><capacity>, such as Standard_C2 or Premium_P1.')
@@ -36,7 +41,7 @@ var managedPort = 10000
 // its virtual network integration.
 resource managedRedis 'Microsoft.Cache/redisEnterprise@2025-07-01' = if (managed) {
   name: name
-  location: location
+  location: cacheLocation
   tags: tags
   sku: {
     name: effectiveSku
@@ -63,7 +68,7 @@ resource managedRedisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-07
 
 resource cache 'Microsoft.Cache/redis@2024-11-01' = if (!managed) {
   name: name
-  location: location
+  location: cacheLocation
   tags: tags
   properties: {
     sku: {

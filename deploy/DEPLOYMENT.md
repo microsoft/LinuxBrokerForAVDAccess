@@ -102,6 +102,7 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `appServicePlanCapacity`: instances of the App Service plan, from 1 to 30. Defaults to `1`. The portal, the API and the task function run on every instance. See [More than one instance](#more-than-one-instance).
 - `portalSessionStore`: `redis` or `filesystem`. Defaults to `redis`, or to `filesystem` when `azureCloudName` is `AzureCustom`. Where the portal keeps sign-in sessions: in a Redis cache that every portal instance shares, or on each instance's disk. See [Portal And API Scale-Out](#portal-and-api-scale-out).
 - `portalRedisSku`: size of that cache. Leave empty, the default, for `Balanced_B0` (Azure Managed Redis) in the public cloud or `Standard_C1` (Azure Cache for Redis) in Azure Government. See [Size and cost](#size-and-cost).
+- `portalRedisLocation`: region of that cache, such as `eastus`. Leave empty, the default, for `AZURE_LOCATION`. Set it where that region does not offer the cache or has no capacity for it. See [Size and cost](#size-and-cost).
 - `allowedClientIp`: your public client IP for SQL bootstrap from the local machine.
 - `deployLinuxHosts`: `true` or `false`.
 - `deployAvdHosts`: `true` or `false`.
@@ -798,14 +799,19 @@ In the public cloud, name an Azure Managed Redis size, such as `Balanced_B1` or 
 Azure Government, name an Azure Cache for Redis size, written `<tier>_<family><capacity>`:
 `Basic_C0` to `Basic_C6`, `Standard_C0` to `Standard_C6`, or `Premium_P1` to `Premium_P5`.
 
-Azure Managed Redis isn't offered in every region. This lists the regions that offer it:
+Azure Managed Redis isn't offered in every region, and a region that offers it can run out of room
+for new caches, which Azure reports as `InsufficientCapacity`. This lists the regions that offer it:
 
 ```powershell
 az provider show --namespace Microsoft.Cache --query "resourceTypes[?resourceType=='redisEnterprise'].locations | [0]" --output tsv
 ```
 
-Where it isn't offered, set `portalSessionStore` to `filesystem`, and keep `appServicePlanCapacity`
-at 1 or rely on ARR affinity.
+Where the deployment's region doesn't offer it or has no room, set `portalRedisLocation` to a nearby
+region that does, such as `eastus` for a deployment in `eastus2`. Only the cache moves: its private
+endpoint stays in the virtual network, so the portal still reaches it privately, and each request
+to it crosses between the regions, which adds a few milliseconds and is billed as data transfer.
+Otherwise set `portalSessionStore` to `filesystem`, and keep `appServicePlanCapacity` at 1 or rely
+on ARR affinity.
 
 ### More than one instance
 
@@ -1481,6 +1487,23 @@ azd env set avdScalingPlanTimeZone "Eastern Standard Time"
 ```
 
 `preprovision` passes a value it does not know to the deployment unchanged, and Azure refuses the scaling plan if Azure does not know it either.
+
+### A deployment failed with `InsufficientCapacity` on the Redis cache
+
+Azure had no room for the portal's session cache, at that size, in that region, and leaves the
+cache in a failed state. `azd provision` again tries the same cache again, which works once the
+region has room. To use another size or region instead, first delete the failed cache, because
+Azure refuses to resize a cache that failed to create, and a cache can't change region:
+
+```powershell
+az resource delete --resource-group <resource-group> --name <cache-name> --resource-type Microsoft.Cache/redisEnterprise
+```
+
+In Azure Government, the type of the cache is `Microsoft.Cache/redis`.
+
+Then set `portalRedisSku` or `portalRedisLocation`, as described in [Size and cost](#size-and-cost),
+and run `azd provision` again. Everything else in the failed deployment is in place, except the
+changes to the portal app and the AVD scaling plan, which wait for the cache.
 
 ### Home directories are not on the NFS share
 

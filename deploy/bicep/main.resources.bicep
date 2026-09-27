@@ -84,6 +84,9 @@ param portalSessionStore string = 'redis'
 
 @description('Size of the portal session cache. Leave empty for the default.')
 param portalRedisSku string = ''
+
+@description('Region of the portal session cache. Leave empty for the deployment\'s region.')
+param portalRedisLocation string = ''
 param deployLinuxHosts bool = false
 param deployAvdHosts bool = false
 param linuxHostVmNamePrefix string = 'lnxhost'
@@ -521,6 +524,7 @@ module portalRedis 'modules/core/redis-session-store.bicep' = if (usePortalRedis
     kind: cloudProfile.portalRedisKind
     name: portalRedisName
     location: location
+    cacheLocation: empty(portalRedisLocation) ? location : portalRedisLocation
     tags: tags
     skuName: portalRedisSku
     virtualNetworkId: networking.outputs.vnetId

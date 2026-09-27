@@ -978,6 +978,23 @@ function ConvertTo-PortalRedisSkuParameterValue {
     return $sku
 }
 
+# The region of the portal's session cache, when it cannot be the deployment's, for example where
+# Azure reports InsufficientCapacity for the cache there. Written as az lists regions, such as
+# eastus, so a display name like 'East US' is folded into that form.
+function ConvertTo-PortalRedisLocationParameterValue {
+    $value = Get-AzdEnvValue -Key 'portalRedisLocation'
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return ''
+    }
+
+    $location = ($value -replace '\s', '').ToLowerInvariant()
+    if ($location -notmatch '^[a-z][a-z0-9]*\z') {
+        throw "azd environment value 'portalRedisLocation' must be an Azure region name, such as eastus or centralus, but was '$value'."
+    }
+
+    return $location
+}
+
 # Instances of the App Service plan, which the portal, the API and the task function all run on.
 function Resolve-AppServicePlanCapacity {
     param(
@@ -1743,6 +1760,7 @@ Ensure-DefaultEnvValue -Key 'appServicePlanSku' -ValueFactory { 'P2mv3' } | Out-
 Ensure-DefaultEnvValue -Key 'appServicePlanCapacity' -ValueFactory { '1' } | Out-Null
 Ensure-DefaultEnvValue -Key 'portalSessionStore' -ValueFactory { if ($cloudContext.Name -eq 'AzureCustom') { 'filesystem' } else { 'redis' } } | Out-Null
 Ensure-DefaultEnvValue -Key 'portalRedisSku' -ValueFactory { '' } | Out-Null
+Ensure-DefaultEnvValue -Key 'portalRedisLocation' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostAdminLoginName' -ValueFactory { 'avdadmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'domainName' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'nfsShare' -ValueFactory { '' } | Out-Null
@@ -1967,8 +1985,10 @@ if ($avdSessionHostsDeployed) {
 
 $portalSessionStore = Resolve-PortalSessionStore -CloudName $cloudContext.Name
 $portalRedisSku = ''
+$portalRedisLocation = ''
 if ($portalSessionStore -eq 'redis') {
     $portalRedisSku = ConvertTo-PortalRedisSkuParameterValue -CloudName $cloudContext.Name
+    $portalRedisLocation = ConvertTo-PortalRedisLocationParameterValue
 }
 $appServicePlanCapacity = Resolve-AppServicePlanCapacity -PortalSessionStore $portalSessionStore -SqlDatabaseSkuName (Get-AzdEnvValue -Key 'sqlDatabaseSkuName')
 
@@ -1980,6 +2000,9 @@ if ($portalSessionStore -eq 'redis') {
     }
     if ($portalRedisSku) {
         $portalSessionStoreState += " ($portalRedisSku)"
+    }
+    if ($portalRedisLocation) {
+        $portalSessionStoreState += " in $portalRedisLocation"
     }
 }
 Write-Host "Portal sessions: kept $portalSessionStoreState. App Service plan instances: $appServicePlanCapacity."
@@ -2022,6 +2045,7 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'appServicePlanCapacity' -Value $appServicePlanCapacity
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'portalSessionStore' -Value $portalSessionStore
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'portalRedisSku' -Value $portalRedisSku
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'portalRedisLocation' -Value $portalRedisLocation
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'deployLinuxHosts' -Value (ConvertTo-BoolParameterValue -Key 'deployLinuxHosts')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'deployAvdHosts' -Value (ConvertTo-BoolParameterValue -Key 'deployAvdHosts')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostVmNamePrefix' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostVmNamePrefix')
