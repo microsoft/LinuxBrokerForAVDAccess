@@ -8,7 +8,8 @@
 #
 # Clearing a lease also unmounts the user's NFS-backed home. The broker deletes the account
 # with userdel -r straight afterwards, which would otherwise delete the profile on the share
-# instead of the empty local mount point.
+# instead of the empty local mount point. It removes the user's keyring key and local cache
+# too, which userdel -r would leave behind.
 
 set -u
 
@@ -19,6 +20,8 @@ LINUXBROKER_AGENT_VERSION="1.2.0"
 LEASE_DIRECTORY="/var/lib/linuxbroker-release-session/leases"
 # Where create-user.sh leaves the key that opens each user's login keyring.
 KEYRING_KEY_DIRECTORY="/run/linuxbroker-keyring"
+# Where create-user.sh keeps each user's cache on the local disk.
+USER_CACHE_ROOT="/var/cache/linuxbroker/users"
 HOME_ROOT="/home"
 
 usage() {
@@ -119,6 +122,10 @@ release_lease() {
     unmount_user_home || exit 1
 
     rm -f "$KEYRING_KEY_DIRECTORY/$USERNAME"
+    # The cache only served the session that ended. One that cannot be removed now is kept by
+    # the user's next checkout here, or emptied when the host restarts.
+    rm -rf --one-file-system -- "${USER_CACHE_ROOT:?}/$USERNAME" \
+        || echo "Could not remove the cache of $USERNAME." >&2
     rm -f "$LEASE_FILE"
     echo "__LEASE_ACTION=cleared__"
 }

@@ -202,6 +202,7 @@ These scripts:
 
 - **Install xrdp**: Set up xrdp for full desktop access over RDP, enabling users to connect via AVD. The host firewall allows only SSH and RDP.
 - **Start the desktop**: xrdp starts every session through `xrdp-startwm.sh`, which unlocks the user's login keyring and runs the desktop the deployment chose. GNOME's file indexer is turned off, because it would crawl the home directories on the NFS share.
+- **Keep caches local**: `install-host-config.sh` keeps each user's cache on the host's own disk rather than in the home directory on the NFS share, sets the NFS read-ahead Microsoft recommends for Azure Files, and rotates the broker's logs. See [Home Directory Share](deploy/DEPLOYMENT.md#home-directory-share) for how to size the share.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the timer-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.
 - **Install the Host Settings Agent**: Installs `apply-host-settings.sh` and seeds the settings profile, so screen lock policy and session timings are applied consistently on every supported distribution rather than only on RHEL 8. `LINUXBROKER_DISABLE_SCREEN_LOCK` still chooses the screen lock posture that is seeded; from then on the values are managed from the portal.
@@ -361,13 +362,14 @@ The distribution and desktop support release needs `azd provision` and agent 1.2
 - **Review the idle timeout.** It had never disconnected anyone before this release, and migrated Ubuntu hosts now enforce any timeout already set.
 - **Replace or bootstrap again any Ubuntu hosts.** Earlier releases deployed them with no desktop and without the packages NFS homes need.
 
-The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription, and the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
+The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription, the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0, and the Linux hosts need the host migration. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
 
 - **A checkout can start a host.** When no host is ready, the broker starts a stopped one and the user's **Linux Desktop** waits for it, for up to 10 minutes. It is on after the upgrade, and the **Scaling** page turns it off or limits how many hosts start at once.
 - **Update the AVD session hosts.** `deploy/Migrate-ExistingEnvironment.ps1` now also runs `deploy/Update-AvdHostBrokerScript.ps1`, which replaces the script on every running session host. An older script tells its user that no host is available while one starts for them.
 - **A pool can scale to zero.** With start on demand on, a rule or schedule window may keep a minimum of 0 hosts. Set one only after the **Scaling** page shows that every session host runs a script that can wait.
 - **The Linux desktop opens full screen across every monitor.** Set `avdLinuxDesktopFullScreen` or `avdLinuxDesktopMultiMonitor` to `false` to open it in a window or on one monitor, but only after every session host runs the new script. See [Linux Desktop Display](deploy/DEPLOYMENT.md#linux-desktop-display).
 - **The AVD session hosts start and stop on a schedule.** `azd provision` adds a scaling plan, turns on Start VM on Connect and gives the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription, which needs Owner or User Access Administrator there. Update the session hosts' script first, while they all still run, and review the schedule before you provision, or set `avdScalingPlanEnabled` to `false`. See [AVD Autoscale](deploy/DEPLOYMENT.md#avd-autoscale).
+- **Caches move off the NFS share.** `deploy/Migrate-LinuxHostReleaseAgent.ps1`, which `deploy/Migrate-ExistingEnvironment.ps1` runs, installs `install-host-config.sh` on the running Linux hosts. Each user's cache then stays on the host's own disk, NFS mounts read ahead 15 MiB, and the broker's logs rotate. Caches already in `~/.cache` on the share can be deleted. See [Home Directory Share](deploy/DEPLOYMENT.md#home-directory-share).
 
 ## Roadmap
 

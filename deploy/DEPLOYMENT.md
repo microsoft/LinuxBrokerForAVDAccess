@@ -111,7 +111,7 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `domainName`: DNS suffix the broker appends to Linux host names when it connects over SSH. Leave empty to use the deployment's private DNS zone, `linuxbroker.internal`. If you set it, you are responsible for DNS records that resolve `<hostname>.<domainName>` from the API's virtual network.
 - `nfsShare`: an existing NFS share, in `<server>:/<export>` form, to mount for Linux home directories. Leave empty to have the deployment provision one.
 - `deployNfsShare`: `true` or `false`. Provisions a premium Azure Files NFS share when `nfsShare` is empty. Defaults to `true`.
-- `nfsShareQuotaGiB`: provisioned size of that share in GiB. Premium shares have a 100 GiB minimum, and cost is based on the provisioned size. Defaults to `100`.
+- `nfsShareQuotaGiB`: provisioned size of that share in GiB. Premium shares have a 100 GiB minimum, and the size sets the share's IOPS, throughput and cost as well as its capacity. Defaults to `100`. See [Sizing the share](#sizing-the-share).
 - `avdUsersGroupId`: object ID of an existing Entra group whose members can launch **Linux Desktop**. Leave empty to have `preprovision` create `<appName>-<environmentName>-avd-users-sg` and add you to it.
 - `avdLinuxDesktopFullScreen`: `true` or `false`. Defaults to `true`, which opens the Linux desktop full screen. `false` opens it in a window on one monitor. See [Linux Desktop Display](#linux-desktop-display).
 - `avdLinuxDesktopMultiMonitor`: `true` or `false`. Defaults to `true`, which spreads a full-screen Linux desktop across every monitor of the user's AVD session. `false` keeps it on one monitor. See [Linux Desktop Display](#linux-desktop-display).
@@ -487,6 +487,104 @@ the host pool.
   `9cdead84-a844-4324-93f2-b2e6bb768d07`, the app ID Microsoft documents for Azure Virtual Desktop;
   set it only for a cloud where the service principal has another.
 
+## Home Directory Share
+
+Linux hosts keep each broker user's home directory on an NFS share, so a user's files follow them
+from host to host. At checkout, `create-user.sh` mounts the user's directory on the share over
+`/home/<user>`, and the host keeps it mounted until the broker returns the host. Unless `nfsShare`
+names a share of your own, the deployment creates a premium Azure Files NFS share of
+`nfsShareQuotaGiB` GiB, 100 by default.
+
+### Sizing the share
+
+The share uses the provisioned v1 model, where the size you provision sets how fast the share is
+as well as how much it holds:
+
+| Provisioned size (GiB) | Baseline IOPS | Burst IOPS | Throughput (MiB/s) |
+| ---: | ---: | ---: | ---: |
+| 100 | 3,100 | 10,000 | 110 |
+| 256 | 3,256 | 10,000 | 127 |
+| 512 | 3,512 | 10,000 | 152 |
+| 1,024 | 4,024 | 10,000 | 203 |
+| 2,048 | 5,048 | 10,000 | 305 |
+| 5,120 | 8,120 | 15,360 | 613 |
+| 10,240 | 13,240 | 30,720 | 1,125 |
+
+Baseline IOPS are 3,000 plus one for each GiB, burst IOPS are three for each GiB but at least
+10,000, and throughput is 100 MiB/s plus about 0.1 MiB/s for each GiB, as
+[Microsoft documents](https://learn.microsoft.com/azure/storage/files/understanding-billing#provisioned-v1-model).
+A share gathers credits while it runs below its baseline, and with a full set it can run at its
+burst IOPS for an hour.
+
+- **Size for capacity first.** The share keeps the profile of every user who has ever signed in,
+  not only of those signed in now, so it needs room for all of them: the number of users times a
+  typical profile, and room to grow. `df -h ~` in a session shows how full the share is.
+- **IOPS follow how many users are signed in at once,** and what they run. With caches on the
+  local disk, as described below, a session's traffic to the share is mostly the files its user
+  opens and saves, and an idle session moves at most a few hundred bytes a minute. Signing in and
+  starting applications cost the most, so many users who sign in together, such as at the start
+  of a shift, make the peak. Burst credits are there for peaks like that.
+- **Start at 100 GiB and watch the share.** In the storage account's **Metrics**, choose the
+  **File** metric namespace and **Transactions**, and split it by **Response type**.
+  `SuccessWithThrottling`, the `SuccessWithShare...Throttling` types and the
+  `ClientShare...ThrottlingError` types mean the share held requests back because they went over
+  its IOPS or throughput. **Success E2E Latency** shows how long requests took, and **Success
+  Server Latency** how much of that the share itself took. If the share throttles, make it larger.
+- **Change the size with azd:** `azd env set nfsShareQuotaGiB <GiB>`, then `azd provision`. A
+  larger size takes effect within minutes, and the hosts don't need to mount the share again. A
+  share can be made smaller only 24 hours after it was last made larger. A size changed anywhere
+  else, such as in the Azure portal, lasts only until the next `azd provision` sets it back.
+
+Microsoft now recommends the provisioned v2 model for new shares. It provisions IOPS and throughput
+separately from capacity, so a share that holds little but serves many users at once costs less.
+The deployment still creates a provisioned v1 share, and a storage account can't move from one
+model to the other, so moving an environment to provisioned v2 takes a new share and a copy of the
+profiles.
+
+### How hosts use the share
+
+Every Linux host runs `install-host-config.sh` from its bootstrap, and again whenever
+[Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) runs. It writes only files
+of its own, and only when they differ. A host works without them, so when the script fails the
+bootstrap reports it and goes on.
+
+- **Read-ahead.** On an NFS mount, Linux reads ahead 128 KiB at a time. Microsoft
+  [recommends 15 MiB](https://learn.microsoft.com/azure/storage/files/nfs-performance) for Azure
+  Files NFS shares, which the script sets on NFS mounts that already exist and, for later ones,
+  with the udev rule Microsoft publishes, in `/etc/udev/rules.d/99-nfs.rules`. The rule applies to
+  every NFS mount on the host, not only to the home directory share. It takes the place of a rule
+  of the same name in `/usr/lib/udev/rules.d`, which some distributions install with their NFS
+  packages. A rule an administrator wrote at that path is left alone, as long as it doesn't carry
+  the script's marker line. The rule differs from Microsoft's in one character, `$$4` where
+  Microsoft writes `$4`: udev reads `$$` as a literal `$`, so awk still gets `$4`, and systemd 255
+  and later no longer report the rule as invalid each time udev loads its rules.
+- **Caches on the local disk.** At checkout, `create-user.sh` creates
+  `/var/cache/linuxbroker/users/<user>`, which only the user can read, and the session launcher
+  points `XDG_CACHE_HOME` at it, as `/etc/profile.d/linuxbroker-cache.sh` does in login shells.
+  Applications that follow the XDG base directory specification, such as the desktops' own
+  components and most browsers, then keep their caches there instead of in `~/.cache` on the
+  share. Returning the host deletes the cache, and a restart empties the directory. Only root can
+  create entries in `/var/cache/linuxbroker/users`, so no user can create another user's cache
+  ahead of them, as they could in a directory every user can write to, such as `/var/tmp`.
+- **Log rotation.** `/etc/logrotate.d/linuxbroker` rotates the broker's logs in `/var/log` every
+  week, or sooner once one passes 50 MB, and keeps four, compressed. `linuxbroker-patch.log` is
+  left out, because `patch-host.sh` trims it itself.
+- **The old mount point.** `create-user.sh` mounts the share on `/nfs_profiles` while it creates a
+  home directory. The script removes the previous mount point, `/awipsprofiles`, when it is empty
+  and nothing is mounted on it.
+
+Some caches still go to the share:
+
+- The Firefox snap on Ubuntu keeps its cache in `~/snap/firefox/common/.cache`, because a snap
+  sets its own `XDG_CACHE_HOME`.
+- Services that the user's systemd instance starts before the desktop hands it its environment
+  use `~/.cache`.
+- Applications that keep caches in their own directories, such as Visual Studio Code under
+  `~/.config/Code`, ignore `XDG_CACHE_HOME`.
+
+Caches that sessions left in `~/.cache` before the host was updated stay on the share and can be
+deleted; an application rebuilds a cache it needs.
+
 ## Quick Start
 
 From the repository root:
@@ -801,7 +899,7 @@ Every layer tolerates the others being one release behind during the rollout, an
 
 ## Upgrading To Start On Demand
 
-This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)), opens the Linux desktop full screen across every monitor (item 4.8), and starts and stops the AVD session hosts on a schedule (item 4.5). The schedule adds a scaling plan and a role assignment on the subscription, so the release needs `azd provision`, and the AVD session hosts need the new `Connect-LinuxBroker.ps1`.
+This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)), opens the Linux desktop full screen across every monitor (item 4.8), starts and stops the AVD session hosts on a schedule (item 4.5), and moves users' caches off the home directory share (item 4.6). The schedule adds a scaling plan and a role assignment on the subscription, so the release needs `azd provision`, the AVD session hosts need the new `Connect-LinuxBroker.ps1`, and the Linux hosts need the host migration.
 
 - **Start on demand.** When a checkout finds no ready host, the API starts a stopped one for the user and answers `202` with how long to wait, instead of refusing. On the AVD session host, **Linux Desktop** shows *Your Linux desktop is starting…* with **Cancel**, asks again when the broker says to, and opens the desktop as soon as the host is reachable, for up to 10 minutes. The start is recorded as a scaling start is, in the scaling activity log as `Start On Demand` and in the audit log as `vm.start_on_demand`, and uses the API's existing **Desktop Virtualization Power On Off Contributor** role. It never takes the pool past the active rule's or window's `MaxVMs`, so a user who arrives when that many hosts are on and none is free is refused as before. Start on demand is on after the upgrade; an administrator can turn it off, and set how many hosts may start at once for waiting users (2 by default, up to 20), in the **Start on demand** card on the **Scaling** page.
 - **Scale to zero.** While start on demand is on, the default rule and schedule windows may keep a minimum of 0 hosts, so idle hosts stop, for example overnight, and the first user to arrive waits a minute or two for one to start. Scaling counts waiting users as demand, and a scale-down keeps a host for each of them. A minimum of 0 cannot be saved while start on demand is off. If it is turned off afterwards, scaling keeps one host on for those rules and windows, and the card says so.
@@ -810,16 +908,20 @@ This release lets a checkout that finds no ready host start one, so a pool can s
 - **Full screen across every monitor.** The new script opens the Linux desktop full screen across every monitor of the user's AVD session, where the previous one left that to the user's own Remote Desktop Connection settings, so users with more than one monitor see the desktop on all of them. The new `avdLinuxDesktopFullScreen` and `avdLinuxDesktopMultiMonitor` values open it in a window or on one monitor instead; set them only after every session host runs the new script. See [Linux Desktop Display](#linux-desktop-display).
 - **The AVD session hosts start and stop on a schedule.** `azd provision` creates a scaling plan, assigns it to the host pool, turns on Start VM on Connect and gives the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription, which needs Owner or User Access Administrator there. The plan takes effect at once. In UTC, unless you set `avdScalingPlanTimeZone`, it keeps at least 20% of the session hosts on from 07:00 on weekdays, 10% from 18:00 and none on Saturday and Sunday, rounded up, and it stops a session host only once the session host has no sessions. Review the schedule before you provision, and set `avdScalingPlanEnabled` to `false` if the host pool already has a scaling plan or the session hosts should stay as they are. See [AVD Autoscale](#avd-autoscale).
 - **`azd provision` leaves stopped hosts' extensions alone.** Azure refuses to change a VM extension on a VM that is not running, and scaling, start on demand and autoscale all stop hosts, so `preprovision` lists the hosts that are not running and the deployment leaves out their extensions. It also keeps any `excludeFromScaling` tag on the session hosts, which a deployment would otherwise remove.
+- **Caches stay on the local disk.** Each broker user's cache moves from `~/.cache`, in the home directory on the NFS share, to `/var/cache/linuxbroker/users/<user>` on the host's own disk. `create-user.sh` creates it at checkout, `manage-lease.sh` deletes it when the broker returns the host, and the session launcher points `XDG_CACHE_HOME` at it, as the new `/etc/profile.d/linuxbroker-cache.sh` does in login shells. A cache no longer follows its user to the next host, so applications rebuild their caches the first time they start on each host. Caches that sessions left in `~/.cache` stay on the share and can be deleted. See [How hosts use the share](#how-hosts-use-the-share).
+- **NFS read-ahead of 15 MiB.** Linux hosts now read ahead 15 MiB at a time on NFS mounts, instead of 128 KiB, as Microsoft recommends for Azure Files NFS shares. This applies to every NFS mount on a host, not only to the home directory share.
+- **The broker's logs rotate.** The logs of the release agent, its watcher, `create-user.sh`, the host settings and `session-control.sh` in `/var/log` grew without limit until now. They now rotate every week, or sooner once one passes 50 MB, and each keeps four compressed copies.
+- **`install-host-config.sh`.** The three bootstraps and the host migration install `/usr/local/bin/install-host-config.sh` and run it as root. It writes the read-ahead rule, the log rotation, the cache directory with the file that empties it at every restart, and the profile script, and it removes the unused `/awipsprofiles`, because `create-user.sh` now mounts the share on `/nfs_profiles` while it creates a home directory. `azd provision` doesn't run the bootstrap again on existing hosts, so they get the script from the migration; a host the migration skips because it is stopped keeps its caches in the home directory until it is migrated. The script can be run again at any time. See [Sizing the share](#sizing-the-share) for how the share's size sets its IOPS.
 
 ### Recommended order
 
 1. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1). It applies SQL scripts `144`–`156` before the new images start, restarts the apps in the order API, task, front end, migrates the Linux hosts, and then updates `Connect-LinuxBroker.ps1` on the running AVD session hosts. Running it before `azd provision` updates the session hosts before autoscale starts stopping them.
 2. Start any AVD session host the migration skipped because it was not running, and update it with `-SkipPostProvision -SkipLinuxHostReleaseAgentMigration -AvdHostNames <session-host>`.
 3. Review the [AVD autoscale](#avd-autoscale) values, then run `azd provision`. It creates the scaling plan and the role assignment and turns on Start VM on Connect, and its `postprovision` step builds the images and restarts the apps again. If `preprovision` warns that it cannot assign the role, have an Owner or User Access Administrator run the command it prints, then run `azd provision` again.
-4. With a test user, open **Linux Desktop** while no host is free, for example with every idle host stopped, and confirm that the wait window appears and the desktop opens once the host is up.
+4. With a test user, open **Linux Desktop** while no host is free, for example with every idle host stopped, and confirm that the wait window appears and the desktop opens once the host is up. In a terminal in that session, `echo $XDG_CACHE_HOME` should print `/var/cache/linuxbroker/users/<user>`.
 5. Before you set any minimum to 0, confirm that the **Start on demand** card names no session host whose script cannot wait. The card goes by each session host's latest checkout in the last seven days, so a session host updated since then is listed until its next checkout.
 
-Every layer tolerates the others being one release behind during the rollout. Against a database without the new procedures, the new API refuses a checkout that finds no host with `409`, as before, and logs it once, and the portal says that the broker does not support start on demand yet. The previous API build keeps working against the new database: it never answers `202`, so nobody waits, and it refuses a minimum of 0 as before. Session hosts that still run an older script behave as described above.
+Every layer tolerates the others being one release behind during the rollout. Against a database without the new procedures, the new API refuses a checkout that finds no host with `409`, as before, and logs it once, and the portal says that the broker does not support start on demand yet. The previous API build keeps working against the new database: it never answers `202`, so nobody waits, and it refuses a minimum of 0 as before. Session hosts that still run an older script behave as described above. The Linux host changes don't depend on the API: a migrated host keeps caches on its own disk with either API, and a host that is not migrated yet keeps them in the home directory.
 
 ## Manual Steps After `azd up`
 
@@ -1118,6 +1220,22 @@ Linux hosts mount the share when the broker first creates a user. Confirm that `
 If the share is reachable but `df -h ~` inside a session shows the local disk, check `/var/log/release-session.log` for `Attempting to unmount /home/<user>` a few seconds after the checkout. Older release agents unmounted the home whenever the user was not signed in, and the broker's own SSH login at checkout wakes the agent, so the home was usually unmounted before the user arrived. The session then ran on the local disk, and that data was deleted when the broker returned the host. Update the host scripts with [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1).
 
 Current hosts keep the home mounted while the host holds the user's lease, which lasts from checkout until the broker returns the host. At return, `manage-lease.sh` unmounts the home before the broker runs `userdel -r`, so only the empty local mount point is removed and the profile stays on the share. The API also refuses to run `userdel -r` while the home is still mounted, and logs `home directory is still mounted` instead. If a checkout fails after the host has written the lease, the API runs the same cleanup before it puts the host back in the pool.
+
+### Sessions are slow on the home directory share
+
+First check whether the share holds requests back, as described in [Sizing the share](#sizing-the-share), and make it larger if it does. Then check the host, and a session on it:
+
+```bash
+# The read-ahead of each NFS mount on the host, in KiB. It should be 15360.
+awk 'NR > 1 { print $4 }' /proc/fs/nfsfs/volumes | while read -r device; do
+    echo "$device $(cat "/sys/class/bdi/$device/read_ahead_kb")"
+done
+# In a terminal in the session. It should print /var/cache/linuxbroker/users/<user>.
+echo "$XDG_CACHE_HOME"
+```
+
+- A read-ahead of 128 means the host has not run `install-host-config.sh`, or `/etc/udev/rules.d/99-nfs.rules` is a rule of your own, which the script leaves alone. Run `sudo /usr/local/bin/install-host-config.sh`, which reports each step, or migrate the host with [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1).
+- An empty `XDG_CACHE_HOME` means the session keeps its caches in `~/.cache` on the share. Either the host was migrated after the session started, or `create-user.sh` could not create the cache and said why in `/var/log/createuser.log`, in a line that ends `so the cache of <user> stays in the home directory.`
 
 ### A RHEL session is stuck on a lock screen that will not accept the password
 

@@ -73,6 +73,7 @@ heartbeat_for_script() {
     [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" session-control.sh "* ]] || fail "$label does not report session-control.sh"
     [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" patch-host.sh "* ]] || fail "$label does not report patch-host.sh"
     [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" xrdp-startwm.sh "* ]] || fail "$label does not report xrdp-startwm.sh"
+    [[ " ${HEARTBEAT_SCRIPTS[*]} " == *" install-host-config.sh "* ]] || fail "$label does not report install-host-config.sh"
 
     # One script is current and one predates the version constant.
     printf '#!/bin/bash\nLINUXBROKER_AGENT_VERSION="1.0.0"\n' > "$bin/release-session.sh"

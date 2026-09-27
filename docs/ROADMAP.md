@@ -1009,7 +1009,43 @@ the host resource group; its app ID differs in sovereign clouds, so parameterize
 
 ### 4.6 NFS home performance
 
-**Status: Planned** · informed by 3.4
+**Status: Done** · informed by 3.4
+
+**Shipped.** A new host script, `install-host-config.sh`, which the bootstraps and the host
+migration install and run as root, keeps users' caches off the share, tunes the NFS read-ahead and
+rotates the broker's logs, and `deploy/DEPLOYMENT.md` has a sizing guide for the share. Where it
+differs from the design below:
+
+- **The caches are in `/var/cache/linuxbroker/users/<user>`, not `/var/tmp/xdg-cache/$USER`.** Only
+  root can create entries in that directory, so no user can create or link another user's cache
+  ahead of them, as they could in world-writable `/var/tmp`. `create-user.sh` creates the cache at
+  checkout, owned by the user with mode 700, and replaces anything else it finds there without
+  following links. `manage-lease.sh` deletes it when the broker returns the host, and
+  `systemd-tmpfiles` empties the directory at every boot. The session launcher sets
+  `XDG_CACHE_HOME` only when the directory is the user's own, and
+  `/etc/profile.d/linuxbroker-cache.sh` does the same in login shells.
+- **Browsers aren't configured one by one.** Firefox from the distribution's packages and
+  Chromium-based browsers already follow `XDG_CACHE_HOME`. The Firefox snap on Ubuntu doesn't,
+  because a snap sets its own, so its cache stays on the share.
+- **The read-ahead is Microsoft's 15 MiB,** from Microsoft's udev rule in
+  `/etc/udev/rules.d/99-nfs.rules`, and the script applies it at once to NFS mounts that already
+  exist. The rule is Microsoft's but for one character: systemd 255 reports Microsoft's `$4` as an
+  invalid substitution each time udev loads its rules, while `$$4` passes `udevadm verify` and
+  still gives awk `$4`. Like Microsoft's, it applies to every NFS mount on the host.
+- **The Bicep default stays at 100 GiB.** Its 3,100 baseline and 10,000 burst IOPS carry a small
+  pool, and the guide says how to see throttling and grow the share. The I/O of a sign-in hasn't
+  been measured, so the guide gives no figure per user.
+- **Log rotation came with it,** though planned for 4.7: `/etc/logrotate.d/linuxbroker` rotates
+  five broker logs in `/var/log` weekly, or at 50 MB, and keeps four. `linuxbroker-patch.log`
+  trims itself.
+- **The share mounts on `/nfs_profiles`,** renamed from `/awipsprofiles`, which the script removes
+  when it is empty and nothing is mounted on it.
+- The alerts on throttling and latency are part of 4.7.
+
+**Open.** Measure a sign-in's I/O on the share and add figures per user to the sizing guide.
+Offer the provisioned v2 model, which Microsoft now recommends for new shares and which provisions
+IOPS apart from capacity; a v1 storage account can't be converted, so an existing environment
+would need a new share and a copy of the profiles.
 
 **Why.** Every user's home, including caches, is on a Premium Azure Files NFS share that
 defaults to 100 GiB (`deploy/bicep/modules/core/nfs-storage.bicep`). Premium performance

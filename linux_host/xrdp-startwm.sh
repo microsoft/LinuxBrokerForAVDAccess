@@ -8,8 +8,9 @@
 # script cannot start Ubuntu's session on Xorg, or choose between desktops installed side by
 # side. Anything this script does not handle, including a host without desktop.conf, runs the
 # distribution's script exactly as before. First, it unlocks the user's login keyring with the
-# key create-user.sh left for them, when there is one, and puts /etc/linuxbroker/xdg ahead of
-# the distribution's configuration directories.
+# key create-user.sh left for them, when there is one, puts /etc/linuxbroker/xdg ahead of the
+# distribution's configuration directories, and points XDG_CACHE_HOME at the cache
+# create-user.sh prepared for the user on the local disk.
 #
 # --install, as root, points DefaultWindowManager in /etc/xrdp/sesman.ini at this script. It
 # records the script it replaces in /etc/linuxbroker/xrdp-startwm.conf, keeps the original
@@ -37,6 +38,8 @@ USER_UNIT_DIRECTORY="/usr/lib/systemd/user"
 USER_UNIT_MASK_DIRECTORY="/etc/systemd/user"
 AUTOSTART_DIRECTORY="/etc/xdg/autostart"
 XDG_OVERRIDE_DIRECTORY="$SETTINGS_DIRECTORY/xdg"
+# Where create-user.sh keeps each user's cache on the local disk.
+USER_CACHE_ROOT="/var/cache/linuxbroker/users"
 
 # Where a relative DefaultWindowManager lives: /etc/xrdp upstream, /usr/libexec/xrdp in the
 # Fedora and EPEL packages.
@@ -631,10 +634,26 @@ use_broker_configuration() {
     esac
 }
 
+# Keeps the session's caches on the local disk rather than in the home directory on the NFS
+# share, in the directory create-user.sh prepared for the user. Only root can add entries
+# there, and the directory is used only when the user owns it. A value already set is kept.
+use_local_cache() {
+    local user cache
+
+    [ -z "${XDG_CACHE_HOME:-}" ] || return 0
+    user=$(id -un 2>/dev/null) || return 0
+    [ -n "$user" ] || return 0
+    cache="$USER_CACHE_ROOT/$user"
+    if [ -d "$cache" ] && [ ! -L "$cache" ] && [ -O "$cache" ]; then
+        export XDG_CACHE_HOME="$cache"
+    fi
+}
+
 start_session() {
     local desktop starter=""
 
     use_broker_configuration
+    use_local_cache
     unlock_keyring
     desktop=$(configured_desktop)
     if [ -n "$desktop" ]; then

@@ -17,7 +17,7 @@ TOUCHED=(/etc/xrdp /usr/libexec/xrdp /etc/polkit-1 /etc/X11 /usr/share/gnome-ses
     /usr/lib/systemd/user /etc/systemd/user /etc/xdg/autostart
     "$LAUNCHER" "$SHIM_DIR/systemctl" "$SHIM_DIR/gnome-session" "$SHIM_DIR/startxfce4" "$SHIM_DIR/mate-session"
     "$SHIM_DIR/logger" "$SHIM_DIR/gnome-keyring-daemon" "$SHIM_DIR/gdbus" "$SHIM_DIR/pgrep" "$SHIM_DIR/pkill"
-    /run/linuxbroker-keyring)
+    /run/linuxbroker-keyring /var/cache/linuxbroker)
 
 stop_fake_sesman() {
     if [ -n "$FAKE_SESMAN_PID" ]; then
@@ -126,7 +126,7 @@ fake_session_script() {
   echo "ran=$label"
   echo "args=\$*"
   for name in DESKTOP_SESSION XDG_SESSION_DESKTOP XDG_CURRENT_DESKTOP XDG_SESSION_TYPE GNOME_SHELL_SESSION_MODE LBTEST_PROFILE \
-      GNOME_KEYRING_CONTROL SSH_AUTH_SOCK XDG_CONFIG_DIRS; do
+    GNOME_KEYRING_CONTROL SSH_AUTH_SOCK XDG_CONFIG_DIRS XDG_CACHE_HOME; do
     echo "\$name=\${!name:-}"
   done
 } > "\${LBTEST_SESSION_OUT:-/dev/null}"
@@ -650,6 +650,63 @@ test_sessions_skip_the_hidden_autostart_entries() {
     assert_eq "$(session_value XDG_CONFIG_DIRS)" "/etc/linuxbroker/xdg:/etc/xdg"
 }
 
+# The tests start sessions as root, so root's cache stands in for the user's.
+test_sessions_use_the_local_cache() {
+    local cache="/var/cache/linuxbroker/users/root"
+    setup_case
+    setup_debian_session
+    printf 'DESKTOP=gnome\n' > "$DESKTOP_FILE"
+
+    # Without the cache create-user.sh prepares, the session caches in the home directory.
+    run_session
+    assert_eq "$(session_value ran)" "xsession"
+    assert_eq "$(session_value XDG_CACHE_HOME)" "" "no cache"
+
+    mkdir -p "$cache"
+    chmod 700 "$cache"
+    run_session
+    assert_eq "$(session_value XDG_CACHE_HOME)" "$cache" "Debian's Xsession"
+
+    run_session XDG_CACHE_HOME=/srv/cache
+    assert_eq "$(session_value XDG_CACHE_HOME)" "/srv/cache" "a value already set is kept"
+
+    rm -f "$DESKTOP_FILE"
+    run_session
+    assert_eq "$(session_value ran)" "debian-startwm"
+    assert_eq "$(session_value XDG_CACHE_HOME)" "$cache" "the distribution's script"
+
+    setup_case
+    setup_rhel_session
+    install_desktop_shim startxfce4
+    mkdir -p "$cache"
+    printf 'DESKTOP=xfce\n' > "$DESKTOP_FILE"
+    run_session
+    assert_eq "$(session_value ran)" "rhel-xsession"
+    assert_eq "$(session_value XDG_CACHE_HOME)" "$cache" "xinit's Xsession"
+    printf 'DESKTOP=gnome\n' > "$DESKTOP_FILE"
+    run_session
+    assert_eq "$(session_value ran)" "rhel-startwm"
+    assert_eq "$(session_value XDG_CACHE_HOME)" "$cache" "RHEL's own script"
+
+    # Anything but a directory the user owns is not used.
+    rm -rf "$cache"
+    mkdir -p "$WORK_DIR/elsewhere"
+    ln -s "$WORK_DIR/elsewhere" "$cache"
+    run_session
+    assert_eq "$(session_value XDG_CACHE_HOME)" "" "a link"
+
+    rm -f "$cache"
+    printf 'not a directory\n' > "$cache"
+    run_session
+    assert_eq "$(session_value XDG_CACHE_HOME)" "" "a file"
+
+    rm -f "$cache"
+    mkdir -p "$cache"
+    chown nobody "$cache"
+    run_session
+    assert_eq "$(session_value XDG_CACHE_HOME)" "" "a directory someone else owns"
+}
+
 test_an_unusable_record_falls_back() {
     local record
     setup_case
@@ -878,6 +935,7 @@ test_xfce_and_mate_on_debian
 test_rhel_runs_its_own_script_for_gnome
 test_xfce_and_mate_on_rhel
 test_sessions_skip_the_hidden_autostart_entries
+test_sessions_use_the_local_cache
 test_an_unusable_record_falls_back
 test_the_login_keyring_opens_with_the_brokers_key
 test_a_keyring_the_key_cannot_open_is_moved_aside

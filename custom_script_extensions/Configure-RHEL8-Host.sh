@@ -42,6 +42,8 @@ patch_host_script_url="$script_source_root/linux_host/patch-host.sh"
 patch_host_script="/usr/local/bin/patch-host.sh"
 xrdp_startwm_script_url="$script_source_root/linux_host/xrdp-startwm.sh"
 xrdp_startwm_script="/usr/local/bin/xrdp-startwm.sh"
+install_host_config_script_url="$script_source_root/linux_host/install-host-config.sh"
+install_host_config_script="/usr/local/bin/install-host-config.sh"
 
 arch=$( /bin/arch )
 
@@ -219,6 +221,9 @@ sudo wget -O "$patch_host_script" "$patch_host_script_url"
 echo "Downloading xrdp-startwm.sh..."
 sudo wget -O "$xrdp_startwm_script" "$xrdp_startwm_script_url"
 
+echo "Downloading install-host-config.sh..."
+sudo wget -O "$install_host_config_script" "$install_host_config_script_url"
+
 echo "Setting execute permissions for downloaded scripts..."
 sudo chmod +x "$SCRIPT_PATH"
 sudo chmod +x "$output_directory/xrdp-who-xorg.sh"
@@ -229,6 +234,7 @@ sudo chmod +x "$apply_settings_script"
 sudo chmod +x "$session_control_script"
 sudo chmod +x "$patch_host_script"
 sudo chmod +x "$xrdp_startwm_script"
+sudo chmod +x "$install_host_config_script"
 echo "Downloaded scripts are now executable."
 
 # xrdp starts every session through xrdp-startwm.sh, which starts the desktop named here. For
@@ -246,6 +252,13 @@ sudo chmod 644 "$desktop_file"
 if ! sudo "$xrdp_startwm_script" --install; then
     echo "ERROR: Could not configure xrdp to start sessions through $xrdp_startwm_script."
     exit 1
+fi
+
+# Log rotation, the NFS read-ahead and the users' local caches. The host works without them,
+# so a failure is reported and the bootstrap goes on.
+echo "Installing the Linux Broker host configuration..."
+if ! sudo "$install_host_config_script"; then
+    echo "WARNING: install-host-config.sh did not complete. The host works without it; run it again as root."
 fi
 
 echo "Creating log and user details files..."
