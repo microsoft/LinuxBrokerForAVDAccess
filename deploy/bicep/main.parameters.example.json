@@ -11,6 +11,15 @@
     "appServicePlanSku": {
       "value": "P2mv3"
     },
+    "appServicePlanCapacity": {
+      "value": 1
+    },
+    "portalSessionStore": {
+      "value": "redis"
+    },
+    "portalRedisSku": {
+      "value": ""
+    },
     "appName": {
       "value": "linuxbroker"
     },

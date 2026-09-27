@@ -35,7 +35,7 @@ The solution consists of the following components:
 
 - **Azure Function for Scaling Tasks**: An Azure Function that runs on a schedule to manage scaling of Linux hosts based on the scaling rules. It updates VM network statuses, turns VMs on or off, performs health checks on the Linux hosts, returns released hosts, advances rolling maintenance runs, and purges old audit entries and checkout events.
 
-- **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as finding and acting on hosts in bulk, importing hosts from Azure, helping users with their sessions, scheduling scaling, patching hosts in rolling maintenance runs, charting capacity and unmet demand, and viewing logs. It is a React 18 and TypeScript single-page app built with Vite and Tailwind CSS, served by a Flask backend-for-frontend that holds the Entra ID token server-side and calls the Broker API on the administrator's behalf.
+- **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as finding and acting on hosts in bulk, importing hosts from Azure, helping users with their sessions, scheduling scaling, patching hosts in rolling maintenance runs, charting capacity and unmet demand, and viewing logs. It is a React 18 and TypeScript single-page app built with Vite and Tailwind CSS, served by a Flask backend-for-frontend that holds the Entra ID token server-side and calls the Broker API on the administrator's behalf. By default, the sign-in sessions live in Redis, which every instance of the portal shares.
 
 - **Azure Key Vault**: Stores sensitive information such as SSH keys and database passwords, accessed securely by the Broker API using managed identity. A second vault holds the key that unlocks each user's login keyring.
 
@@ -55,6 +55,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 - **Broker Database**: Azure SQL Database for storing VM and scaling data.
 - **Azure Function for Scaling Tasks**: Manages scaling of Linux hosts.
 - **Service Management Portal**: React and TypeScript front-end application for administrators, served by a Flask backend-for-frontend.
+- **Portal Session Cache**: Azure Managed Redis, or Azure Cache for Redis in Azure Government, which keeps the portal's sign-ins so that the portal can run on more than one instance.
 - **Azure Key Vault**: Secure storage for SSH keys, passwords and each user's login keyring key.
 - **Managed Identities**: Used for secure authentication between components.
 - **Security Groups**: Controls access permissions for managed identities.
@@ -336,7 +337,7 @@ The deployment targets Azure commercial by default. Set `azureCloudName` to `Azu
 
 The Service Management Portal serves all of its front-end assets from its own container under `front_end/static/dist/`. The bundle is compiled during the container build, uses the system font stack, and draws its icons as inline SVG, so it makes no requests to a public CDN and renders correctly in Government, sovereign and air-gapped environments where outbound internet access is blocked. Note that building the portal image does require access to the npm registry, so a disconnected build host needs an internal npm mirror. See [front_end/README.md](front_end/README.md).
 
-The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps.
+The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps. It runs one instance unless you set `appServicePlanCapacity`; see [Portal And API Scale-Out](deploy/DEPLOYMENT.md#portal-and-api-scale-out) before you run more.
 
 Before running `azd up`, review the detailed guide and set any environment-specific values you need, especially networking, host counts, VM sizes, App Service plan sizing, and SQL firewall access. The deployment scripts under `deploy/` now handle the Entra bootstrap, SSH key flow, App Service health checks on `/health`, Application Insights wiring for the frontend and API, post-provision role assignment, container image builds, SQL initialization, and Linux host SQL registration used by this solution.
 
@@ -362,7 +363,7 @@ The distribution and desktop support release needs `azd provision` and agent 1.2
 - **Review the idle timeout.** It had never disconnected anyone before this release, and migrated Ubuntu hosts now enforce any timeout already set.
 - **Replace or bootstrap again any Ubuntu hosts.** Earlier releases deployed them with no desktop and without the packages NFS homes need.
 
-The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription and for the host monitoring, the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0, and the Linux hosts need the host migration. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
+The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription, for the host monitoring and for the portal's session cache, the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0, and the Linux hosts need the host migration. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
 
 - **A checkout can start a host.** When no host is ready, the broker starts a stopped one and the user's **Linux Desktop** waits for it, for up to 10 minutes. It is on after the upgrade, and the **Scaling** page turns it off or limits how many hosts start at once.
 - **Update the AVD session hosts.** `deploy/Migrate-ExistingEnvironment.ps1` now also runs `deploy/Update-AvdHostBrokerScript.ps1`, which replaces the script on every running session host. An older script tells its user that no host is available while one starts for them.
@@ -371,6 +372,7 @@ The start on demand release needs `azd provision`, for the AVD scaling plan and 
 - **The AVD session hosts start and stop on a schedule.** `azd provision` adds a scaling plan, turns on Start VM on Connect and gives the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription, which needs Owner or User Access Administrator there. Update the session hosts' script first, while they all still run, and review the schedule before you provision, or set `avdScalingPlanEnabled` to `false`. See [AVD Autoscale](deploy/DEPLOYMENT.md#avd-autoscale).
 - **Caches move off the NFS share.** `deploy/Migrate-LinuxHostReleaseAgent.ps1`, which `deploy/Migrate-ExistingEnvironment.ps1` runs, installs `install-host-config.sh` on the running Linux hosts. Each user's cache then stays on the host's own disk, NFS mounts read ahead 15 MiB, and the broker's logs rotate. Caches already in `~/.cache` on the share can be deleted. See [Home Directory Share](deploy/DEPLOYMENT.md#home-directory-share).
 - **Host logs, a fleet workbook and alerts.** `azd provision` adds data collection rules, a workbook and alerts, and `postprovision` installs the Azure Monitor agent on the running hosts, so their logs reach Log Analytics. Set `alertEmailAddresses` to get the alerts by email, and once each host that `postprovision` names as not running is started, connect it with `deploy/Enable-HostMonitoring.ps1 -HostNames`. See [Host Monitoring](deploy/DEPLOYMENT.md#host-monitoring).
+- **Portal sessions move to Redis.** `azd provision` creates a cache for the portal's sign-ins, Azure Managed Redis or, in Azure Government, Azure Cache for Redis. Moving the sessions there signs every administrator out once. The cache is billed by the hour; set `portalSessionStore` to `filesystem` to keep the sessions on the portal's disk. With the cache, `appServicePlanCapacity` can run the portal and the API on more than one instance. See [Portal And API Scale-Out](deploy/DEPLOYMENT.md#portal-and-api-scale-out).
 
 ## Roadmap
 

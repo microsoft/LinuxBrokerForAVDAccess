@@ -932,6 +932,77 @@ function ConvertTo-EmailListParameterValue {
     return ($addresses -join ',')
 }
 
+# Where the portal keeps sign-in sessions. AzureCustom has no known Redis service, private DNS
+# zone or Entra resource, so its portal keeps them on disk.
+function Resolve-PortalSessionStore {
+    param([Parameter(Mandatory = $true)][string]$CloudName)
+
+    $value = Get-AzdEnvValue -Key 'portalSessionStore'
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        $value = 'redis'
+    }
+
+    $store = $value.Trim().ToLowerInvariant()
+    if ($store -notin @('redis', 'filesystem')) {
+        throw "azd environment value 'portalSessionStore' must be 'redis' or 'filesystem', but was '$value'."
+    }
+
+    if ($store -eq 'redis' -and $CloudName -eq 'AzureCustom') {
+        Write-Warning "portalSessionStore is 'redis', but the AzureCustom cloud has no Redis profile, so the portal keeps sessions on each instance's disk."
+        return 'filesystem'
+    }
+
+    return $store
+}
+
+# Azure Managed Redis sizes look like Balanced_B0; Azure Cache for Redis sizes like Standard_C1.
+function ConvertTo-PortalRedisSkuParameterValue {
+    param([Parameter(Mandatory = $true)][string]$CloudName)
+
+    $value = Get-AzdEnvValue -Key 'portalRedisSku'
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return ''
+    }
+
+    $sku = $value.Trim()
+    if ($CloudName -eq 'AzureUSGovernment') {
+        # The Bicep reads the tier, family and capacity out of the name.
+        if ($sku -cnotmatch '^(Basic_C[0-6]|Standard_C[0-6]|Premium_P[1-5])\z') {
+            throw "azd environment value 'portalRedisSku' must be an Azure Cache for Redis size, such as Standard_C1, Standard_C2 or Premium_P1, but was '$value'."
+        }
+    }
+    elseif ($sku -cnotmatch '^[A-Z][A-Za-z]*_[A-Z]+[0-9]+\z') {
+        throw "azd environment value 'portalRedisSku' must be an Azure Managed Redis size, such as Balanced_B0 or Balanced_B1, but was '$value'."
+    }
+
+    return $sku
+}
+
+# Instances of the App Service plan, which the portal, the API and the task function all run on.
+function Resolve-AppServicePlanCapacity {
+    param(
+        [Parameter(Mandatory = $true)][string]$PortalSessionStore,
+        [Parameter(Mandatory = $false)][AllowEmptyString()][string]$SqlDatabaseSkuName = ''
+    )
+
+    $capacity = ConvertTo-IntParameterValue -Key 'appServicePlanCapacity' -DefaultValue 1
+    if ($capacity -lt 1 -or $capacity -gt 30) {
+        throw "azd environment value 'appServicePlanCapacity' must be a whole number from 1 to 30, but was '$capacity'."
+    }
+
+    if ($capacity -gt 1 -and $PortalSessionStore -eq 'filesystem') {
+        Write-Warning "appServicePlanCapacity is $capacity, but the portal keeps sessions on each instance's disk. Sign-ins then rely on ARR affinity, and anyone whose instance restarts or is removed must sign in again."
+    }
+
+    # Each instance's API runs two worker processes, each running up to DB_MAX_CONCURRENCY (6)
+    # database requests at once.
+    if ($SqlDatabaseSkuName.Trim() -eq 'Basic' -and $capacity * 12 -gt 30) {
+        Write-Warning "appServicePlanCapacity is $capacity, and each instance's API can run 12 database requests at once, but the Basic database tier runs at most 30. Set sqlDatabaseSkuName to S1 or higher."
+    }
+
+    return $capacity
+}
+
 # The scaling plan's phases start in order within one day: ramp-up, peak, ramp-down, off-peak.
 function Assert-AvdScalingPlanTimeOrder {
     param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Times)
@@ -1669,6 +1740,9 @@ Ensure-DefaultEnvValue -Key 'sqlDatabaseName' -ValueFactory { 'LinuxBroker' } | 
 Ensure-DefaultEnvValue -Key 'sqlDatabaseSkuName' -ValueFactory { 'Basic' } | Out-Null
 Ensure-DefaultEnvValue -Key 'allowLegacyScopeAccess' -ValueFactory { 'false' } | Out-Null
 Ensure-DefaultEnvValue -Key 'appServicePlanSku' -ValueFactory { 'P2mv3' } | Out-Null
+Ensure-DefaultEnvValue -Key 'appServicePlanCapacity' -ValueFactory { '1' } | Out-Null
+Ensure-DefaultEnvValue -Key 'portalSessionStore' -ValueFactory { if ($cloudContext.Name -eq 'AzureCustom') { 'filesystem' } else { 'redis' } } | Out-Null
+Ensure-DefaultEnvValue -Key 'portalRedisSku' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'linuxHostAdminLoginName' -ValueFactory { 'avdadmin' } | Out-Null
 Ensure-DefaultEnvValue -Key 'domainName' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'nfsShare' -ValueFactory { '' } | Out-Null
@@ -1891,6 +1965,25 @@ if ($avdSessionHostsDeployed) {
     Write-Host "AVD autoscale: scaling plan $avdScalingPlanState; Start VM on Connect $avdStartVmOnConnectState; $($avdAutoscale.Summary)"
 }
 
+$portalSessionStore = Resolve-PortalSessionStore -CloudName $cloudContext.Name
+$portalRedisSku = ''
+if ($portalSessionStore -eq 'redis') {
+    $portalRedisSku = ConvertTo-PortalRedisSkuParameterValue -CloudName $cloudContext.Name
+}
+$appServicePlanCapacity = Resolve-AppServicePlanCapacity -PortalSessionStore $portalSessionStore -SqlDatabaseSkuName (Get-AzdEnvValue -Key 'sqlDatabaseSkuName')
+
+$portalSessionStoreState = "on each instance's disk"
+if ($portalSessionStore -eq 'redis') {
+    $portalSessionStoreState = 'in Azure Managed Redis'
+    if ($cloudContext.Name -eq 'AzureUSGovernment') {
+        $portalSessionStoreState = 'in Azure Cache for Redis'
+    }
+    if ($portalRedisSku) {
+        $portalSessionStoreState += " ($portalRedisSku)"
+    }
+}
+Write-Host "Portal sessions: kept $portalSessionStoreState. App Service plan instances: $appServicePlanCapacity."
+
 # Generate the Bicep parameters file with the real values so azd passes them
 # to the ARM deployment. azd collects parameters BEFORE running preprovision,
 # so env values set above would not be picked up through ${...} references or
@@ -1926,6 +2019,9 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'vmSubscriptionId' -Value (Get-RequiredAzdEnvValue -Key 'vmSubscriptionId')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'allowedClientIp' -Value (Get-AzdEnvValue -Key 'allowedClientIp')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'appServicePlanSku' -Value (Get-RequiredAzdEnvValue -Key 'appServicePlanSku')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'appServicePlanCapacity' -Value $appServicePlanCapacity
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'portalSessionStore' -Value $portalSessionStore
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'portalRedisSku' -Value $portalRedisSku
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'deployLinuxHosts' -Value (ConvertTo-BoolParameterValue -Key 'deployLinuxHosts')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'deployAvdHosts' -Value (ConvertTo-BoolParameterValue -Key 'deployAvdHosts')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'linuxHostVmNamePrefix' -Value (Get-RequiredAzdEnvValue -Key 'linuxHostVmNamePrefix')

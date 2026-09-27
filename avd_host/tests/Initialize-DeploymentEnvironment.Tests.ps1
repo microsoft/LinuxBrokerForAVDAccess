@@ -23,6 +23,7 @@ BeforeAll {
             'Get-AzdEnvValue', 'Get-FirstNonEmptyValue', 'ConvertTo-IntParameterValue', 'Get-PropertyValue', 'Get-VmTagValue',
             'ConvertTo-TimeOfDayParameterValue', 'ConvertTo-PercentParameterValue', 'Assert-AvdScalingPlanTimeOrder',
             'ConvertTo-PositiveIntParameterValue', 'ConvertTo-EmailListParameterValue',
+            'Resolve-PortalSessionStore', 'ConvertTo-PortalRedisSkuParameterValue', 'Resolve-AppServicePlanCapacity',
             'Resolve-WindowsTimeZoneId', 'Get-HostPowerStateSnapshot', 'Resolve-AvdServicePrincipalObjectId',
             'Invoke-ArmGetRequest', 'Get-AvdAutoscaleRoleState', 'Test-ActionPermitted', 'Test-CanAssignSubscriptionRole',
             'Resolve-AvdAutoscaleRolePlan')) {
@@ -341,6 +342,127 @@ Describe 'Initialize-DeploymentEnvironment.ps1' {
 
             { ConvertTo-EmailListParameterValue -Key 'alertEmailAddresses' } |
                 Should -Throw -ExpectedMessage "*'alertEmailAddresses'*'$Address' is not an email address*"
+        }
+    }
+
+    Context 'Reading the portal session and plan capacity settings' {
+        It 'keeps portal sessions in <Expected> when portalSessionStore is <Value> in <Cloud>' -TestCases @(
+            @{ Value = ''; Cloud = 'AzurePublic'; Expected = 'redis' }
+            @{ Value = ' Redis '; Cloud = 'AzureUSGovernment'; Expected = 'redis' }
+            @{ Value = 'filesystem'; Cloud = 'AzurePublic'; Expected = 'filesystem' }
+            @{ Value = 'FILESYSTEM'; Cloud = 'AzureCustom'; Expected = 'filesystem' }
+        ) {
+            $script:AzdValues['portalSessionStore'] = $Value
+
+            Resolve-PortalSessionStore -CloudName $Cloud | Should -BeExactly $Expected
+            $script:Warnings | Should -BeNullOrEmpty
+        }
+
+        It 'keeps portal sessions on disk in AzureCustom, with a warning, when portalSessionStore is <Value>' -TestCases @(
+            @{ Value = '' }
+            @{ Value = 'redis' }
+        ) {
+            $script:AzdValues['portalSessionStore'] = $Value
+
+            Resolve-PortalSessionStore -CloudName 'AzureCustom' | Should -BeExactly 'filesystem'
+            $script:Warnings.Count | Should -Be 1
+            $script:Warnings[0] | Should -BeLike "*AzureCustom*each instance's disk*"
+        }
+
+        It 'refuses the portal session store <Value>' -TestCases @(
+            @{ Value = 'memcached' }
+            @{ Value = 'cosmos' }
+        ) {
+            $script:AzdValues['portalSessionStore'] = $Value
+
+            { Resolve-PortalSessionStore -CloudName 'AzurePublic' } | Should -Throw -ExpectedMessage "*'portalSessionStore' must be 'redis' or 'filesystem'*'$Value'*"
+        }
+
+        It 'reads the session cache size <Value> in <Cloud> as <Expected>' -TestCases @(
+            @{ Value = ''; Cloud = 'AzurePublic'; Expected = '' }
+            @{ Value = ' Balanced_B1 '; Cloud = 'AzurePublic'; Expected = 'Balanced_B1' }
+            @{ Value = 'MemoryOptimized_M10'; Cloud = 'AzurePublic'; Expected = 'MemoryOptimized_M10' }
+            @{ Value = ''; Cloud = 'AzureUSGovernment'; Expected = '' }
+            @{ Value = 'Standard_C1'; Cloud = 'AzureUSGovernment'; Expected = 'Standard_C1' }
+            @{ Value = 'Premium_P1'; Cloud = 'AzureUSGovernment'; Expected = 'Premium_P1' }
+            @{ Value = 'Basic_C0'; Cloud = 'AzureUSGovernment'; Expected = 'Basic_C0' }
+        ) {
+            $script:AzdValues['portalRedisSku'] = $Value
+
+            ConvertTo-PortalRedisSkuParameterValue -CloudName $Cloud | Should -BeExactly $Expected
+        }
+
+        It 'refuses the session cache size <Value> in <Cloud>' -TestCases @(
+            @{ Value = 'Balanced'; Cloud = 'AzurePublic'; Service = 'Azure Managed Redis' }
+            @{ Value = 'balanced_b0'; Cloud = 'AzurePublic'; Service = 'Azure Managed Redis' }
+            @{ Value = 'Balanced_B0;x'; Cloud = 'AzurePublic'; Service = 'Azure Managed Redis' }
+            @{ Value = 'Balanced_B0'; Cloud = 'AzureUSGovernment'; Service = 'Azure Cache for Redis' }
+            @{ Value = 'Standard_P1'; Cloud = 'AzureUSGovernment'; Service = 'Azure Cache for Redis' }
+            @{ Value = 'Premium_P0'; Cloud = 'AzureUSGovernment'; Service = 'Azure Cache for Redis' }
+            @{ Value = 'standard_c1'; Cloud = 'AzureUSGovernment'; Service = 'Azure Cache for Redis' }
+            @{ Value = 'C1'; Cloud = 'AzureUSGovernment'; Service = 'Azure Cache for Redis' }
+        ) {
+            $script:AzdValues['portalRedisSku'] = $Value
+
+            { ConvertTo-PortalRedisSkuParameterValue -CloudName $Cloud } | Should -Throw -ExpectedMessage "*'portalRedisSku' must be an $Service size*'$Value'*"
+        }
+
+        It 'reads the plan capacity <Value> as <Expected>' -TestCases @(
+            @{ Value = ''; Expected = 1 }
+            @{ Value = '2'; Expected = 2 }
+            @{ Value = ' 30 '; Expected = 30 }
+        ) {
+            $script:AzdValues['appServicePlanCapacity'] = $Value
+
+            Resolve-AppServicePlanCapacity -PortalSessionStore 'redis' -SqlDatabaseSkuName 'S1' | Should -Be $Expected
+            $script:Warnings | Should -BeNullOrEmpty
+        }
+
+        It 'refuses the plan capacity <Value>' -TestCases @(
+            @{ Value = '0'; Message = '*from 1 to 30*' }
+            @{ Value = '31'; Message = '*from 1 to 30*' }
+            @{ Value = 'two'; Message = '*must be an integer*' }
+        ) {
+            $script:AzdValues['appServicePlanCapacity'] = $Value
+
+            { Resolve-AppServicePlanCapacity -PortalSessionStore 'redis' } | Should -Throw -ExpectedMessage $Message
+        }
+
+        It 'warns that sign-ins rely on affinity when <Capacity> instances keep sessions on disk' -TestCases @(
+            @{ Capacity = '2' }
+            @{ Capacity = '5' }
+        ) {
+            $script:AzdValues['appServicePlanCapacity'] = $Capacity
+
+            Resolve-AppServicePlanCapacity -PortalSessionStore 'filesystem' -SqlDatabaseSkuName 'S1' | Should -Be ([int]$Capacity)
+            $script:Warnings.Count | Should -Be 1
+            $script:Warnings[0] | Should -BeLike '*ARR affinity*'
+        }
+
+        It 'does not warn about affinity for one instance keeping sessions on disk' {
+            $script:AzdValues['appServicePlanCapacity'] = '1'
+
+            Resolve-AppServicePlanCapacity -PortalSessionStore 'filesystem' -SqlDatabaseSkuName 'Basic' | Should -Be 1
+            $script:Warnings | Should -BeNullOrEmpty
+        }
+
+        It 'warns about the Basic database tier from <Capacity> instances' -TestCases @(
+            @{ Capacity = '3'; SqlSku = 'Basic'; Warned = $true }
+            @{ Capacity = '4'; SqlSku = ' basic '; Warned = $true }
+            @{ Capacity = '2'; SqlSku = 'Basic'; Warned = $false }
+            @{ Capacity = '3'; SqlSku = 'S1'; Warned = $false }
+            @{ Capacity = '3'; SqlSku = ''; Warned = $false }
+        ) {
+            $script:AzdValues['appServicePlanCapacity'] = $Capacity
+
+            Resolve-AppServicePlanCapacity -PortalSessionStore 'redis' -SqlDatabaseSkuName $SqlSku | Should -Be ([int]$Capacity)
+            if ($Warned) {
+                $script:Warnings.Count | Should -Be 1
+                $script:Warnings[0] | Should -BeLike '*Basic database tier runs at most 30*'
+            }
+            else {
+                $script:Warnings | Should -BeNullOrEmpty
+            }
         }
     }
 
@@ -855,6 +977,46 @@ Describe 'The deployment settings and the Bicep they feed' {
         foreach ($name in @('alertEmailAddresses', 'alertCheckoutRefusalThreshold', 'alertApiErrorThreshold', 'alertNfsLatencyThresholdMs')) {
             $script:ResourcesBicep | Should -Match "(?m)^\s+${name}: ${name}$"
             $monitoringBicep | Should -Match "(?m)^param ${name} "
+        }
+    }
+
+    It 'writes the plan capacity and portal session parameters and passes them on' {
+        foreach ($name in @('appServicePlanCapacity', 'portalSessionStore', 'portalRedisSku')) {
+            $script:ScriptParameters | Should -Contain $name
+            $script:MainBicepParameters | Should -Contain $name
+            $script:MainBicep | Should -Match "(?m)^\s+${name}: ${name}$"
+            $script:ResourcesBicep | Should -Match "(?m)^param ${name} "
+        }
+
+        $script:ResourcesBicep | Should -Match '(?m)^\s+capacity: appServicePlanCapacity$'
+        $script:ResourcesBicep | Should -Match '(?m)^\s+skuName: portalRedisSku$'
+        (Read-RepositoryText -RelativePath 'deploy\bicep\modules\core\app-service-plan.bicep') | Should -Match '(?m)^\s+capacity: capacity$'
+    }
+
+    It 'allows the plan capacities the script allows' {
+        foreach ($text in @($script:MainBicep, $script:ResourcesBicep, (Read-RepositoryText -RelativePath 'deploy\bicep\modules\core\app-service-plan.bicep'))) {
+            $text | Should -Match '(?m)^@minValue\(1\)\n@maxValue\(30\)\nparam (appServicePlanCapacity|capacity) int = 1$'
+        }
+        $script:FunctionDefinitions['Resolve-AppServicePlanCapacity'].Extent.Text | Should -Match ([regex]::Escape('$capacity -lt 1 -or $capacity -gt 30'))
+    }
+
+    It 'puts the portal on the virtual network and turns its affinity off only when its sessions are in Redis' {
+        $portal = [regex]::Match($script:ResourcesBicep, "(?s)\nmodule frontendApp 'modules/apps/container-web-app\.bicep' = \{.*?\n\}").Value
+        $portal | Should -Match '(?m)^\s+appSettings: union\(frontendSettings, portalSessionSettings\)$'
+        $portal | Should -Match ([regex]::Escape("virtualNetworkSubnetId: usePortalRedis ? networking.outputs.appSubnetId : ''"))
+        $portal | Should -Match '(?m)^\s+clientAffinityEnabled: !usePortalRedis$'
+
+        $api = [regex]::Match($script:ResourcesBicep, "(?s)\nmodule apiApp 'modules/apps/container-web-app\.bicep' = \{.*?\n\}").Value
+        $api | Should -Match '(?m)^\s+clientAffinityEnabled: false$'
+    }
+
+    It 'names the same session settings the portal reads' {
+        $sessionStore = Read-RepositoryText -RelativePath 'front_end\session_store.py'
+        $settings = [regex]::Match($script:ResourcesBicep, '(?s)var portalSessionSettings = .*?\n\}\n').Value
+        $names = @([regex]::Matches($settings, '(?m)^\s+([A-Z_]+):') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        $names | Should -Be @('REDIS_ENTRA_RESOURCE', 'REDIS_HOST', 'REDIS_PORT', 'SESSION_BACKEND')
+        foreach ($name in $names) {
+            $sessionStore | Should -Match "'$name'"
         }
     }
 

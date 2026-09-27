@@ -117,6 +117,21 @@ param allowedClientIp string = ''
 @description('App Service plan SKU name.')
 param appServicePlanSku string = 'P2mv3'
 
+@description('Instances of the App Service plan. The portal, the API and the task function run on every instance, so each instance adds API connections to the database: check the database tier allows them.')
+@minValue(1)
+@maxValue(30)
+param appServicePlanCapacity int = 1
+
+@description('Where the portal keeps sign-in sessions. redis keeps them in a cache every portal instance shares, reached over a private endpoint: Azure Managed Redis in the public cloud, Azure Cache for Redis in Azure Government. filesystem keeps them on each instance, which works on one instance, or on more with ARR affinity. AzureCustom always uses filesystem.')
+@allowed([
+  'redis'
+  'filesystem'
+])
+param portalSessionStore string = 'redis'
+
+@description('Size of the portal session cache. Leave empty for the default: Balanced_B0 for Azure Managed Redis, Standard_C1 for Azure Cache for Redis.')
+param portalRedisSku string = ''
+
 @description('Deploy Linux broker host VMs.')
 param deployLinuxHosts bool = false
 
@@ -321,6 +336,9 @@ module resources 'main.resources.bicep' = {
     scriptSourceRoot: scriptSourceRoot
     allowedClientIp: allowedClientIp
     appServicePlanSku: appServicePlanSku
+    appServicePlanCapacity: appServicePlanCapacity
+    portalSessionStore: portalSessionStore
+    portalRedisSku: portalRedisSku
     deployLinuxHosts: deployLinuxHosts
     deployAvdHosts: deployAvdHosts
     linuxHostVmNamePrefix: linuxHostVmNamePrefix
@@ -407,3 +425,5 @@ output linuxHostDomainName string = resources.outputs.linuxHostDomainName
 output nfsSharePath string = resources.outputs.nfsSharePath
 output linuxHostDataCollectionRuleId string = resources.outputs.linuxHostDataCollectionRuleId
 output avdHostDataCollectionRuleId string = resources.outputs.avdHostDataCollectionRuleId
+output portalSessionStore string = resources.outputs.portalSessionStore
+output portalRedisName string = resources.outputs.portalRedisName

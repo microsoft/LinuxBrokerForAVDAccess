@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "3136108467362456610"
+      "templateHash": "9535906777353691330"
     }
   },
   "parameters": {
@@ -255,6 +255,33 @@
       "defaultValue": "P2mv3",
       "metadata": {
         "description": "App Service plan SKU name."
+      }
+    },
+    "appServicePlanCapacity": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "maxValue": 30,
+      "metadata": {
+        "description": "Instances of the App Service plan. The portal, the API and the task function run on every instance, so each instance adds API connections to the database: check the database tier allows them."
+      }
+    },
+    "portalSessionStore": {
+      "type": "string",
+      "defaultValue": "redis",
+      "allowedValues": [
+        "redis",
+        "filesystem"
+      ],
+      "metadata": {
+        "description": "Where the portal keeps sign-in sessions. redis keeps them in a cache every portal instance shares, reached over a private endpoint: Azure Managed Redis in the public cloud, Azure Cache for Redis in Azure Government. filesystem keeps them on each instance, which works on one instance, or on more with ARR affinity. AzureCustom always uses filesystem."
+      }
+    },
+    "portalRedisSku": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Size of the portal session cache. Leave empty for the default: Balanced_B0 for Azure Managed Redis, Standard_C1 for Azure Cache for Redis."
       }
     },
     "deployLinuxHosts": {
@@ -702,6 +729,15 @@
           "appServicePlanSku": {
             "value": "[parameters('appServicePlanSku')]"
           },
+          "appServicePlanCapacity": {
+            "value": "[parameters('appServicePlanCapacity')]"
+          },
+          "portalSessionStore": {
+            "value": "[parameters('portalSessionStore')]"
+          },
+          "portalRedisSku": {
+            "value": "[parameters('portalRedisSku')]"
+          },
           "deployLinuxHosts": {
             "value": "[parameters('deployLinuxHosts')]"
           },
@@ -785,7 +821,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "8048490374046048188"
+              "templateHash": "5634257958381046464"
             }
           },
           "parameters": {
@@ -955,6 +991,33 @@
             "appServicePlanSku": {
               "type": "string",
               "defaultValue": "P2mv3"
+            },
+            "appServicePlanCapacity": {
+              "type": "int",
+              "defaultValue": 1,
+              "minValue": 1,
+              "maxValue": 30,
+              "metadata": {
+                "description": "Instances of the App Service plan. The portal, the API and the task function run on every instance."
+              }
+            },
+            "portalSessionStore": {
+              "type": "string",
+              "defaultValue": "redis",
+              "allowedValues": [
+                "redis",
+                "filesystem"
+              ],
+              "metadata": {
+                "description": "Where the portal keeps sign-in sessions: redis, a cache every portal instance shares, or filesystem, each instance's own disk. AzureCustom always uses filesystem."
+              }
+            },
+            "portalRedisSku": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Size of the portal session cache. Leave empty for the default."
+              }
             },
             "deployLinuxHosts": {
               "type": "bool",
@@ -1150,24 +1213,35 @@
             "nfsStorageAccountName": "[take(format('nfs{0}{1}', variables('sanitizedApp'), variables('suffix')), 24)]",
             "nfsShareName": "home",
             "effectiveNfsShare": "[if(variables('provisionNfsShare'), format('{0}.file.{1}:/{2}/{3}', variables('nfsStorageAccountName'), environment().suffixes.storage, variables('nfsStorageAccountName'), variables('nfsShareName')), parameters('nfsShare'))]",
+            "portalRedisName": "[format('redis-{0}-{1}', take(format('{0}{1}', variables('sanitizedApp'), variables('sanitizedEnv')), 40), variables('suffix'))]",
             "cloudProfiles": {
               "AzurePublic": {
                 "graphEndpoint": "https://graph.microsoft.com",
                 "stsIssuerHost": "https://sts.windows.net",
-                "appServiceDomain": "azurewebsites.net"
+                "appServiceDomain": "azurewebsites.net",
+                "portalRedisKind": "managed",
+                "portalRedisPrivateDnsZoneName": "privatelink.redis.azure.net",
+                "portalRedisEntraResource": ""
               },
               "AzureUSGovernment": {
                 "graphEndpoint": "https://graph.microsoft.us",
                 "stsIssuerHost": "https://sts.windows.net",
-                "appServiceDomain": "azurewebsites.us"
+                "appServiceDomain": "azurewebsites.us",
+                "portalRedisKind": "cache",
+                "portalRedisPrivateDnsZoneName": "privatelink.redis.cache.usgovcloudapi.net",
+                "portalRedisEntraResource": "acca5fbb-b7e4-4009-81f1-37e38fd66d78"
               },
               "AzureCustom": {
                 "graphEndpoint": "",
                 "stsIssuerHost": "",
-                "appServiceDomain": ""
+                "appServiceDomain": "",
+                "portalRedisKind": "",
+                "portalRedisPrivateDnsZoneName": "",
+                "portalRedisEntraResource": ""
               }
             },
             "cloudProfile": "[variables('cloudProfiles')[parameters('azureCloudName')]]",
+            "usePortalRedis": "[and(equals(parameters('portalSessionStore'), 'redis'), not(empty(variables('cloudProfile').portalRedisKind)))]",
             "resolvedAuthorityHost": "[if(empty(parameters('azureAuthorityHost')), environment().authentication.loginEndpoint, parameters('azureAuthorityHost'))]",
             "resolvedGraphEndpoint": "[if(empty(parameters('graphEndpoint')), variables('cloudProfile').graphEndpoint, parameters('graphEndpoint'))]",
             "resolvedStsIssuerHost": "[if(empty(parameters('stsIssuerHost')), variables('cloudProfile').stsIssuerHost, parameters('stsIssuerHost'))]",
@@ -3222,6 +3296,9 @@
                   },
                   "skuName": {
                     "value": "[parameters('appServicePlanSku')]"
+                  },
+                  "capacity": {
+                    "value": "[parameters('appServicePlanCapacity')]"
                   }
                 },
                 "template": {
@@ -3231,7 +3308,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "1639916006898550317"
+                      "templateHash": "10348306834059684448"
                     }
                   },
                   "parameters": {
@@ -3249,6 +3326,15 @@
                     "skuName": {
                       "type": "string",
                       "defaultValue": "P2mv3"
+                    },
+                    "capacity": {
+                      "type": "int",
+                      "defaultValue": 1,
+                      "minValue": 1,
+                      "maxValue": 30,
+                      "metadata": {
+                        "description": "Instances the plan runs. The portal, the API and the task function all run on every instance."
+                      }
                     }
                   },
                   "resources": [
@@ -3262,7 +3348,7 @@
                         "name": "[parameters('skuName')]",
                         "tier": "PremiumV3",
                         "size": "[parameters('skuName')]",
-                        "capacity": 1
+                        "capacity": "[parameters('capacity')]"
                       },
                       "kind": "linux",
                       "properties": {
@@ -3282,6 +3368,257 @@
                   }
                 }
               }
+            },
+            {
+              "condition": "[variables('usePortalRedis')]",
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
+              "name": "portalRedis",
+              "properties": {
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "kind": {
+                    "value": "[variables('cloudProfile').portalRedisKind]"
+                  },
+                  "name": {
+                    "value": "[variables('portalRedisName')]"
+                  },
+                  "location": {
+                    "value": "[parameters('location')]"
+                  },
+                  "tags": {
+                    "value": "[parameters('tags')]"
+                  },
+                  "skuName": {
+                    "value": "[parameters('portalRedisSku')]"
+                  },
+                  "virtualNetworkId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.vnetId.value]"
+                  },
+                  "privateEndpointSubnetId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.privateEndpointSubnetId.value]"
+                  },
+                  "privateDnsZoneName": {
+                    "value": "[variables('cloudProfile').portalRedisPrivateDnsZoneName]"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "7516536256275555487"
+                    }
+                  },
+                  "parameters": {
+                    "kind": {
+                      "type": "string",
+                      "allowedValues": [
+                        "managed",
+                        "cache"
+                      ],
+                      "metadata": {
+                        "description": "Azure Managed Redis (managed), or Azure Cache for Redis (cache) where Azure Managed Redis is not available, as in Azure Government."
+                      }
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 60,
+                      "metadata": {
+                        "description": "Name of the cache. It becomes part of a public DNS name, so it must be unique."
+                      }
+                    },
+                    "location": {
+                      "type": "string",
+                      "defaultValue": "[resourceGroup().location]"
+                    },
+                    "tags": {
+                      "type": "object",
+                      "defaultValue": {}
+                    },
+                    "skuName": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Leave empty for the default size: Balanced_B0 for Azure Managed Redis, Standard_C1 for Azure Cache for Redis. Azure Cache for Redis sizes are written <tier>_<family><capacity>, such as Standard_C2 or Premium_P1."
+                      }
+                    },
+                    "virtualNetworkId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Virtual network the portal reaches the cache from."
+                      }
+                    },
+                    "privateEndpointSubnetId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Subnet the cache private endpoint is placed in."
+                      }
+                    },
+                    "privateDnsZoneName": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Private DNS zone of the cache private endpoint: privatelink.redis.azure.net for Azure Managed Redis, privatelink.redis.cache.<cloud suffix> for Azure Cache for Redis."
+                      }
+                    }
+                  },
+                  "variables": {
+                    "managed": "[equals(parameters('kind'), 'managed')]",
+                    "effectiveSku": "[if(empty(parameters('skuName')), if(variables('managed'), 'Balanced_B0', 'Standard_C1'), parameters('skuName'))]",
+                    "cacheSkuParts": "[split(variables('effectiveSku'), '_')]",
+                    "managedPort": 10000
+                  },
+                  "resources": [
+                    {
+                      "condition": "[variables('managed')]",
+                      "type": "Microsoft.Cache/redisEnterprise",
+                      "apiVersion": "2025-07-01",
+                      "name": "[parameters('name')]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "sku": {
+                        "name": "[variables('effectiveSku')]"
+                      },
+                      "properties": {
+                        "minimumTlsVersion": "1.2",
+                        "publicNetworkAccess": "Disabled"
+                      }
+                    },
+                    {
+                      "condition": "[variables('managed')]",
+                      "type": "Microsoft.Cache/redisEnterprise/databases",
+                      "apiVersion": "2025-07-01",
+                      "name": "[format('{0}/{1}', parameters('name'), 'default')]",
+                      "properties": {
+                        "clientProtocol": "Encrypted",
+                        "port": "[variables('managedPort')]",
+                        "clusteringPolicy": "EnterpriseCluster",
+                        "evictionPolicy": "VolatileLRU",
+                        "accessKeysAuthentication": "Disabled"
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Cache/redisEnterprise', parameters('name'))]"
+                      ]
+                    },
+                    {
+                      "condition": "[not(variables('managed'))]",
+                      "type": "Microsoft.Cache/redis",
+                      "apiVersion": "2024-11-01",
+                      "name": "[parameters('name')]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "sku": {
+                          "name": "[variables('cacheSkuParts')[0]]",
+                          "family": "[first(variables('cacheSkuParts')[1])]",
+                          "capacity": "[int(skip(variables('cacheSkuParts')[1], 1))]"
+                        },
+                        "enableNonSslPort": false,
+                        "minimumTlsVersion": "1.2",
+                        "publicNetworkAccess": "Disabled",
+                        "disableAccessKeyAuthentication": true,
+                        "redisConfiguration": {
+                          "aad-enabled": "true",
+                          "maxmemory-policy": "volatile-lru"
+                        }
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Network/privateEndpoints",
+                      "apiVersion": "2024-05-01",
+                      "name": "[format('pe-{0}', parameters('name'))]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "subnet": {
+                          "id": "[parameters('privateEndpointSubnetId')]"
+                        },
+                        "privateLinkServiceConnections": [
+                          {
+                            "name": "redis",
+                            "properties": {
+                              "privateLinkServiceId": "[if(variables('managed'), resourceId('Microsoft.Cache/redisEnterprise', parameters('name')), resourceId('Microsoft.Cache/redis', parameters('name')))]",
+                              "groupIds": [
+                                "[if(variables('managed'), 'redisEnterprise', 'redisCache')]"
+                              ]
+                            }
+                          }
+                        ]
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Cache/redis', parameters('name'))]",
+                        "[resourceId('Microsoft.Cache/redisEnterprise', parameters('name'))]",
+                        "[resourceId('Microsoft.Cache/redisEnterprise/databases', parameters('name'), 'default')]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Network/privateDnsZones",
+                      "apiVersion": "2024-06-01",
+                      "name": "[parameters('privateDnsZoneName')]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]"
+                    },
+                    {
+                      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+                      "apiVersion": "2024-06-01",
+                      "name": "[format('{0}/{1}', parameters('privateDnsZoneName'), format('link-{0}', last(split(parameters('virtualNetworkId'), '/'))))]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "registrationEnabled": false,
+                        "virtualNetwork": {
+                          "id": "[parameters('virtualNetworkId')]"
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Network/privateDnsZones', parameters('privateDnsZoneName'))]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+                      "apiVersion": "2024-05-01",
+                      "name": "[format('{0}/{1}', format('pe-{0}', parameters('name')), 'default')]",
+                      "properties": {
+                        "privateDnsZoneConfigs": [
+                          {
+                            "name": "redis",
+                            "properties": {
+                              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', parameters('privateDnsZoneName'))]"
+                            }
+                          }
+                        ]
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Network/privateDnsZones', parameters('privateDnsZoneName'))]",
+                        "[resourceId('Microsoft.Network/privateEndpoints', format('pe-{0}', parameters('name')))]"
+                      ]
+                    }
+                  ],
+                  "outputs": {
+                    "name": {
+                      "type": "string",
+                      "value": "[parameters('name')]"
+                    },
+                    "hostName": {
+                      "type": "string",
+                      "value": "[if(variables('managed'), reference(resourceId('Microsoft.Cache/redisEnterprise', parameters('name')), '2025-07-01').hostName, reference(resourceId('Microsoft.Cache/redis', parameters('name')), '2024-11-01').hostName)]"
+                    },
+                    "port": {
+                      "type": "int",
+                      "value": "[if(variables('managed'), variables('managedPort'), reference(resourceId('Microsoft.Cache/redis', parameters('name')), '2024-11-01').sslPort)]"
+                    }
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Resources/deployments', 'networking')]"
+              ]
             },
             {
               "type": "Microsoft.Resources/deployments",
@@ -3315,7 +3652,7 @@
                     "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2025-04-01').outputs.applicationInsightsConnectionString.value]"
                   },
                   "appSettings": {
-                    "value": "[variables('frontendSettings')]"
+                    "value": "[union(variables('frontendSettings'), if(variables('usePortalRedis'), union(createObject('SESSION_BACKEND', 'redis', 'REDIS_HOST', reference(resourceId('Microsoft.Resources/deployments', 'portalRedis'), '2025-04-01').outputs.hostName.value, 'REDIS_PORT', string(reference(resourceId('Microsoft.Resources/deployments', 'portalRedis'), '2025-04-01').outputs.port.value)), if(empty(variables('cloudProfile').portalRedisEntraResource), createObject(), createObject('REDIS_ENTRA_RESOURCE', variables('cloudProfile').portalRedisEntraResource))), createObject('SESSION_BACKEND', 'filesystem')))]"
                   },
                   "authSettings": {
                     "value": "[variables('frontendAuthSettings')]"
@@ -3328,6 +3665,10 @@
                   },
                   "useManagedIdentityForRegistry": {
                     "value": true
+                  },
+                  "virtualNetworkSubnetId": "[if(variables('usePortalRedis'), createObject('value', reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.appSubnetId.value), createObject('value', ''))]",
+                  "clientAffinityEnabled": {
+                    "value": "[not(variables('usePortalRedis'))]"
                   }
                 },
                 "template": {
@@ -3337,7 +3678,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "8972138919102563065"
+                      "templateHash": "1104947881100529762"
                     }
                   },
                   "parameters": {
@@ -3390,6 +3731,13 @@
                       "metadata": {
                         "description": "Delegated subnet for regional VNet integration. Leave empty to keep the app off the virtual network."
                       }
+                    },
+                    "clientAffinityEnabled": {
+                      "type": "bool",
+                      "defaultValue": false,
+                      "metadata": {
+                        "description": "Send each browser back to the instance that served it first (ARR affinity). Only an app that keeps state on the instance needs it."
+                      }
                     }
                   },
                   "variables": {
@@ -3409,6 +3757,7 @@
                       "properties": {
                         "serverFarmId": "[parameters('serverFarmId')]",
                         "httpsOnly": true,
+                        "clientAffinityEnabled": "[parameters('clientAffinityEnabled')]",
                         "virtualNetworkSubnetId": "[if(empty(parameters('virtualNetworkSubnetId')), null(), parameters('virtualNetworkSubnetId'))]",
                         "siteConfig": "[variables('webSiteConfig')]"
                       }
@@ -3485,7 +3834,93 @@
               "dependsOn": [
                 "[resourceId('Microsoft.Resources/deployments', 'appServicePlan')]",
                 "[resourceId('Microsoft.Resources/deployments', 'containerRegistry')]",
-                "[resourceId('Microsoft.Resources/deployments', 'observability')]"
+                "[resourceId('Microsoft.Resources/deployments', 'networking')]",
+                "[resourceId('Microsoft.Resources/deployments', 'observability')]",
+                "[resourceId('Microsoft.Resources/deployments', 'portalRedis')]"
+              ]
+            },
+            {
+              "condition": "[variables('usePortalRedis')]",
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
+              "name": "portalRedisAccess",
+              "properties": {
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "kind": {
+                    "value": "[variables('cloudProfile').portalRedisKind]"
+                  },
+                  "redisName": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'portalRedis'), '2025-04-01').outputs.name.value]"
+                  },
+                  "principalId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'frontendApp'), '2025-04-01').outputs.principalId.value]"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "11694917012265494470"
+                    }
+                  },
+                  "parameters": {
+                    "kind": {
+                      "type": "string",
+                      "allowedValues": [
+                        "managed",
+                        "cache"
+                      ]
+                    },
+                    "redisName": {
+                      "type": "string"
+                    },
+                    "principalId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Object ID of the portal's system-assigned managed identity."
+                      }
+                    }
+                  },
+                  "variables": {
+                    "assignmentName": "[format('portal{0}', uniqueString(parameters('principalId')))]"
+                  },
+                  "resources": [
+                    {
+                      "condition": "[equals(parameters('kind'), 'managed')]",
+                      "type": "Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments",
+                      "apiVersion": "2025-07-01",
+                      "name": "[format('{0}/{1}/{2}', parameters('redisName'), 'default', variables('assignmentName'))]",
+                      "properties": {
+                        "accessPolicyName": "default",
+                        "user": {
+                          "objectId": "[parameters('principalId')]"
+                        }
+                      }
+                    },
+                    {
+                      "condition": "[equals(parameters('kind'), 'cache')]",
+                      "type": "Microsoft.Cache/redis/accessPolicyAssignments",
+                      "apiVersion": "2024-11-01",
+                      "name": "[format('{0}/{1}', parameters('redisName'), variables('assignmentName'))]",
+                      "properties": {
+                        "accessPolicyName": "Data Contributor",
+                        "objectId": "[parameters('principalId')]",
+                        "objectIdAlias": "[parameters('principalId')]"
+                      }
+                    }
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Resources/deployments', 'frontendApp')]",
+                "[resourceId('Microsoft.Resources/deployments', 'portalRedis')]"
               ]
             },
             {
@@ -3562,6 +3997,9 @@
                   },
                   "virtualNetworkSubnetId": {
                     "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.appSubnetId.value]"
+                  },
+                  "clientAffinityEnabled": {
+                    "value": false
                   }
                 },
                 "template": {
@@ -3571,7 +4009,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "8972138919102563065"
+                      "templateHash": "1104947881100529762"
                     }
                   },
                   "parameters": {
@@ -3624,6 +4062,13 @@
                       "metadata": {
                         "description": "Delegated subnet for regional VNet integration. Leave empty to keep the app off the virtual network."
                       }
+                    },
+                    "clientAffinityEnabled": {
+                      "type": "bool",
+                      "defaultValue": false,
+                      "metadata": {
+                        "description": "Send each browser back to the instance that served it first (ARR affinity). Only an app that keeps state on the instance needs it."
+                      }
                     }
                   },
                   "variables": {
@@ -3643,6 +4088,7 @@
                       "properties": {
                         "serverFarmId": "[parameters('serverFarmId')]",
                         "httpsOnly": true,
+                        "clientAffinityEnabled": "[parameters('clientAffinityEnabled')]",
                         "virtualNetworkSubnetId": "[if(empty(parameters('virtualNetworkSubnetId')), null(), parameters('virtualNetworkSubnetId'))]",
                         "siteConfig": "[variables('webSiteConfig')]"
                       }
@@ -5168,6 +5614,14 @@
             "avdHostDataCollectionRuleId": {
               "type": "string",
               "value": "[if(parameters('deployHostMonitoring'), reference(resourceId('Microsoft.Resources/deployments', 'hostMonitoring'), '2025-04-01').outputs.avdHostDataCollectionRuleId.value, '')]"
+            },
+            "portalSessionStore": {
+              "type": "string",
+              "value": "[if(variables('usePortalRedis'), 'redis', 'filesystem')]"
+            },
+            "portalRedisName": {
+              "type": "string",
+              "value": "[if(variables('usePortalRedis'), reference(resourceId('Microsoft.Resources/deployments', 'portalRedis'), '2025-04-01').outputs.name.value, '')]"
             }
           }
         }
@@ -5500,6 +5954,14 @@
     "avdHostDataCollectionRuleId": {
       "type": "string",
       "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.avdHostDataCollectionRuleId.value]"
+    },
+    "portalSessionStore": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.portalSessionStore.value]"
+    },
+    "portalRedisName": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.portalRedisName.value]"
     }
   }
 }

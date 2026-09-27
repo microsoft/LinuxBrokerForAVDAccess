@@ -1189,7 +1189,58 @@ The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
 
 ### 4.9 Scaling out the portal and API
 
-**Status: Planned**
+**Status: Done, except the checks in Azure** · the checks wait for the Phase 4 validation
+
+**Shipped.** The portal keeps its sessions in a Redis cache that every instance shares, the API
+reuses its database connections, and `appServicePlanCapacity` sets how many instances the App
+Service plan runs, 1 by default. Where it differs from the design below:
+
+- **A shared session store, with affinity only as the fallback.** `portalSessionStore` defaults to
+  `redis`. The deployment creates a cache with access keys off, reached only through a private
+  endpoint, gives the portal's managed identity access to it, integrates the portal with the app
+  subnet, and turns ARR affinity off for the portal. It turns affinity off for the API too. With
+  `filesystem`, and on an `AzureCustom` cloud, the portal keeps sessions on disk with affinity on.
+- **Redis differs by cloud.** The public cloud gets Azure Managed Redis `Balanced_B0`, with its
+  high availability on, because new customers can't create Azure Cache for Redis there since
+  1 April 2026. Azure Government gets Azure Cache for Redis, because Azure Managed Redis isn't
+  offered there; move it when it is, and before Azure Cache for Redis retires on 30 September 2028.
+  The Government default is `Standard_C1`, not `Standard_C0`, which shares a CPU core and which
+  Microsoft recommends only for dev/test. `portalRedisSku` picks another size.
+- **Token resource in Azure Government.** The portal asks for tokens for `https://redis.azure.com`
+  by default. In Azure Government the deployment asks for Azure Cache for Redis's application ID,
+  `acca5fbb-b7e4-4009-81f1-37e38fd66d78`, instead, since Microsoft's documentation accepts both in
+  the public cloud and names no Government URI.
+- **The cookie and the lifetime.** The session cookie is now `Secure` and `SameSite=Lax` as well as
+  `HttpOnly`. A session ends 12 hours after the operator's last request, when the cache deletes it.
+  `SESSION_LIFETIME_HOURS` changes that, but `azd provision` replaces the portal's app settings, so
+  it has to be set again after each provision. Only the sign-in routes and `/api/ui` load the
+  session, so the page shell and `/health` keep working while the cache is down, and the portal
+  answers `503` with `Retry-After` instead of failing to load.
+- **A pool without Entra SQL authentication.** Each API worker process keeps the connections it has
+  finished with and reuses the newest first. It closes a connection idle for 120 seconds, rather
+    than 300, because App Service forgets an outbound connection after four minutes without traffic,
+    or open for 30 minutes. A
+  connection is rolled back when it returns and closed if that fails. Its next transaction begins
+  when it is handed out again, not when it returned: the SQL integration tests showed that SQL
+  Server stamps a change to a system-versioned table with its transaction's start time and refuses
+  one older than the row's current version (error 13535), which a transaction left open in the
+  pool would be. `DB_POOL_ENABLED` turns it off. Entra authentication and the mssql-python driver
+  stay in the hardening backlog.
+- **Capacity warnings.** Each instance's API can run 12 database requests at once, so `preprovision`
+  warns when the Basic database tier, at most 30, is too small for the capacity, and when sign-ins
+  on several instances would rely on affinity.
+- **The task function stays on the plan.** Its timers already run on one instance at a time,
+  through a lease in its storage account, and each run is a few calls to the API. A plan of its
+  own, or Flex Consumption, would add cost and a second virtual network integration for no gain.
+- The two stray `flask_session/` files are no longer tracked.
+
+**Open.** In Azure, check that the portal signs in to the cache as its managed identity in each
+cloud, including the Government token resource; that a cache created with Entra authentication on
+and access keys off accepts it at once; that a sign-in on one instance works on another, with the
+capacity at 2 for the test; that the portal answers `503` while the cache is unreachable and
+recovers; and that `Balanced_B0` and the Government API versions are available.
+
+**Design.**
 
 - The BFF uses filesystem sessions (`front_end/app.py`), which rely on ARR affinity when
   scaled out. Move to a shared session store, or keep affinity and document it.
@@ -1217,7 +1268,6 @@ A separate track, prioritized independently of the phases.
 | NFS `AUTH_SYS` trust | `sec=sys`, `NoRootSquash` (`nfs-storage.bicep`, `create-user.sh`); root on any host in the subnet can read every home | Restrict private endpoint access to the Linux host subnet with an NSG. Consider Azure NetApp Files with Kerberos (krb5p) for strong isolation. |
 | Hosts download scripts from `main` at provisioning | `scriptSourceRoot` defaults to the `main` branch | Pin to a release tag or commit and verify checksums, or bake scripts into the image (4.2) |
 | Checkout abuse | The AvdHost role can check out any username | Rate-limit per AVD host. Optionally verify that the username belongs to the user signed in to that AVD session. |
-| Committed test artifacts | `flask_session/` files are tracked, although they're in `.gitignore` | `git rm` them |
 
 ---
 

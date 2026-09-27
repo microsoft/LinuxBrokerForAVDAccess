@@ -9,12 +9,12 @@ if connection_string:
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory, session
-from flask_session import Session
 from flask_wtf.csrf import CSRFProtect, CSRFError, generate_csrf
 
 from function_api import NotAuthenticated, api_get, api_post, fetch_vm_summary
 from function_authentication import login_required
 from function_bff import API_PREFIX, json_error
+from session_store import SessionStoreUnavailable, configure_sessions
 from route_authentication import register_route_authentication
 from route_vm_management import register_route_vm_management
 from route_scaling_management import register_route_scaling_management
@@ -29,12 +29,13 @@ from route_maintenance import register_route_maintenance
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('FLASK_KEY')
-app.config['SESSION_TYPE'] = 'filesystem'
 app.config['VERSION'] = '0.121'
 # Tokens stay valid for the life of the session rather than expiring after an
 # hour, so a long-lived management page does not start rejecting submissions.
 app.config['WTF_CSRF_TIME_LIMIT'] = None
-Session(app)
+# Local disk unless SESSION_BACKEND=redis, which deployments set so every
+# instance shares the same sessions.
+configure_sessions(app)
 
 # Protects the state-changing endpoints. The React client reads the token from
 # /api/ui/session and sends it back as the X-CSRFToken header, which CSRFProtect
@@ -273,6 +274,20 @@ def handle_csrf_error(e):
 
 @app.errorhandler(500)
 def handle_server_error(e):
+    # A session store outage is raised while the session opens or saves, outside
+    # any view, so it arrives here wrapped in the 500. Flask has already logged the
+    # traceback, but through its own logger, which Application Insights doesn't collect.
+    cause = getattr(e, 'original_exception', None)
+    if isinstance(cause, SessionStoreUnavailable):
+        logger.error("%s", cause)
+        message = ("The portal cannot reach its session store right now, so sign-in is "
+                   "unavailable. Try again in a few minutes.")
+        headers = {"Retry-After": "30"}
+        if _wants_json():
+            body, status = json_error(message, 503)
+            return body, status, headers
+        return message, 503, dict(headers, **{"Content-Type": "text/plain; charset=utf-8"})
+
     logger.error("Unhandled server error: %s", e)
     if _wants_json():
         return json_error("An unexpected error occurred. The issue has been logged.", 500)

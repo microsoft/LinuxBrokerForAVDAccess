@@ -61,6 +61,10 @@ HOST_SETTINGS = {"GracePeriodSeconds": 1200, "ReconcileIntervalSeconds": 60,
 # Every JSON endpoint the React portal calls.
 API = "/api/ui"
 
+# Only the API and the sign-in routes load the session, so a test that reads or
+# writes it directly must open it on one of them.
+UI_SESSION_PATH = f"{API}/session"
+
 HOST_HEALTH = {
     "ExpectedAgentVersion": "1.0.0", "CurrentSettingsVersion": 3, "StaleAfterSeconds": 180,
     "Summary": {"Total": 2, "PoweredOn": 2, "Reporting": 1, "Healthy": 1, "Attention": 1, "Off": 0,
@@ -386,7 +390,7 @@ def signed_in_client(client):
 def sign_in(client):
     # Match the app's naive datetime.utcnow().timestamp() convention exactly.
     expiry = (datetime.utcnow() + timedelta(hours=1)).timestamp()
-    with client.session_transaction() as sess:
+    with client.session_transaction(UI_SESSION_PATH) as sess:
         sess["user"] = {"name": "Test Operator", "preferred_username": "op@contoso.com",
                         "oid": "0000-1111", "tid": "2222-3333"}
         sess["access_token"] = "fake-token"

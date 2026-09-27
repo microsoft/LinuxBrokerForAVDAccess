@@ -110,6 +110,15 @@ SSH_KEY_CACHE_SECONDS = env_int('SSH_KEY_CACHE_SECONDS', 3600, minimum=60, maxim
 DB_MAX_CONCURRENCY = env_int('DB_MAX_CONCURRENCY', 6, minimum=1, maximum=200)
 DB_ACQUIRE_TIMEOUT_SECONDS = env_int('DB_ACQUIRE_TIMEOUT_SECONDS', 15, minimum=1, maximum=120)
 
+# Connections a worker process has finished with are kept for its next request (db_pool.py).
+# The API reaches Azure SQL through App Service's outbound load balancer, which forgets a
+# connection after four minutes without traffic, so idle connections are closed well before
+# then. The lifetime limit makes connections sign in again regularly, with the password
+# refresh_db_password last read from Key Vault.
+DB_POOL_ENABLED = env_bool('DB_POOL_ENABLED', True)
+DB_POOL_IDLE_SECONDS = env_int('DB_POOL_IDLE_SECONDS', 120, minimum=5, maximum=3600)
+DB_POOL_MAX_LIFETIME_SECONDS = env_int('DB_POOL_MAX_LIFETIME_SECONDS', 1800, minimum=60, maximum=86400)
+
 SWEEP_CONCURRENCY = env_int('SWEEP_CONCURRENCY', 8, minimum=1, maximum=64)
 SWEEP_DEADLINE_SECONDS = env_int('SWEEP_DEADLINE_SECONDS', 40, minimum=5, maximum=100)
 APPLY_CONCURRENCY = env_int('APPLY_CONCURRENCY', 10, minimum=1, maximum=64)

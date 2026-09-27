@@ -64,6 +64,7 @@ At a high level, the deployment provisions and configures the following:
 - App Service plan, storage account, Application Insights, Log Analytics, and networking.
 - A private DNS zone, `linuxbroker.internal`, linked to the virtual network with auto-registration, so the broker reaches each Linux host as `<hostname>.linuxbroker.internal`. It is skipped when you supply `domainName`.
 - A premium Azure Files NFS share for Linux home directories, reachable only through a private endpoint. It is skipped when you supply `nfsShare`, set `deployNfsShare` to `false`, or deploy no Linux hosts.
+- A Redis cache for the portal's sign-in sessions, reachable only through a private endpoint: Azure Managed Redis in the public cloud, and Azure Cache for Redis in Azure Government. It is skipped when `portalSessionStore` is `filesystem` or `azureCloudName` is `AzureCustom`. See [Portal And API Scale-Out](#portal-and-api-scale-out).
 - Optional Linux hosts and optional AVD hosts, depending on azd environment settings.
 - When AVD hosts are deployed, a RemoteApp application group that publishes **Linux Desktop**, which runs `Connect-LinuxBroker.ps1` on the session host to check out a Linux host and open an RDP session to it.
 - When AVD hosts are deployed, an Azure Virtual Desktop scaling plan that starts and stops the session hosts on a schedule, and Start VM on Connect on the host pool. See [AVD Autoscale](#avd-autoscale).
@@ -81,7 +82,8 @@ The deployment model now follows these runtime rules:
 - The keyring vault holds one secret per user, `keyring-<uid>`, which the API creates at the user's first checkout. The template adds none.
 - Frontend and API auth secrets are stored in app settings, not in Key Vault.
 - Linux hosts are registered into SQL during `postprovision`. AVD hosts are not.
-- The API and function apps are integrated with the virtual network's app subnet, so the API reaches Linux hosts on their private IP addresses for SSH and the portal's connectivity test.
+- The API and function apps are integrated with the virtual network's app subnet, so the API reaches Linux hosts on their private IP addresses for SSH and the portal's connectivity test. The portal is integrated with the same subnet while its sessions are in Redis, to reach the cache.
+- The portal's managed identity holds the session cache's `default` access policy on Azure Managed Redis, or `Data Contributor` on Azure Cache for Redis, and signs in to the cache with Microsoft Entra ID. The cache's access keys are turned off.
 - The API managed identity holds **Desktop Virtualization Power On Off Contributor** on the VM resource group, which lets it start and stop hosts for the portal and scaling rules without broader write access. Stopping a host powers it off without deallocating it, so a stopped host still accrues compute charges.
 - Members of the AVD users group hold **Desktop Virtualization User** on the RemoteApp application group and **Virtual Machine User Login** on each session host. Both are required: the first publishes **Linux Desktop** to the user, and the second lets the user sign in to the Microsoft Entra joined session host.
 - The Azure Virtual Desktop service principal holds **Desktop Virtualization Power On Off Contributor** on the subscription, which autoscale and Start VM on Connect need. Autoscale does not work with the role on a resource group, and the role lets Azure Virtual Desktop start and stop any session host in the subscription, not only this deployment's.
@@ -97,6 +99,9 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `appName`: base name for generated resources.
 - `AZURE_LOCATION`: deployment region.
 - `appServicePlanSku`: App Service plan SKU. The deployment baseline defaults to Premium v3 `P2mv3` for 4 vCPUs and 32 GB memory.
+- `appServicePlanCapacity`: instances of the App Service plan, from 1 to 30. Defaults to `1`. The portal, the API and the task function run on every instance. See [More than one instance](#more-than-one-instance).
+- `portalSessionStore`: `redis` or `filesystem`. Defaults to `redis`, or to `filesystem` when `azureCloudName` is `AzureCustom`. Where the portal keeps sign-in sessions: in a Redis cache that every portal instance shares, or on each instance's disk. See [Portal And API Scale-Out](#portal-and-api-scale-out).
+- `portalRedisSku`: size of that cache. Leave empty, the default, for `Balanced_B0` (Azure Managed Redis) in the public cloud or `Standard_C1` (Azure Cache for Redis) in Azure Government. See [Size and cost](#size-and-cost).
 - `allowedClientIp`: your public client IP for SQL bootstrap from the local machine.
 - `deployLinuxHosts`: `true` or `false`.
 - `deployAvdHosts`: `true` or `false`.
@@ -126,7 +131,7 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `alertCheckoutRefusalThreshold`, `alertApiErrorThreshold` and `alertNfsLatencyThresholdMs`: the refused checkouts and the API `5xx` responses in 15 minutes, and the average latency of the home directory share in milliseconds, that raise an alert. They default to `1`, `5` and `50`. See [Alerts](#alerts).
 - `vmHostResourceGroup`: override if managed VMs live in a different resource group.
 - `brokerReaderGroupId`, `brokerOperatorGroupId`, `brokerAdminGroupId`: optional object IDs of Entra groups to assign the Broker API's `Reader`, `Operator` and `FullAccess` app roles to. Assigning an app role to a group needs Microsoft Entra ID P1 or P2; without it, assign the roles to users in **Enterprise applications**. See [Portal roles](#portal-roles).
-- `sqlDatabaseSkuName`: Azure SQL Database SKU, for example `Basic`, `S1` or `GP_S_Gen5_1`. Defaults to `Basic`, which suits small pools. Use `S1` or higher when many hosts and portal users call the broker at once; each API worker process opens at most `DB_MAX_CONCURRENCY` connections (6 by default).
+- `sqlDatabaseSkuName`: Azure SQL Database SKU, for example `Basic`, `S1` or `GP_S_Gen5_1`. Defaults to `Basic`, which suits small pools. Use `S1` or higher when many hosts and portal users call the broker at once, or when `appServicePlanCapacity` is 3 or more: each instance's API runs two worker processes, each process opens at most `DB_MAX_CONCURRENCY` connections (6 by default), and the Basic tier runs at most 30 requests at once.
 - `allowLegacyScopeAccess`: `true` or `false`. Defaults to `false`. When `true`, any portal user holding the `access_as_user` scope is treated as `FullAccess`, as in releases before role enforcement. Use it only while you assign roles during an upgrade.
 
 ### Values that are usually auto-generated
@@ -217,6 +222,8 @@ The mirror must preserve the repository layout, because the bootstrap scripts ap
 ### Cloud availability caveats
 
 Confirm before deploying to a non-commercial cloud that the region offers Azure Virtual Desktop, the App Service Premium v3 `P2mv3` SKU, and the Linux and Windows VM images referenced by the deployment. Availability differs between clouds, and a missing SKU or image surfaces as a provisioning failure rather than a validation error.
+
+The portal's session cache needs Azure Managed Redis in the public cloud, which not every region offers, and Azure Cache for Redis in Azure Government. See [Size and cost](#size-and-cost) for how to check, and what to do where the region lacks it.
 
 ### SSH key values for Linux hosts
 
@@ -724,6 +731,107 @@ the problem is gone.
   one or more addresses, separated by commas or semicolons, to get them by email. For a Teams
   channel, use the channel's email address.
 
+## Portal And API Scale-Out
+
+The portal, the API and the task function run on one App Service plan, and every instance of the
+plan runs all three. `appServicePlanCapacity` sets how many instances the plan has, 1 by default.
+The portal keeps each administrator's sign-in, with the Entra ID token it calls the API with, in a
+session on the server, so the browser holds only an opaque cookie. On more than one instance, every
+instance has to find that session, so with `portalSessionStore` set to `redis`, the default, the
+deployment keeps the sessions in a cache that every portal instance shares:
+
+| `azureCloudName` | Session cache | Default size | Private DNS zone |
+| --- | --- | --- | --- |
+| `AzurePublic` | Azure Managed Redis | `Balanced_B0` | `privatelink.redis.azure.net` |
+| `AzureUSGovernment` | Azure Cache for Redis | `Standard_C1` | `privatelink.redis.cache.usgovcloudapi.net` |
+| `AzureCustom` | None: the portal keeps sessions on each instance's disk | | |
+
+The clouds differ because new customers can no longer create Azure Cache for Redis in the public
+cloud, and Azure Managed Redis isn't offered in Azure Government. Azure Cache for Redis retires on
+30 September 2028, and Azure Government lets new caches be created until then.
+
+### Portal sessions
+
+- The cache, `redis-<app><env>-<suffix>`, takes no traffic from the internet and has its access
+  keys turned off. The portal reaches it through the private endpoint `pe-redis-<app><env>-<suffix>`
+  in the private endpoint subnet, so the deployment integrates the portal with the virtual network's
+  app subnet, as it does the API and the task function, and links the private DNS zone to the
+  virtual network.
+- The portal signs in to the cache as its system-assigned managed identity, over TLS, on port 10000
+  for Azure Managed Redis or 6380 for Azure Cache for Redis. The deployment gives the identity the
+  database's `default` access policy on Azure Managed Redis, or `Data Contributor` on Azure Cache for
+  Redis.
+- A session ends 12 hours after the administrator's last request, and the cache deletes it then.
+  The `SESSION_LIFETIME_HOURS` app setting on the portal, from 1 to 720, changes that, but
+  `azd provision` replaces the portal's app settings, so set it again after each provision. The
+  session cookie is `Secure`, `HttpOnly` and `SameSite=Lax`.
+- When the cache can't be reached, the portal answers `503` to the requests that need a session and
+  says that sign-in is unavailable for now. `/health` doesn't use the session, so App Service keeps
+  the instances, and the portal recovers by itself when the cache answers again. See
+  [The portal answers 503 and says it cannot reach its session store](#the-portal-answers-503-and-says-it-cannot-reach-its-session-store).
+- Moving the sessions to the cache signs every administrator out once. The `azd provision` that
+  creates the cache restarts the portal with the new settings before the portal's identity gets its
+  access policy, which can then take a few more minutes to take effect, so the portal can answer
+  `503` for those minutes.
+- With `portalSessionStore` set to `filesystem`, the portal keeps sessions on each instance's disk,
+  and the deployment doesn't integrate it with the virtual network. That disk doesn't survive a
+  restart, so each restart signs out the administrators on that instance. The deployment turns on
+  ARR affinity for the portal, which sends each browser back to the instance it signed in on.
+  Changing `portalSessionStore` to `filesystem` later deletes nothing that an earlier deployment
+  created.
+
+### Size and cost
+
+The cache is billed for every hour it exists, whether or not anyone signs in, and so is its private
+endpoint. Sessions are small, so the default sizes hold far more sessions than a deployment has
+administrators:
+
+- `Balanced_B0` is the smallest size of Azure Managed Redis. The deployment keeps its high
+  availability on, with a replica on a second node, which Microsoft recommends for everything but
+  dev/test.
+- `Standard_C1` is the smallest size of Azure Cache for Redis that Microsoft recommends outside
+  dev/test. `Standard_C0` costs less but shares a CPU core with other caches, and the `Basic` tier
+  has no replica and no SLA.
+
+Set `portalRedisSku` to use another size, for example where the region doesn't offer the default.
+In the public cloud, name an Azure Managed Redis size, such as `Balanced_B1` or `Balanced_B3`. In
+Azure Government, name an Azure Cache for Redis size, written `<tier>_<family><capacity>`:
+`Basic_C0` to `Basic_C6`, `Standard_C0` to `Standard_C6`, or `Premium_P1` to `Premium_P5`.
+
+Azure Managed Redis isn't offered in every region. This lists the regions that offer it:
+
+```powershell
+az provider show --namespace Microsoft.Cache --query "resourceTypes[?resourceType=='redisEnterprise'].locations | [0]" --output tsv
+```
+
+Where it isn't offered, set `portalSessionStore` to `filesystem`, and keep `appServicePlanCapacity`
+at 1 or rely on ARR affinity.
+
+### More than one instance
+
+More instances add capacity, and let one instance keep answering while App Service maintains
+another. Each instance runs the portal, the API and the task function and is billed as a plan
+instance, so check the following before you raise `appServicePlanCapacity`:
+
+- **The database.** Each instance's API runs two worker processes, and each runs at most
+  `DB_MAX_CONCURRENCY` database requests at once, 6 by default, so each instance adds 12. The `Basic`
+  tier runs at most 30 at once, so with 3 or more instances, set `sqlDatabaseSkuName` to `S1` or
+  higher. `preprovision` warns when the Basic tier is too small.
+- **ARR affinity.** The deployment turns ARR affinity off for the API, whose callers keep nothing on
+  an instance, and for the portal while its sessions are in the cache, so requests spread across the
+  instances. With `portalSessionStore` set to `filesystem`, it stays on for the portal, and
+  `preprovision` warns that sign-ins then depend on it.
+- **The task function stays on the plan.** Its timers run once per schedule, however many instances
+  there are: the Functions host lets only one instance run a timer, through a lease in the function
+  app's storage account. Each run is a few calls to the API, and the busiest timers run once a
+  minute, so it doesn't compete with the API. A plan of its own, or Flex Consumption, would add cost
+  and a second virtual network integration for no gain.
+- **Database connections.** Each API worker process keeps the connections it has finished with and
+  reuses them, instead of signing in to the database for each request. On App Service, each closed
+  connection also holds one of the instance's outbound ports for four minutes. `DB_POOL_ENABLED`,
+  `DB_POOL_IDLE_SECONDS` and `DB_POOL_MAX_LIFETIME_SECONDS` on the API tune the pool; see
+  [Database Access](../api/README.md#database-access).
+
 ## Quick Start
 
 From the repository root:
@@ -1041,7 +1149,7 @@ Every layer tolerates the others being one release behind during the rollout, an
 
 ## Upgrading To Start On Demand
 
-This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)), opens the Linux desktop full screen across every monitor (item 4.8), starts and stops the AVD session hosts on a schedule (item 4.5), moves users' caches off the home directory share (item 4.6), and collects the hosts' logs in Log Analytics, with a workbook and alerts for the fleet (item 4.7). The schedule adds a scaling plan and a role assignment on the subscription, and the monitoring adds data collection rules, a workbook and alerts, so the release needs `azd provision`, the AVD session hosts need the new `Connect-LinuxBroker.ps1`, and the Linux hosts need the host migration.
+This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)), opens the Linux desktop full screen across every monitor (item 4.8), starts and stops the AVD session hosts on a schedule (item 4.5), moves users' caches off the home directory share (item 4.6), collects the hosts' logs in Log Analytics, with a workbook and alerts for the fleet (item 4.7), and keeps the portal's sign-ins in Redis, so the portal and the API can run on more than one instance (item 4.9). The schedule adds a scaling plan and a role assignment on the subscription, the monitoring adds data collection rules, a workbook and alerts, and the portal's sessions add a Redis cache, so the release needs `azd provision`, the AVD session hosts need the new `Connect-LinuxBroker.ps1`, and the Linux hosts need the host migration.
 
 - **Start on demand.** When a checkout finds no ready host, the API starts a stopped one for the user and answers `202` with how long to wait, instead of refusing. On the AVD session host, **Linux Desktop** shows *Your Linux desktop is starting…* with **Cancel**, asks again when the broker says to, and opens the desktop as soon as the host is reachable, for up to 10 minutes. The start is recorded as a scaling start is, in the scaling activity log as `Start On Demand` and in the audit log as `vm.start_on_demand`, and uses the API's existing **Desktop Virtualization Power On Off Contributor** role. It never takes the pool past the active rule's or window's `MaxVMs`, so a user who arrives when that many hosts are on and none is free is refused as before. Start on demand is on after the upgrade; an administrator can turn it off, and set how many hosts may start at once for waiting users (2 by default, up to 20), in the **Start on demand** card on the **Scaling** page.
 - **Scale to zero.** While start on demand is on, the default rule and schedule windows may keep a minimum of 0 hosts, so idle hosts stop, for example overnight, and the first user to arrive waits a minute or two for one to start. Scaling counts waiting users as demand, and a scale-down keeps a host for each of them. A minimum of 0 cannot be saved while start on demand is off. If it is turned off afterwards, scaling keeps one host on for those rules and windows, and the card says so.
@@ -1056,17 +1164,19 @@ This release lets a checkout that finds no ready host start one, so a pool can s
 - **`install-host-config.sh`.** The three bootstraps and the host migration install `/usr/local/bin/install-host-config.sh` and run it as root. It writes the read-ahead rule, the log rotation, the cache directory with the file that empties it at every restart, and the profile script, and it removes the unused `/awipsprofiles`, because `create-user.sh` now mounts the share on `/nfs_profiles` while it creates a home directory. `azd provision` doesn't run the bootstrap again on existing hosts, so they get the script from the migration; a host the migration skips because it is stopped keeps its caches in the home directory until it is migrated. The script can be run again at any time. See [Sizing the share](#sizing-the-share) for how the share's size sets its IOPS.
 - **Host monitoring.** `azd provision` creates the data collection rules, the **Linux Broker fleet** workbook and the alerts, and its `postprovision` step then connects the hosts and installs the Azure Monitor agent on the running ones, so their logs arrive in Log Analytics. Once SQL script `157` is applied, the API logs a fleet snapshot every five minutes, which the workbook's fleet charts and three of the alerts use. The alerts notify nobody until you set `alertEmailAddresses`. Set `deployHostMonitoring` to `false` before you provision to leave the monitoring out. See [Host Monitoring](#host-monitoring).
 - **Log timestamps and permissions.** Each line of `createuser.log` now starts with the date and time, as the broker's other logs do. The logs of the release agent and its watcher name the users signed in to the host, so only root could read them; now the `syslog` group can too, where the host has one, so that the Azure Monitor agent can collect them.
+- **Portal sessions move to Redis.** `azd provision` creates the portal's session cache, Azure Managed Redis in the public cloud and Azure Cache for Redis in Azure Government, with a private endpoint, integrates the portal with the virtual network's app subnet, and points the portal at the cache, which signs every administrator out once. The deployment gives the portal's identity its access policy after the portal restarts with the new settings, so the portal can answer `503` for a few minutes. The cache is billed by the hour; set `portalSessionStore` to `filesystem` before you provision to keep the sessions on the portal's disk, as before. The session cookie is now also `Secure` and `SameSite=Lax`. See [Portal And API Scale-Out](#portal-and-api-scale-out).
+- **More than one instance.** The new `appServicePlanCapacity` sets how many instances the App Service plan runs, still 1 by default. ARR affinity is now off for the API, and for the portal while its sessions are in Redis. Each instance's API adds 12 database requests at once, so the Basic database tier suits at most 2 instances. The API now also reuses its database connections, which needs no change. See [More than one instance](#more-than-one-instance).
 
 ### Recommended order
 
 1. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1). It applies SQL scripts `144`–`157` before the new images start, restarts the apps in the order API, task, front end, migrates the Linux hosts, and then updates `Connect-LinuxBroker.ps1` on the running AVD session hosts. Running it before `azd provision` updates the session hosts before autoscale starts stopping them. Its post-provision step reports that the deployment has no host monitoring yet, which `azd provision` adds next.
 2. Start any AVD session host the migration skipped because it was not running, and update it with `-SkipPostProvision -SkipLinuxHostReleaseAgentMigration -AvdHostNames <session-host>`.
-3. Review the [AVD autoscale](#avd-autoscale) values and the [host monitoring](#host-monitoring) values, such as `alertEmailAddresses`, then run `azd provision`. It creates the scaling plan, the role assignment and the host monitoring and turns on Start VM on Connect, and its `postprovision` step builds the images, restarts the apps again and connects the hosts to the host monitoring. If `preprovision` warns that it cannot assign the role, have an Owner or User Access Administrator run the command it prints, then run `azd provision` again.
+3. Review the [AVD autoscale](#avd-autoscale) values, the [host monitoring](#host-monitoring) values, such as `alertEmailAddresses`, and the [portal session](#portal-and-api-scale-out) values, then run `azd provision`. It creates the scaling plan, the role assignment, the host monitoring and the portal's session cache and turns on Start VM on Connect, and its `postprovision` step builds the images, restarts the apps again and connects the hosts to the host monitoring. If `preprovision` warns that it cannot assign the role, have an Owner or User Access Administrator run the command it prints, then run `azd provision` again. Administrators then sign in to the portal again; if it answers `503`, see [The portal answers 503 and says it cannot reach its session store](#the-portal-answers-503-and-says-it-cannot-reach-its-session-store).
 4. For each host that `postprovision` named because it was not running, start it and run [Enable-HostMonitoring.ps1](Enable-HostMonitoring.ps1) for it, as [Connecting the hosts](#connecting-the-hosts) describes. Within about 15 minutes, the workbook should show a fleet snapshot, and `Heartbeat | where Category == "Azure Monitor Agent"` in the workspace should list each host that has the agent.
 5. With a test user, open **Linux Desktop** while no host is free, for example with every idle host stopped, and confirm that the wait window appears and the desktop opens once the host is up. In a terminal in that session, `echo $XDG_CACHE_HOME` should print `/var/cache/linuxbroker/users/<user>`.
 6. Before you set any minimum to 0, confirm that the **Start on demand** card names no session host whose script cannot wait. The card goes by each session host's latest checkout in the last seven days, so a session host updated since then is listed until its next checkout.
 
-Every layer tolerates the others being one release behind during the rollout. Against a database without the new procedures, the new API refuses a checkout that finds no host with `409`, as before, and logs it once, and the portal says that the broker does not support start on demand yet. Without `GetFleetSnapshot`, it logs no fleet snapshot, and neither does the previous API build, so the **No fleet snapshot** alert fires until both SQL script `157` and the new API are in place. The previous API build keeps working against the new database: it never answers `202`, so nobody waits, and it refuses a minimum of 0 as before. Session hosts that still run an older script behave as described above. The Linux host changes don't depend on the API: a migrated host keeps caches on its own disk with either API, and a host that is not migrated yet keeps them in the home directory. A host that is not migrated yet gets the agent too, but its release agent keeps its own logs readable by root only, and its `createuser.log` lines have no timestamp, so each line arrives as a record of its own.
+Every layer tolerates the others being one release behind during the rollout. Against a database without the new procedures, the new API refuses a checkout that finds no host with `409`, as before, and logs it once, and the portal says that the broker does not support start on demand yet. Without `GetFleetSnapshot`, it logs no fleet snapshot, and neither does the previous API build, so the **No fleet snapshot** alert fires until both SQL script `157` and the new API are in place. The previous API build keeps working against the new database: it never answers `202`, so nobody waits, and it refuses a minimum of 0 as before. Session hosts that still run an older script behave as described above. The Linux host changes don't depend on the API: a migrated host keeps caches on its own disk with either API, and a host that is not migrated yet keeps them in the home directory. A host that is not migrated yet gets the agent too, but its release agent keeps its own logs readable by root only, and its `createuser.log` lines have no timestamp, so each line arrives as a record of its own. The new portal image keeps sessions on its disk, as before, until `azd provision` gives it the cache's settings. The previous portal image ignores those settings and keeps sessions on its disk, which works on one instance, so raise `appServicePlanCapacity` only once the new images run.
 
 ## Manual Steps After `azd up`
 
@@ -1123,6 +1233,7 @@ Verify that the expected resources exist in the target resource group:
 - the NFS storage account, its `home` share, and its private endpoint, unless `nfsShare` was supplied or `deployNfsShare` is `false`
 - for AVD, the host pool, the desktop and RemoteApp application groups, the workspace, and the **Linux Desktop** application
 - unless `deployHostMonitoring` is `false`, the data collection rules `dcr-<appName>-<environmentName>-linux` and `dcr-<appName>-<environmentName>-avd`, the **Linux Broker fleet** workbook, the `alert-<appName>-<environmentName>-...` alert rules, and, when `alertEmailAddresses` is set, the action group
+- unless `portalSessionStore` is `filesystem` or `azureCloudName` is `AzureCustom`, the portal's session cache `redis-<app><env>-<suffix>`, its private endpoint, and the `privatelink.redis.azure.net` private DNS zone, or `privatelink.redis.cache.usgovcloudapi.net` in Azure Government
 
 ### Key Vault
 
@@ -1172,6 +1283,7 @@ Confirm that:
 - the frontend and API apps restarted after the ACR builds
 - the function app restarted after the image build
 - frontend sign-in works after admin consent is granted
+- with the session cache, the portal's app settings have `SESSION_BACKEND` set to `redis` and `REDIS_HOST` set to the cache's host name, and its **Networking** page shows virtual network integration with the `snet-appsvc` subnet
 - the portal's connectivity test succeeds for each Linux host, which confirms DNS resolution and SSH from the API
 - a user in the AVD users group can open **Linux Desktop** and land on a Linux desktop, and their home directory is on the NFS share (`df -h ~` on the Linux host)
 - AVD checkout and Linux host release operations work end to end
@@ -1459,6 +1571,21 @@ The API logs a fleet snapshot at the end of each scaling run that succeeds, so t
 - Search them for `Could not read the fleet snapshot`, which the API logs with the database's error.
 - Check that the function app runs and that the scaling activity log gains an entry every five minutes. When it doesn't, the task function cannot reach the API, or the scaling run fails; the API's failed requests to `/api/scaling/trigger` say why.
 
+### The portal answers 503 and says it cannot reach its session store
+
+The portal answers `503` when it cannot read or write a session in its Redis cache. It keeps answering `/health`, so App Service keeps its instances, and it recovers by itself once the cache answers. The portal's log, in its log stream and in Application Insights, gives the cause after `The session store could not be reached`:
+
+- **Right after the `azd provision` that created the cache**, the portal's identity may not have its access policy yet. The deployment assigns it after the portal restarts with the new settings, and it can take a few more minutes to take effect. Wait, and try again.
+- **`AuthenticationError` or `NoPermissionError`** means that the cache refused the portal's identity. Check that the portal app's managed identity holds the `default` access policy on Azure Managed Redis, listed on the cache's **Authentication** page, or `Data Contributor` on Azure Cache for Redis, listed on its **Data Access Configuration** page, with Microsoft Entra authentication on under **Authentication**. `azd provision` assigns it again.
+- **`TimeoutError` or `ConnectionError`** means that the portal cannot reach the cache. Check that the cache is running, that the portal app's **Networking** page shows virtual network integration with `snet-appsvc`, that the private DNS zone, `privatelink.redis.azure.net` or `privatelink.redis.cache.usgovcloudapi.net`, has an A record for the cache and a link to the virtual network, and that `REDIS_HOST` and `REDIS_PORT` in the portal's app settings match the cache's host name and port: 10000 for Azure Managed Redis, 6380 for Azure Cache for Redis.
+- **`RequestTokenErr` or `TokenRenewalErr`** means that the portal's managed identity could not get a token for the cache. Check that the portal app has its system-assigned identity turned on. In Azure Government, the deployment sets `REDIS_ENTRA_RESOURCE` to `acca5fbb-b7e4-4009-81f1-37e38fd66d78`, the application ID that Azure Cache for Redis issues tokens for.
+
+To bring sign-in back while you investigate, set `portalSessionStore` to `filesystem`, with `appServicePlanCapacity` at 1, and run `azd provision`.
+
+### Every administrator was signed out of the portal
+
+This happens once, when an upgrade moves the sessions from the portal's disk to the Redis cache, or back. Otherwise, a session ends 12 hours after its last request, or after `SESSION_LIFETIME_HOURS`. With `portalSessionStore` set to `filesystem`, each restart of a portal instance also signs out its administrators, for example when `azd provision` or a new image restarts the portal. Sessions in the cache survive the portal's restarts, but not the loss of the cache's data, for example when the cache is deleted and created again, or when a `Basic` cache, which has no replica, restarts for maintenance.
+
 ## Related Files
 
 - [azure.yaml](azure.yaml)
@@ -1470,4 +1597,6 @@ The API logs a fleet snapshot at the end of each scaling run that succeeds, so t
 - [Enable-HostMonitoring.ps1](Enable-HostMonitoring.ps1)
 - [bicep/main.bicep](bicep/main.bicep)
 - [bicep/modules/core/host-monitoring.bicep](bicep/modules/core/host-monitoring.bicep)
+- [bicep/modules/core/redis-session-store.bicep](bicep/modules/core/redis-session-store.bicep)
+- [bicep/modules/core/redis-session-access.bicep](bicep/modules/core/redis-session-access.bicep)
 - [../sql_queries/README.md](../sql_queries/README.md)

@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from flask_caching import Cache
 from azure.keyvault.secrets import SecretClient
 from config import *
+from db_pool import ConnectionPool
 
 try:
     # Installed with azure-monitor-opentelemetry. The trace id ties an audit entry to the
@@ -438,14 +439,24 @@ class GroupCheckUnavailable(Exception):
 # cannot exceed the database tier's worker limit during a login storm.
 _db_slots = threading.BoundedSemaphore(DB_MAX_CONCURRENCY)
 
+# Idle connections kept for the next request. They count against DB_MAX_CONCURRENCY along
+# with the busy ones: db_connection() opens a connection only while holding a slot, and
+# puts it back or closes it before giving the slot up.
+_db_pool = ConnectionPool(
+    max_idle=DB_MAX_CONCURRENCY,
+    idle_seconds=DB_POOL_IDLE_SECONDS,
+    max_lifetime_seconds=DB_POOL_MAX_LIFETIME_SECONDS,
+) if DB_POOL_ENABLED else None
+
 
 @contextmanager
 def db_connection():
-    """Yield a database connection that is always closed.
+    """Yield a database connection that is always put back in the pool or closed.
 
     Most handlers previously called get_db_connection() and then conn.close() on the
     success path only, so any exception in between leaked the connection until the
-    pool was exhausted. Using this as a context manager makes the close unconditional.
+    pool was exhausted. Using this as a context manager makes the cleanup unconditional.
+    A connection whose block raised is closed rather than reused.
 
     Raises DatabaseUnavailable when a connection cannot be established, so callers do
     not have to repeat the `if not conn` check. Never nest these: a thread holding one
@@ -454,16 +465,28 @@ def db_connection():
     if not _db_slots.acquire(timeout=DB_ACQUIRE_TIMEOUT_SECONDS):
         raise DatabaseBusy("Timed out waiting for a database connection slot.")
     try:
-        conn = get_db_connection()
-        if not conn:
-            raise DatabaseUnavailable("Could not establish a database connection.")
-        try:
-            yield conn
-        finally:
+        pool = _db_pool
+        if pool is None:
+            conn = get_db_connection()
+            if not conn:
+                raise DatabaseUnavailable("Could not establish a database connection.")
             try:
-                conn.close()
-            except Exception:
-                logger.exception("Failed to close database connection.")
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    logger.exception("Failed to close database connection.")
+        else:
+            pooled = pool.acquire(get_db_connection)
+            if pooled is None:
+                raise DatabaseUnavailable("Could not establish a database connection.")
+            reusable = False
+            try:
+                yield pooled.connection
+                reusable = True
+            finally:
+                pool.release(pooled, reusable)
     finally:
         _db_slots.release()
 

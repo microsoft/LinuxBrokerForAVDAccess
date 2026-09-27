@@ -69,6 +69,21 @@ param appServiceDomain string = ''
 param scriptSourceRoot string = 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main'
 param allowedClientIp string = ''
 param appServicePlanSku string = 'P2mv3'
+
+@description('Instances of the App Service plan. The portal, the API and the task function run on every instance.')
+@minValue(1)
+@maxValue(30)
+param appServicePlanCapacity int = 1
+
+@description('Where the portal keeps sign-in sessions: redis, a cache every portal instance shares, or filesystem, each instance\'s own disk. AzureCustom always uses filesystem.')
+@allowed([
+  'redis'
+  'filesystem'
+])
+param portalSessionStore string = 'redis'
+
+@description('Size of the portal session cache. Leave empty for the default.')
+param portalRedisSku string = ''
 param deployLinuxHosts bool = false
 param deployAvdHosts bool = false
 param linuxHostVmNamePrefix string = 'lnxhost'
@@ -176,6 +191,8 @@ var provisionNfsShare = deployNfsShare && empty(nfsShare) && deployLinuxHosts &&
 var nfsStorageAccountName = take('nfs${sanitizedApp}${suffix}', 24)
 var nfsShareName = 'home'
 var effectiveNfsShare = provisionNfsShare ? '${nfsStorageAccountName}.file.${environment().suffixes.storage}:/${nfsStorageAccountName}/${nfsShareName}' : nfsShare
+// Part of a public DNS name. The unique suffix is never cut off, and the name never ends in a hyphen.
+var portalRedisName = 'redis-${take('${sanitizedApp}${sanitizedEnv}', 40)}-${suffix}'
 
 module networking 'modules/core/networking.bicep' = {
   name: 'networking'
@@ -296,6 +313,7 @@ module appServicePlan 'modules/core/app-service-plan.bicep' = {
     tags: tags
     appServicePlanName: appServicePlanName
     skuName: appServicePlanSku
+    capacity: appServicePlanCapacity
   }
 }
 
@@ -325,19 +343,33 @@ var cloudProfiles = {
     graphEndpoint: 'https://graph.microsoft.com'
     stsIssuerHost: 'https://sts.windows.net'
     appServiceDomain: 'azurewebsites.net'
+    // Azure Cache for Redis can no longer be created by new customers in the public cloud.
+    portalRedisKind: 'managed'
+    portalRedisPrivateDnsZoneName: 'privatelink.redis.azure.net'
+    // Empty keeps the portal's default, https://redis.azure.com.
+    portalRedisEntraResource: ''
   }
   AzureUSGovernment: {
     graphEndpoint: 'https://graph.microsoft.us'
     stsIssuerHost: 'https://sts.windows.net'
     appServiceDomain: 'azurewebsites.us'
+    // Azure Managed Redis is not offered in Azure Government.
+    portalRedisKind: 'cache'
+    portalRedisPrivateDnsZoneName: 'privatelink.redis.cache.usgovcloudapi.net'
+    // The Redis application ID, which unlike its URI does not depend on the cloud.
+    portalRedisEntraResource: 'acca5fbb-b7e4-4009-81f1-37e38fd66d78'
   }
   AzureCustom: {
     graphEndpoint: ''
     stsIssuerHost: ''
     appServiceDomain: ''
+    portalRedisKind: ''
+    portalRedisPrivateDnsZoneName: ''
+    portalRedisEntraResource: ''
   }
 }
 var cloudProfile = cloudProfiles[azureCloudName]
+var usePortalRedis = portalSessionStore == 'redis' && !empty(cloudProfile.portalRedisKind)
 // Carries a trailing slash; both azure-identity and the app config normalize it away.
 var resolvedAuthorityHost = empty(azureAuthorityHost) ? environment().authentication.loginEndpoint : azureAuthorityHost
 var resolvedGraphEndpoint = empty(graphEndpoint) ? cloudProfile.graphEndpoint : graphEndpoint
@@ -433,6 +465,16 @@ var frontendSettings = {
   TENANT_ID: tenantId
   WEBSITE_AUTH_AAD_ALLOWED_TENANTS: tenantId
 }
+// Provisioning replaces every app setting, so these are declared here rather than set by hand.
+var portalSessionSettings = usePortalRedis ? union({
+  SESSION_BACKEND: 'redis'
+  REDIS_HOST: portalRedis!.outputs.hostName
+  REDIS_PORT: string(portalRedis!.outputs.port)
+}, empty(cloudProfile.portalRedisEntraResource) ? {} : {
+  REDIS_ENTRA_RESOURCE: cloudProfile.portalRedisEntraResource
+}) : {
+  SESSION_BACKEND: 'filesystem'
+}
 var apiSettings = {
   ALLOW_LEGACY_SCOPE_ACCESS: allowLegacyScopeAccess ? 'true' : 'false'
   AVD_HOST_GROUP_ID: avdHostGroupId
@@ -471,6 +513,22 @@ var functionSettings = {
   WEBSITE_CONTENTSHARE: toLower(take('${taskAppName}content', 63))
 }
 
+// Sessions every portal instance shares. The cache takes no public traffic, so the portal
+// reaches it through the virtual network.
+module portalRedis 'modules/core/redis-session-store.bicep' = if (usePortalRedis) {
+  name: 'portalRedis'
+  params: {
+    kind: cloudProfile.portalRedisKind
+    name: portalRedisName
+    location: location
+    tags: tags
+    skuName: portalRedisSku
+    virtualNetworkId: networking.outputs.vnetId
+    privateEndpointSubnetId: networking.outputs.privateEndpointSubnetId
+    privateDnsZoneName: cloudProfile.portalRedisPrivateDnsZoneName
+  }
+}
+
 module frontendApp 'modules/apps/container-web-app.bicep' = {
   name: 'frontendApp'
   params: {
@@ -483,11 +541,24 @@ module frontendApp 'modules/apps/container-web-app.bicep' = {
     containerImageName: frontendImageName
     containerRegistryLoginServer: containerRegistry.outputs.loginServer
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
-    appSettings: frontendSettings
+    appSettings: union(frontendSettings, portalSessionSettings)
     authSettings: frontendAuthSettings
     healthCheckPath: '/health'
     alwaysOn: true
     useManagedIdentityForRegistry: true
+    // The plan's apps all share one integration subnet.
+    virtualNetworkSubnetId: usePortalRedis ? networking.outputs.appSubnetId : ''
+    // Sessions kept on each instance's disk only survive if the browser returns to that instance.
+    clientAffinityEnabled: !usePortalRedis
+  }
+}
+
+module portalRedisAccess 'modules/core/redis-session-access.bicep' = if (usePortalRedis) {
+  name: 'portalRedisAccess'
+  params: {
+    kind: cloudProfile.portalRedisKind
+    redisName: portalRedis!.outputs.name
+    principalId: frontendApp.outputs.principalId
   }
 }
 
@@ -510,6 +581,8 @@ module apiApp 'modules/apps/container-web-app.bicep' = {
     useManagedIdentityForRegistry: true
     // SSH to the Linux hosts goes to private addresses, so the API joins the virtual network.
     virtualNetworkSubnetId: networking.outputs.appSubnetId
+    // The API keeps no per-browser state, so any instance can serve any request.
+    clientAffinityEnabled: false
   }
 }
 
@@ -668,3 +741,5 @@ output linuxHostDomainName string = effectiveDomainName
 output nfsSharePath string = effectiveNfsShare
 output linuxHostDataCollectionRuleId string = deployHostMonitoring ? hostMonitoring!.outputs.linuxHostDataCollectionRuleId : ''
 output avdHostDataCollectionRuleId string = deployHostMonitoring ? hostMonitoring!.outputs.avdHostDataCollectionRuleId : ''
+output portalSessionStore string = usePortalRedis ? 'redis' : 'filesystem'
+output portalRedisName string = usePortalRedis ? portalRedis!.outputs.name : ''

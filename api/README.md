@@ -292,8 +292,11 @@ The API reads environment variables directly; it does not load `.env` files by i
 | `NFS_SHARE` | required for checkout provisioning | NFS share argument passed to `create-user.sh`; used by code but not currently listed in `env.example`. The `azd` deployment sets it to the Azure Files NFS share it provisions unless you supply `nfsShare` or set `deployNfsShare` to `false`. |
 | `ALLOW_LEGACY_SCOPE_ACCESS` | optional | `true` treats the portal's `access_as_user` scope as `FullAccess` while roles are assigned during an upgrade. Defaults to `false`; set through the `allowLegacyScopeAccess` deployment value. |
 | `GUNICORN_CMD_ARGS` | optional | Overrides the image default of `--workers 2 --threads 8 --timeout 120 --graceful-timeout 30 --keep-alive 5`. |
-| `DB_MAX_CONCURRENCY` | optional | Maximum SQL connections per worker process. Defaults to `6`, which keeps two workers inside the Basic tier's 30 concurrent workers; raise it with the database tier. |
+| `DB_MAX_CONCURRENCY` | optional | Maximum SQL connections per worker process, idle pooled connections included. Defaults to `6`, which keeps two workers inside the Basic tier's 30 concurrent workers; raise it with the database tier. |
 | `DB_ACQUIRE_TIMEOUT_SECONDS` | optional | How long a request waits for a free connection slot before answering `503`. Defaults to `15`. |
+| `DB_POOL_ENABLED` | optional | `false` opens a new SQL connection for every `db_connection()` block and closes it afterwards, as before the pool. Defaults to `true`; see [Database Access](#database-access). |
+| `DB_POOL_IDLE_SECONDS` | optional | A pooled connection unused this long is closed rather than reused. Defaults to `120` (5–3600): App Service's outbound load balancer forgets a connection after four minutes without traffic. |
+| `DB_POOL_MAX_LIFETIME_SECONDS` | optional | A connection this old is closed rather than pooled again, so connections sign in again regularly with the password as last read from Key Vault. Defaults to `1800` (60–86400). |
 | `JWKS_CACHE_SECONDS` | optional | How long token signing keys are cached. Defaults to `3600`. |
 | `SSH_KEY_CACHE_SECONDS` | optional | How long the SSH private key read from Key Vault is reused. Defaults to `3600`. |
 | `SWEEP_CONCURRENCY`, `SWEEP_DEADLINE_SECONDS` | optional | Parallel cleanups in the released-VM sweep (default `8`), and the time after which it stops starting new ones (default `40`); the rest are retried on the next run. |
@@ -307,7 +310,11 @@ The API reads environment variables directly; it does not load `.env` files by i
 
 ## Database Access
 
-Handlers call stored procedures rather than embedding schema logic in Python. `db_connection()` wraps `get_db_connection()` as a context manager so every acquired connection is closed on success or exception, and bounds the connections each worker process holds at once (`DB_MAX_CONCURRENCY`). Never nest `db_connection()` blocks: a thread holding one slot while waiting for another can starve the pool.
+Handlers call stored procedures rather than embedding schema logic in Python. `db_connection()` is a context manager that takes one of the worker process's `DB_MAX_CONCURRENCY` slots and yields a connection. Never nest `db_connection()` blocks: a thread holding one slot while waiting for another can starve the pool.
+
+The connection comes from a pool (`db_pool.py`) of connections the same worker process has finished with, or is opened when none is idle. Reusing a connection saves a TLS handshake and a login, and each connection closed on App Service holds an outbound SNAT port for four minutes. When the block ends, whatever it left uncommitted is rolled back and the connection returns to the pool with no transaction open. When the block raises, the connection is closed instead. It begins a new transaction only as the next block takes it, because system-versioned tables such as `VirtualMachines` stamp each change with its transaction's start time: a transaction begun while the connection sat idle would be older than changes other connections made meanwhile, and SQL Server refuses such a change (error 13535, which `CheckoutVm` then turns into error 266). A connection that stopped answering while idle is closed and replaced without failing the request.
+
+Pooling is safe because nothing the API does outlives a transaction on its connection: every `sp_getapplock` is owned by the transaction, and the API sets no session options, temporary tables or `SESSION_CONTEXT`. Keep it that way, or set `DB_POOL_ENABLED=false`. The integration tests in `tests_integration` run with the pool on.
 
 pymssql runs every statement inside its own transaction, so a procedure must never roll that outer transaction back on a normal path: SQL Server then raises error 266 when the procedure returns, and the handler's commit fails. Procedures that need their own transaction either commit what they opened or use a savepoint when `@@TRANCOUNT > 0` (see `059_alter_procedure-TriggerScalingLogic.sql`).
 
