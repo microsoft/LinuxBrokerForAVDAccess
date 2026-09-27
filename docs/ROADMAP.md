@@ -1177,7 +1177,7 @@ Where it differs from the design below:
 - "Checkouts refused" fired four and a half minutes after a refused checkout. With both hosts
   checked out and a minimum of 2, "no ready hosts" fired 19 minutes later, once its window held
   only snapshots with no ready host. With xrdp stopped on one host, "unhealthy hosts" fired
-    14 minutes later. The share's `Transactions` metric has the `ResponseType` dimension that the
+  14 minutes later. The share's `Transactions` metric has the `ResponseType` dimension that the
   throttling alert filters on.
 
 **Open.** `linuxbroker-patch.log` and `xrdp-sesman.log` got no lines during the validation, so
@@ -1239,7 +1239,7 @@ below:
 gives the inner `mstsc` more than one monitor, and measure CPU on both hops with GNOME and with
 Xfce, which feeds 3.2 and 4.3. Both belong with the 3.8 `mstsc` checks.
 
-The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
+**Design.** The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
 - xrdp ≥ 0.10.2 supports **H.264** in the graphics pipeline. Check the version on each
   distribution (`xrdp --version`) and enable GFX/H.264 in `xrdp.ini` where available.
 - Have `Connect-LinuxBroker.ps1` write an `.rdp` file instead of `mstsc /v:`, to set
