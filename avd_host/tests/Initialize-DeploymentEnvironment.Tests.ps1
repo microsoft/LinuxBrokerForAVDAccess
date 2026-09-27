@@ -22,6 +22,7 @@ BeforeAll {
     foreach ($name in @(
             'Get-AzdEnvValue', 'Get-FirstNonEmptyValue', 'ConvertTo-IntParameterValue', 'Get-PropertyValue', 'Get-VmTagValue',
             'ConvertTo-TimeOfDayParameterValue', 'ConvertTo-PercentParameterValue', 'Assert-AvdScalingPlanTimeOrder',
+            'ConvertTo-PositiveIntParameterValue', 'ConvertTo-EmailListParameterValue',
             'Resolve-WindowsTimeZoneId', 'Get-HostPowerStateSnapshot', 'Resolve-AvdServicePrincipalObjectId',
             'Invoke-ArmGetRequest', 'Get-AvdAutoscaleRoleState', 'Test-ActionPermitted', 'Test-CanAssignSubscriptionRole',
             'Resolve-AvdAutoscaleRolePlan')) {
@@ -294,6 +295,52 @@ Describe 'Initialize-DeploymentEnvironment.ps1' {
             @{ Value = 'Not A Zone' }
         ) {
             Resolve-WindowsTimeZoneId -TimeZoneId $Value | Should -BeExactly ''
+        }
+    }
+
+    Context 'Reading the monitoring settings' {
+        It 'reads the alert threshold <Value> as <Expected>' -TestCases @(
+            @{ Value = '1'; Expected = 1 }
+            @{ Value = ' 25 '; Expected = 25 }
+            @{ Value = ''; Expected = 5 }
+        ) {
+            $script:AzdValues['alertApiErrorThreshold'] = $Value
+
+            ConvertTo-PositiveIntParameterValue -Key 'alertApiErrorThreshold' -DefaultValue 5 | Should -Be $Expected
+        }
+
+        It 'refuses the alert threshold <Value>' -TestCases @(
+            @{ Value = '0'; Message = "*'alertApiErrorThreshold'*1 or more*" }
+            @{ Value = '-3'; Message = '*1 or more*' }
+            @{ Value = 'five'; Message = '*must be an integer*' }
+        ) {
+            $script:AzdValues['alertApiErrorThreshold'] = $Value
+
+            { ConvertTo-PositiveIntParameterValue -Key 'alertApiErrorThreshold' -DefaultValue 5 } | Should -Throw -ExpectedMessage $Message
+        }
+
+        It 'reads the alert email addresses <Value> as <Expected>' -TestCases @(
+            @{ Value = ''; Expected = '' }
+            @{ Value = ' , ; '; Expected = '' }
+            @{ Value = 'ops@contoso.com'; Expected = 'ops@contoso.com' }
+            @{ Value = ' ops@contoso.com ; oncall@contoso.com,'; Expected = 'ops@contoso.com,oncall@contoso.com' }
+            @{ Value = 'ops@contoso.com,OPS@contoso.com;a1b2c3d4.contoso.onmicrosoft.com@amer.teams.ms'; Expected = 'ops@contoso.com,a1b2c3d4.contoso.onmicrosoft.com@amer.teams.ms' }
+        ) {
+            $script:AzdValues['alertEmailAddresses'] = $Value
+
+            ConvertTo-EmailListParameterValue -Key 'alertEmailAddresses' | Should -BeExactly $Expected
+        }
+
+        It 'refuses <Address> as an alert email address' -TestCases @(
+            @{ Value = 'ops'; Address = 'ops' }
+            @{ Value = 'ops@contoso.com, oncall@contoso'; Address = 'oncall@contoso' }
+            @{ Value = 'ops@contoso.com oncall@contoso.com'; Address = 'ops@contoso.com oncall@contoso.com' }
+            @{ Value = 'ops@@contoso.com'; Address = 'ops@@contoso.com' }
+        ) {
+            $script:AzdValues['alertEmailAddresses'] = $Value
+
+            { ConvertTo-EmailListParameterValue -Key 'alertEmailAddresses' } |
+                Should -Throw -ExpectedMessage "*'alertEmailAddresses'*'$Address' is not an email address*"
         }
     }
 
@@ -792,6 +839,22 @@ Describe 'The deployment settings and the Bicep they feed' {
                 'assignAvdAutoscaleRole')) {
             $script:ScriptParameters | Should -Contain $name
             $script:MainBicepParameters | Should -Contain $name
+        }
+    }
+
+    It 'writes every monitoring parameter and passes it on to the monitoring module' {
+        $monitoringBicep = Read-RepositoryText -RelativePath 'deploy\bicep\modules\core\host-monitoring.bicep'
+        foreach ($name in @('deployHostMonitoring', 'alertEmailAddresses', 'alertCheckoutRefusalThreshold', 'alertApiErrorThreshold', 'alertNfsLatencyThresholdMs')) {
+            $script:ScriptParameters | Should -Contain $name
+            $script:MainBicepParameters | Should -Contain $name
+            $script:MainBicep | Should -Match "(?m)^\s+${name}: ${name}$"
+            $script:ResourcesBicep | Should -Match "(?m)^param ${name} "
+        }
+
+        $script:ResourcesBicep | Should -Match ([regex]::Escape("module hostMonitoring 'modules/core/host-monitoring.bicep' = if (deployHostMonitoring) {"))
+        foreach ($name in @('alertEmailAddresses', 'alertCheckoutRefusalThreshold', 'alertApiErrorThreshold', 'alertNfsLatencyThresholdMs')) {
+            $script:ResourcesBicep | Should -Match "(?m)^\s+${name}: ${name}$"
+            $monitoringBicep | Should -Match "(?m)^param ${name} "
         }
     }
 

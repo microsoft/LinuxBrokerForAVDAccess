@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "7445620276549244164"
+      "templateHash": "3136108467362456610"
     }
   },
   "parameters": {
@@ -524,6 +524,44 @@
       "metadata": {
         "description": "AVD session host VM size."
       }
+    },
+    "deployHostMonitoring": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the host monitoring: log collection from the Linux hosts and AVD session hosts, the fleet workbook, and the alerts. Set to false in a cloud that lacks data collection rules, workbooks or log search alerts. Enable-HostMonitoring.ps1 installs the Azure Monitor agent after provisioning."
+      }
+    },
+    "alertEmailAddresses": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Email addresses that receive the alerts, separated by commas or semicolons. For a Teams channel, use the channel's email address. Leave empty to deploy the alerts without notifications."
+      }
+    },
+    "alertCheckoutRefusalThreshold": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "metadata": {
+        "description": "Refused checkouts (HTTP 409) in 15 minutes that raise an alert."
+      }
+    },
+    "alertApiErrorThreshold": {
+      "type": "int",
+      "defaultValue": 5,
+      "minValue": 1,
+      "metadata": {
+        "description": "API responses with a 5xx status in 15 minutes that raise an alert."
+      }
+    },
+    "alertNfsLatencyThresholdMs": {
+      "type": "int",
+      "defaultValue": 50,
+      "minValue": 1,
+      "metadata": {
+        "description": "Average end-to-end latency of the provisioned NFS share over 15 minutes, in milliseconds, that raises an alert."
+      }
     }
   },
   "variables": {
@@ -723,6 +761,21 @@
           },
           "avdVmSize": {
             "value": "[parameters('avdVmSize')]"
+          },
+          "deployHostMonitoring": {
+            "value": "[parameters('deployHostMonitoring')]"
+          },
+          "alertEmailAddresses": {
+            "value": "[parameters('alertEmailAddresses')]"
+          },
+          "alertCheckoutRefusalThreshold": {
+            "value": "[parameters('alertCheckoutRefusalThreshold')]"
+          },
+          "alertApiErrorThreshold": {
+            "value": "[parameters('alertApiErrorThreshold')]"
+          },
+          "alertNfsLatencyThresholdMs": {
+            "value": "[parameters('alertNfsLatencyThresholdMs')]"
           }
         },
         "template": {
@@ -732,7 +785,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "10743230070916423658"
+              "templateHash": "8048490374046048188"
             }
           },
           "parameters": {
@@ -1030,6 +1083,35 @@
                 "Standard_F16s_v2",
                 "Standard_D16as_v4"
               ]
+            },
+            "deployHostMonitoring": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Deploy host log collection, the fleet workbook and the alerts."
+              }
+            },
+            "alertEmailAddresses": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Email addresses that receive the alerts, separated by commas or semicolons."
+              }
+            },
+            "alertCheckoutRefusalThreshold": {
+              "type": "int",
+              "defaultValue": 1,
+              "minValue": 1
+            },
+            "alertApiErrorThreshold": {
+              "type": "int",
+              "defaultValue": 5,
+              "minValue": 1
+            },
+            "alertNfsLatencyThresholdMs": {
+              "type": "int",
+              "defaultValue": 50,
+              "minValue": 1
             }
           },
           "variables": {
@@ -1751,7 +1833,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "10067415946987550221"
+                      "templateHash": "5500961998070303674"
                     }
                   },
                   "parameters": {
@@ -1816,10 +1898,789 @@
                     "logAnalyticsWorkspaceId": {
                       "type": "string",
                       "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                    },
+                    "logAnalyticsWorkspaceName": {
+                      "type": "string",
+                      "value": "[parameters('logAnalyticsWorkspaceName')]"
                     }
                   }
                 }
               }
+            },
+            {
+              "condition": "[parameters('deployHostMonitoring')]",
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
+              "name": "hostMonitoring",
+              "properties": {
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "location": {
+                    "value": "[parameters('location')]"
+                  },
+                  "tags": {
+                    "value": "[parameters('tags')]"
+                  },
+                  "namePrefix": {
+                    "value": "[format('{0}-{1}', parameters('appName'), parameters('environmentName'))]"
+                  },
+                  "logAnalyticsWorkspaceName": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2025-04-01').outputs.logAnalyticsWorkspaceName.value]"
+                  },
+                  "apiAppName": {
+                    "value": "[variables('apiAppName')]"
+                  },
+                  "nfsStorageAccountName": "[if(variables('provisionNfsShare'), createObject('value', variables('nfsStorageAccountName')), createObject('value', ''))]",
+                  "alertEmailAddresses": {
+                    "value": "[parameters('alertEmailAddresses')]"
+                  },
+                  "alertCheckoutRefusalThreshold": {
+                    "value": "[parameters('alertCheckoutRefusalThreshold')]"
+                  },
+                  "alertApiErrorThreshold": {
+                    "value": "[parameters('alertApiErrorThreshold')]"
+                  },
+                  "alertNfsLatencyThresholdMs": {
+                    "value": "[parameters('alertNfsLatencyThresholdMs')]"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "4193567527631524882"
+                    }
+                  },
+                  "parameters": {
+                    "location": {
+                      "type": "string",
+                      "defaultValue": "[resourceGroup().location]",
+                      "metadata": {
+                        "description": "Location of the data collection rules, the workbook and the log alerts."
+                      }
+                    },
+                    "tags": {
+                      "type": "object",
+                      "defaultValue": {}
+                    },
+                    "namePrefix": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Prefix of the resource names, <appName>-<environmentName>."
+                      }
+                    },
+                    "logAnalyticsWorkspaceName": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Log Analytics workspace that Application Insights writes to. The host logs go there too."
+                      }
+                    },
+                    "apiAppName": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Name of the broker API web app, which is the cloud role name of its telemetry."
+                      }
+                    },
+                    "nfsStorageAccountName": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Storage account of the NFS share the deployment provisions, or empty when it provisions none."
+                      }
+                    },
+                    "alertEmailAddresses": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Email addresses that receive the alerts, separated by commas or semicolons. Leave empty to deploy the alerts without notifications."
+                      }
+                    },
+                    "alertCheckoutRefusalThreshold": {
+                      "type": "int",
+                      "defaultValue": 1,
+                      "minValue": 1,
+                      "metadata": {
+                        "description": "Refused checkouts (HTTP 409) in 15 minutes that raise an alert."
+                      }
+                    },
+                    "alertApiErrorThreshold": {
+                      "type": "int",
+                      "defaultValue": 5,
+                      "minValue": 1,
+                      "metadata": {
+                        "description": "API responses with a 5xx status in 15 minutes that raise an alert."
+                      }
+                    },
+                    "alertNfsLatencyThresholdMs": {
+                      "type": "int",
+                      "defaultValue": 50,
+                      "minValue": 1,
+                      "metadata": {
+                        "description": "Average end-to-end latency of the NFS share over 15 minutes, in milliseconds, that raises an alert."
+                      }
+                    }
+                  },
+                  "variables": {
+                    "hostLogTableName": "LinuxBrokerHost_CL",
+                    "hostLogStreamName": "[format('Custom-{0}', variables('hostLogTableName'))]",
+                    "linuxHostLogFiles": [
+                      "/var/log/release-session.log",
+                      "/var/log/release-session-watcher.log",
+                      "/var/log/linuxbroker-host-settings.log",
+                      "/var/log/createuser.log",
+                      "/var/log/linuxbroker-session-control.log",
+                      "/var/log/linuxbroker-patch.log",
+                      "/var/log/xrdp.log",
+                      "/var/log/xrdp-sesman.log"
+                    ],
+                    "alertEmailList": "[filter(map(split(replace(parameters('alertEmailAddresses'), ';', ','), ','), lambda('address', trim(lambdaVariables('address')))), lambda('address', not(empty(lambdaVariables('address')))))]",
+                    "alertActionGroupIds": "[if(empty(variables('alertEmailList')), createArray(), createArray(resourceId('Microsoft.Insights/actionGroups', format('ag-{0}', parameters('namePrefix')))))]",
+                    "monitorNfsShare": "[not(empty(parameters('nfsStorageAccountName')))]",
+                    "nfsFileServiceId": "[resourceId('Microsoft.Storage/storageAccounts/fileServices', if(variables('monitorNfsShare'), parameters('nfsStorageAccountName'), 'none'), 'default')]",
+                    "fleetSnapshots": [
+                      "AppTraces",
+                      "[format('| where AppRoleName == \"{0}\" and Message == \"fleet snapshot\"', parameters('apiAppName'))]"
+                    ],
+                    "apiRequests": [
+                      "AppRequests",
+                      "[format('| where AppRoleName == \"{0}\"', parameters('apiAppName'))]"
+                    ],
+                    "requestPath": "| extend Path = coalesce(tostring(parse_url(Url).Path), tostring(split(Name, \" \")[-1]))",
+                    "workbookBin": "bin(TimeGenerated, max_of(5m, {TimeRange:grain}))",
+                    "hostLogLevel": "| extend Level = case(RawData has_cs \"ERROR\", \"Error\", RawData has_cs \"WARNING\" or RawData has_cs \"WARN\", \"Warning\", RawData has_any (\"failed\", \"cannot\", \"unable\") or RawData has \"could not\", \"Error\", \"\")",
+                    "latestSnapshotQuery": "[join(concat(variables('fleetSnapshots'), createArray('| top 1 by TimeGenerated desc', '| project TimeGenerated, Ready = toint(Properties.ReadyHosts), InUse = toint(Properties.InUse), Waiting = toint(Properties.Waiting), Booting = toint(Properties.Booting), PoweredOn = toint(Properties.PoweredOn), Total = toint(Properties.TotalHosts), MinVMs = toint(Properties.EffectiveMinVMs), MaxVMs = toint(Properties.MaxVMs), StaleHeartbeats = toint(Properties.StaleHeartbeats), NfsUnreachable = toint(Properties.NfsUnreachable), XrdpInactive = toint(Properties.XrdpInactive), Draining = toint(Properties.Draining), Maintenance = toint(Properties.Maintenance), StartOnDemand = iff(toint(Properties.StartOnDemandEnabled) == 1, \"On\", \"Off\")')), '\n')]",
+                    "fleetTrendQuery": "[join(concat(variables('fleetSnapshots'), createArray(format('| summarize Ready = min(toint(Properties.ReadyHosts)), InUse = max(toint(Properties.InUse)), Waiting = max(toint(Properties.Waiting)), Booting = max(toint(Properties.Booting)), PoweredOn = max(toint(Properties.PoweredOn)) by {0}', variables('workbookBin')), '| order by TimeGenerated asc')), '\n')]",
+                    "checkoutOutcomeQuery": "[join(concat(variables('apiRequests'), createArray(variables('requestPath'), '| where Path == \"/api/vms/checkout\"', '| extend Outcome = case(ResultCode == \"200\", \"Assigned (200)\", ResultCode == \"202\", \"Starting a host (202)\", ResultCode == \"409\", \"Refused (409)\", toint(ResultCode) >= 500, \"Failed (5xx)\", strcat(\"Other (\", ResultCode, \")\"))', format('| summarize Checkouts = count() by Outcome, {0}', variables('workbookBin')), '| order by TimeGenerated asc')), '\n')]",
+                    "checkoutLatencyQuery": "[join(concat(variables('apiRequests'), createArray('| where ResultCode == \"200\"', variables('requestPath'), '| where Path == \"/api/vms/checkout\"', format('| summarize P50 = percentile(DurationMs, 50), P95 = percentile(DurationMs, 95) by {0}', variables('workbookBin')), '| order by TimeGenerated asc')), '\n')]",
+                    "releaseQuery": "[join(concat(variables('apiRequests'), createArray(variables('requestPath'), '| extend Action = case(Path matches regex @\"^/api/vms/[^/]+/release$\", \"Release\", Path matches regex @\"^/api/vms/[^/]+/return$\", \"Return\", \"\")', '| where isnotempty(Action)', '| extend Series = strcat(Action, iff(toint(ResultCode) < 400, \" succeeded\", strcat(\" failed (\", ResultCode, \")\")))', format('| summarize Requests = count() by Series, {0}', variables('workbookBin')), '| order by TimeGenerated asc')), '\n')]",
+                    "startOnDemandQuery": "[join(createArray('union', '    (AppTraces', format('    | where AppRoleName == \"{0}\" and tostring(Properties.audit_action) == \"vm.start_on_demand\"', parameters('apiAppName')), '    | extend Series = iff(tostring(Properties.audit_outcome) == \"success\", \"Hosts started\", \"Starts that failed\")),', '    (AppRequests', format('    | where AppRoleName == \"{0}\" and ResultCode == \"202\"', parameters('apiAppName')), format('    {0}', variables('requestPath')), '    | where Path == \"/api/vms/checkout\"', '    | extend Series = \"Checkouts told to wait (202)\")', format('| summarize Events = count() by Series, {0}', variables('workbookBin')), '| order by TimeGenerated asc'), '\n')]",
+                    "settingsFailureQuery": "[join(createArray('LinuxBrokerHost_CL', '| where FilePath endswith \"linuxbroker-host-settings.log\"', '| where RawData has_cs \"ERROR\" or RawData has_cs \"WARNING\"', '| project TimeGenerated, Computer, Level = iff(RawData has_cs \"ERROR\", \"Error\", \"Warning\"), Message = RawData', '| order by TimeGenerated desc', '| take 200'), '\n')]",
+                    "hostErrorQuery": "[join(createArray('union isfuzzy=true', '    (LinuxBrokerHost_CL', format('    {0}', variables('hostLogLevel')), '    | where isnotempty(Level)', '    | extend Source = extract(@\"([^/]+)$\", 1, FilePath), Message = RawData),', '    (Syslog', '    | where SeverityLevel in (\"emerg\", \"alert\", \"crit\", \"err\")', '    | extend Level = \"Error\", Source = iff(isempty(ProcessName), strcat(\"syslog \", Facility), strcat(\"syslog \", Facility, \" \", ProcessName)), Message = SyslogMessage)', '| summarize Events = count(), arg_max(TimeGenerated, Message) by Computer, Source, Level', '| project Computer, Source, Level, Events, LastSeen = TimeGenerated, LatestMessage = Message', '| order by Events desc'), '\n')]",
+                    "nfsFailureQuery": "[join(createArray('union isfuzzy=true', '    (LinuxBrokerHost_CL', '    | where FilePath endswith \"createuser.log\" and RawData has \"Failed to mount NFS share\"', '    | extend Source = \"create-user.sh\"),', '    (LinuxBrokerHost_CL', '    | where FilePath endswith \"linuxbroker-session-control.log\" and RawData has \"Could not mount the profile share\"', '    | extend Source = \"session-control.sh\"),', '    (Syslog', '    | where Facility == \"kern\" and SyslogMessage has \"nfs\" and (SyslogMessage has \"not responding\" or SyslogMessage has \"timed out\")', '    | extend Source = \"kernel\", RawData = SyslogMessage)', '| project TimeGenerated, Computer, Source, Message = RawData', '| order by TimeGenerated desc', '| take 500'), '\n')]",
+                    "avdEventQuery": "[join(createArray('Event', '| where Source == \"LinuxBrokerScript\" or EventLog == \"Microsoft-Windows-TerminalServices-RDPClient/Operational\"', '| where EventLevelName in (\"Critical\", \"Error\", \"Warning\")', '| summarize Events = count(), arg_max(TimeGenerated, RenderedDescription) by Computer, Source, Level = EventLevelName', '| project Computer, Source, Level, Events, LastSeen = TimeGenerated, LatestMessage = RenderedDescription', '| order by Events desc'), '\n')]",
+                    "noReadyHostsAlertQuery": "[join(concat(variables('fleetSnapshots'), createArray('| extend Ready = toint(Properties.ReadyHosts), MinVMs = toint(Properties.EffectiveMinVMs), Waiting = toint(Properties.Waiting)', '| summarize Snapshots = count(), Short = countif(Ready == 0 and (MinVMs > 0 or Waiting > 0)), MostWaiting = max(Waiting)', '| where Snapshots > 0 and Short == Snapshots')), '\n')]",
+                    "unhealthyHostsAlertQuery": "[join(concat(variables('fleetSnapshots'), createArray('| extend Stale = toint(Properties.StaleHeartbeats), Nfs = toint(Properties.NfsUnreachable), Xrdp = toint(Properties.XrdpInactive)', '| summarize Snapshots = count(), Lowest = min(Stale + Nfs + Xrdp), StaleHeartbeats = max(Stale), NfsUnreachable = max(Nfs), XrdpInactive = max(Xrdp)', '| where Snapshots > 0 and Lowest > 0')), '\n')]",
+                    "refusedCheckoutAlertQuery": "[join(concat(variables('apiRequests'), createArray('| where ResultCode == \"409\"', variables('requestPath'), '| where Path == \"/api/vms/checkout\"')), '\n')]",
+                    "apiErrorAlertQuery": "[join(concat(variables('apiRequests'), createArray('| where toint(ResultCode) >= 500')), '\n')]",
+                    "logAlerts": [
+                      {
+                        "name": "no-ready-hosts",
+                        "displayName": "[format('Linux Broker: no ready hosts ({0})', parameters('namePrefix'))]",
+                        "description": "For 15 minutes every fleet snapshot showed no ready Linux host while the scaling minimum is above 0 or users are waiting. Check the Linux hosts and the scaling settings.",
+                        "severity": 1,
+                        "query": "[variables('noReadyHostsAlertQuery')]",
+                        "operator": "GreaterThan",
+                        "threshold": 0
+                      },
+                      {
+                        "name": "fleet-snapshot-missing",
+                        "displayName": "[format('Linux Broker: no fleet snapshot ({0})', parameters('namePrefix'))]",
+                        "description": "The scaling run has logged no fleet snapshot for 15 minutes. The task function, the API or the database may be down, or SQL script 157 is not applied yet.",
+                        "severity": 2,
+                        "query": "[join(variables('fleetSnapshots'), '\n')]",
+                        "operator": "LessThan",
+                        "threshold": 1
+                      },
+                      {
+                        "name": "checkouts-refused",
+                        "displayName": "[format('Linux Broker: checkouts refused ({0})', parameters('namePrefix'))]",
+                        "description": "The broker refused checkouts (HTTP 409) in the last 15 minutes, so users could not get a Linux desktop.",
+                        "severity": 2,
+                        "query": "[variables('refusedCheckoutAlertQuery')]",
+                        "operator": "GreaterThanOrEqual",
+                        "threshold": "[parameters('alertCheckoutRefusalThreshold')]"
+                      },
+                      {
+                        "name": "unhealthy-hosts",
+                        "displayName": "[format('Linux Broker: unhealthy hosts ({0})', parameters('namePrefix'))]",
+                        "description": "For 15 minutes every fleet snapshot showed a Linux host with a stale heartbeat, an unreachable home share or no xrdp service. The workbook lists the hosts' errors.",
+                        "severity": 2,
+                        "query": "[variables('unhealthyHostsAlertQuery')]",
+                        "operator": "GreaterThan",
+                        "threshold": 0
+                      },
+                      {
+                        "name": "api-errors",
+                        "displayName": "[format('Linux Broker: API errors ({0})', parameters('namePrefix'))]",
+                        "description": "The broker API answered requests with a 5xx status in the last 15 minutes.",
+                        "severity": 2,
+                        "query": "[variables('apiErrorAlertQuery')]",
+                        "operator": "GreaterThanOrEqual",
+                        "threshold": "[parameters('alertApiErrorThreshold')]"
+                      }
+                    ],
+                    "nfsThrottlingResponseTypes": [
+                      "SuccessWithThrottling",
+                      "SuccessWithShareIopsThrottling",
+                      "SuccessWithShareEgressThrottling",
+                      "SuccessWithShareIngressThrottling",
+                      "SuccessWithMetadataThrottling",
+                      "ClientThrottlingError",
+                      "ClientShareIopsThrottlingError",
+                      "ClientShareEgressThrottlingError",
+                      "ClientShareIngressThrottlingError"
+                    ],
+                    "workbookBaseQuery": {
+                      "version": "KqlItem/1.0",
+                      "size": 0,
+                      "timeContextFromParameter": "TimeRange",
+                      "queryType": 0,
+                      "resourceType": "microsoft.operationalinsights/workspaces",
+                      "crossComponentResources": [
+                        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                      ]
+                    },
+                    "workbookContent": {
+                      "version": "Notebook/1.0",
+                      "items": [
+                        {
+                          "type": 1,
+                          "name": "introduction",
+                          "content": {
+                            "json": "## Linux Broker fleet\nThe scaling run logs a fleet snapshot every five minutes. Host logs arrive once deploy/Enable-HostMonitoring.ps1 has installed the Azure Monitor agent on the hosts."
+                          }
+                        },
+                        {
+                          "type": 9,
+                          "name": "parameters",
+                          "content": {
+                            "version": "KqlParameterItem/1.0",
+                            "style": "pills",
+                            "queryType": 0,
+                            "resourceType": "microsoft.operationalinsights/workspaces",
+                            "parameters": [
+                              {
+                                "id": "5d0c8f3e-2a41-4b8e-9f6d-1c7a3b2e4f10",
+                                "version": "KqlParameterItem/1.0",
+                                "name": "TimeRange",
+                                "label": "Time range",
+                                "type": 4,
+                                "isRequired": true,
+                                "value": {
+                                  "durationMs": 86400000
+                                },
+                                "typeSettings": {
+                                  "allowCustom": true,
+                                  "selectableValues": [
+                                    {
+                                      "durationMs": 3600000
+                                    },
+                                    {
+                                      "durationMs": 14400000
+                                    },
+                                    {
+                                      "durationMs": 43200000
+                                    },
+                                    {
+                                      "durationMs": 86400000
+                                    },
+                                    {
+                                      "durationMs": 259200000
+                                    },
+                                    {
+                                      "durationMs": 604800000
+                                    },
+                                    {
+                                      "durationMs": 2592000000
+                                    }
+                                  ]
+                                }
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": 3,
+                          "name": "latest-snapshot",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Latest fleet snapshot', 'query', variables('latestSnapshotQuery'), 'visualization', 'table', 'noDataMessage', 'No fleet snapshot in this time range. The API logs one every five minutes once SQL script 157 is applied.'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "fleet-trend",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Hosts over time (fewest ready, most in use, waiting, booting and powered on)', 'query', variables('fleetTrendQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "checkout-outcomes",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Checkouts by outcome', 'query', variables('checkoutOutcomeQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "checkout-latency",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Checkout time in milliseconds (50th and 95th percentile)', 'query', variables('checkoutLatencyQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "releases",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Releases and returns', 'query', variables('releaseQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "start-on-demand",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Hosts started on demand', 'query', variables('startOnDemandQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "settings-failures",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Host settings that could not be applied', 'query', variables('settingsFailureQuery'), 'visualization', 'table', 'noDataMessage', 'No host setting errors or warnings in this time range.'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "host-errors",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Errors and warnings by Linux host', 'query', variables('hostErrorQuery'), 'visualization', 'table', 'noDataMessage', 'No host errors in this time range, or the Azure Monitor agent is not installed yet.'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "nfs-failures",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'NFS home share failures', 'query', variables('nfsFailureQuery'), 'visualization', 'table', 'noDataMessage', 'No NFS mount failures in this time range.'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "avd-events",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Errors and warnings by AVD session host', 'query', variables('avdEventQuery'), 'visualization', 'table', 'noDataMessage', 'No AVD session host errors in this time range, or the Azure Monitor agent is not installed yet.'))]"
+                        }
+                      ],
+                      "fallbackResourceIds": [
+                        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                      ],
+                      "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+                    }
+                  },
+                  "resources": [
+                    {
+                      "type": "Microsoft.OperationalInsights/workspaces/tables",
+                      "apiVersion": "2023-09-01",
+                      "name": "[format('{0}/{1}', parameters('logAnalyticsWorkspaceName'), variables('hostLogTableName'))]",
+                      "properties": {
+                        "plan": "Analytics",
+                        "schema": {
+                          "name": "[variables('hostLogTableName')]",
+                          "columns": [
+                            {
+                              "name": "TimeGenerated",
+                              "type": "dateTime"
+                            },
+                            {
+                              "name": "RawData",
+                              "type": "string"
+                            },
+                            {
+                              "name": "FilePath",
+                              "type": "string"
+                            },
+                            {
+                              "name": "Computer",
+                              "type": "string"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Insights/dataCollectionRules",
+                      "apiVersion": "2023-03-11",
+                      "name": "[take(format('dcr-{0}-linux', parameters('namePrefix')), 64)]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "kind": "Linux",
+                      "properties": {
+                        "description": "Linux Broker logs, xrdp logs and syslog from the Linux hosts.",
+                        "streamDeclarations": {
+                          "[format('{0}', variables('hostLogStreamName'))]": {
+                            "columns": [
+                              {
+                                "name": "TimeGenerated",
+                                "type": "datetime"
+                              },
+                              {
+                                "name": "RawData",
+                                "type": "string"
+                              },
+                              {
+                                "name": "FilePath",
+                                "type": "string"
+                              },
+                              {
+                                "name": "Computer",
+                                "type": "string"
+                              }
+                            ]
+                          }
+                        },
+                        "dataSources": {
+                          "logFiles": [
+                            {
+                              "name": "linuxBrokerLogs",
+                              "streams": [
+                                "[variables('hostLogStreamName')]"
+                              ],
+                              "filePatterns": "[variables('linuxHostLogFiles')]",
+                              "format": "text",
+                              "settings": {
+                                "text": {
+                                  "recordStartTimestampFormat": "YYYY-MM-DD HH:MM:SS"
+                                }
+                              }
+                            }
+                          ],
+                          "syslog": [
+                            {
+                              "name": "authentication",
+                              "streams": [
+                                "Microsoft-Syslog"
+                              ],
+                              "facilityNames": [
+                                "auth",
+                                "authpriv"
+                              ],
+                              "logLevels": [
+                                "Info",
+                                "Notice",
+                                "Warning",
+                                "Error",
+                                "Critical",
+                                "Alert",
+                                "Emergency"
+                              ]
+                            },
+                            {
+                              "name": "kernelAndUser",
+                              "streams": [
+                                "Microsoft-Syslog"
+                              ],
+                              "facilityNames": [
+                                "kern",
+                                "user"
+                              ],
+                              "logLevels": [
+                                "Notice",
+                                "Warning",
+                                "Error",
+                                "Critical",
+                                "Alert",
+                                "Emergency"
+                              ]
+                            },
+                            {
+                              "name": "otherFacilities",
+                              "streams": [
+                                "Microsoft-Syslog"
+                              ],
+                              "facilityNames": [
+                                "cron",
+                                "daemon",
+                                "ftp",
+                                "local0",
+                                "local1",
+                                "local2",
+                                "local3",
+                                "local4",
+                                "local5",
+                                "local6",
+                                "local7",
+                                "lpr",
+                                "mail",
+                                "news",
+                                "syslog",
+                                "uucp"
+                              ],
+                              "logLevels": [
+                                "Warning",
+                                "Error",
+                                "Critical",
+                                "Alert",
+                                "Emergency"
+                              ]
+                            }
+                          ]
+                        },
+                        "destinations": {
+                          "logAnalytics": [
+                            {
+                              "name": "workspace",
+                              "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                            }
+                          ]
+                        },
+                        "dataFlows": [
+                          {
+                            "streams": [
+                              "[variables('hostLogStreamName')]"
+                            ],
+                            "destinations": [
+                              "workspace"
+                            ],
+                            "transformKql": "source",
+                            "outputStream": "[variables('hostLogStreamName')]"
+                          },
+                          {
+                            "streams": [
+                              "Microsoft-Syslog"
+                            ],
+                            "destinations": [
+                              "workspace"
+                            ]
+                          }
+                        ]
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.OperationalInsights/workspaces/tables', parameters('logAnalyticsWorkspaceName'), variables('hostLogTableName'))]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Insights/dataCollectionRules",
+                      "apiVersion": "2023-03-11",
+                      "name": "[take(format('dcr-{0}-avd', parameters('namePrefix')), 64)]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "kind": "Windows",
+                      "properties": {
+                        "description": "Connect-LinuxBroker.ps1 events and Remote Desktop client problems from the AVD session hosts.",
+                        "dataSources": {
+                          "windowsEventLogs": [
+                            {
+                              "name": "linuxBrokerEvents",
+                              "streams": [
+                                "Microsoft-Event"
+                              ],
+                              "xPathQueries": [
+                                "Application!*[System[Provider[@Name='LinuxBrokerScript']]]",
+                                "Microsoft-Windows-TerminalServices-RDPClient/Operational!*[System[(Level=1 or Level=2 or Level=3)]]"
+                              ]
+                            }
+                          ]
+                        },
+                        "destinations": {
+                          "logAnalytics": [
+                            {
+                              "name": "workspace",
+                              "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                            }
+                          ]
+                        },
+                        "dataFlows": [
+                          {
+                            "streams": [
+                              "Microsoft-Event"
+                            ],
+                            "destinations": [
+                              "workspace"
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Insights/workbooks",
+                      "apiVersion": "2023-06-01",
+                      "name": "[guid(resourceGroup().id, parameters('namePrefix'), 'linuxbroker-fleet-workbook')]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "kind": "shared",
+                      "properties": {
+                        "displayName": "[format('Linux Broker fleet ({0})', parameters('namePrefix'))]",
+                        "category": "workbook",
+                        "sourceId": "[toLower(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName')))]",
+                        "version": "Notebook/1.0",
+                        "serializedData": "[string(variables('workbookContent'))]"
+                      }
+                    },
+                    {
+                      "condition": "[not(empty(variables('alertEmailList')))]",
+                      "type": "Microsoft.Insights/actionGroups",
+                      "apiVersion": "2023-01-01",
+                      "name": "[format('ag-{0}', parameters('namePrefix'))]",
+                      "location": "Global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "copy": [
+                          {
+                            "name": "emailReceivers",
+                            "count": "[length(variables('alertEmailList'))]",
+                            "input": {
+                              "name": "[format('email-{0}', add(copyIndex('emailReceivers'), 1))]",
+                              "emailAddress": "[variables('alertEmailList')[copyIndex('emailReceivers')]]",
+                              "useCommonAlertSchema": true
+                            }
+                          }
+                        ],
+                        "groupShortName": "LinuxBroker",
+                        "enabled": true
+                      }
+                    },
+                    {
+                      "copy": {
+                        "name": "logAlertRules",
+                        "count": "[length(variables('logAlerts'))]"
+                      },
+                      "type": "Microsoft.Insights/scheduledQueryRules",
+                      "apiVersion": "2023-12-01",
+                      "name": "[format('alert-{0}-{1}', parameters('namePrefix'), variables('logAlerts')[copyIndex()].name)]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "kind": "LogAlert",
+                      "properties": {
+                        "displayName": "[variables('logAlerts')[copyIndex()].displayName]",
+                        "description": "[variables('logAlerts')[copyIndex()].description]",
+                        "severity": "[variables('logAlerts')[copyIndex()].severity]",
+                        "enabled": true,
+                        "evaluationFrequency": "PT5M",
+                        "windowSize": "PT15M",
+                        "scopes": [
+                          "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                        ],
+                        "skipQueryValidation": true,
+                        "autoMitigate": true,
+                        "criteria": {
+                          "allOf": [
+                            {
+                              "query": "[variables('logAlerts')[copyIndex()].query]",
+                              "timeAggregation": "Count",
+                              "operator": "[variables('logAlerts')[copyIndex()].operator]",
+                              "threshold": "[variables('logAlerts')[copyIndex()].threshold]",
+                              "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                              }
+                            }
+                          ]
+                        },
+                        "actions": {
+                          "actionGroups": "[variables('alertActionGroupIds')]"
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Insights/actionGroups', format('ag-{0}', parameters('namePrefix')))]"
+                      ]
+                    },
+                    {
+                      "condition": "[variables('monitorNfsShare')]",
+                      "type": "Microsoft.Insights/metricAlerts",
+                      "apiVersion": "2018-03-01",
+                      "name": "[format('alert-{0}-nfs-throttling', parameters('namePrefix'))]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "copy": [
+                          {
+                            "name": "actions",
+                            "count": "[length(variables('alertActionGroupIds'))]",
+                            "input": {
+                              "actionGroupId": "[variables('alertActionGroupIds')[copyIndex('actions')]]"
+                            }
+                          }
+                        ],
+                        "description": "Azure Files throttled requests to the NFS home share in the last 15 minutes. Users may see slow sign-ins and applications; see the sizing guide in DEPLOYMENT.md.",
+                        "severity": 2,
+                        "enabled": true,
+                        "scopes": [
+                          "[variables('nfsFileServiceId')]"
+                        ],
+                        "evaluationFrequency": "PT5M",
+                        "windowSize": "PT15M",
+                        "autoMitigate": true,
+                        "criteria": {
+                          "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+                          "allOf": [
+                            {
+                              "criterionType": "StaticThresholdCriterion",
+                              "name": "ThrottledTransactions",
+                              "metricNamespace": "Microsoft.Storage/storageAccounts/fileServices",
+                              "metricName": "Transactions",
+                              "dimensions": [
+                                {
+                                  "name": "ResponseType",
+                                  "operator": "Include",
+                                  "values": "[variables('nfsThrottlingResponseTypes')]"
+                                }
+                              ],
+                              "operator": "GreaterThan",
+                              "threshold": 0,
+                              "timeAggregation": "Total"
+                            }
+                          ]
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Insights/actionGroups', format('ag-{0}', parameters('namePrefix')))]"
+                      ]
+                    },
+                    {
+                      "condition": "[variables('monitorNfsShare')]",
+                      "type": "Microsoft.Insights/metricAlerts",
+                      "apiVersion": "2018-03-01",
+                      "name": "[format('alert-{0}-nfs-latency', parameters('namePrefix'))]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "copy": [
+                          {
+                            "name": "actions",
+                            "count": "[length(variables('alertActionGroupIds'))]",
+                            "input": {
+                              "actionGroupId": "[variables('alertActionGroupIds')[copyIndex('actions')]]"
+                            }
+                          }
+                        ],
+                        "description": "The NFS home share answered slowly on average over the last 15 minutes.",
+                        "severity": 3,
+                        "enabled": true,
+                        "scopes": [
+                          "[variables('nfsFileServiceId')]"
+                        ],
+                        "evaluationFrequency": "PT5M",
+                        "windowSize": "PT15M",
+                        "autoMitigate": true,
+                        "criteria": {
+                          "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+                          "allOf": [
+                            {
+                              "criterionType": "StaticThresholdCriterion",
+                              "name": "EndToEndLatency",
+                              "metricNamespace": "Microsoft.Storage/storageAccounts/fileServices",
+                              "metricName": "SuccessE2ELatency",
+                              "operator": "GreaterThan",
+                              "threshold": "[parameters('alertNfsLatencyThresholdMs')]",
+                              "timeAggregation": "Average"
+                            }
+                          ]
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Insights/actionGroups', format('ag-{0}', parameters('namePrefix')))]"
+                      ]
+                    }
+                  ],
+                  "outputs": {
+                    "linuxHostDataCollectionRuleId": {
+                      "type": "string",
+                      "value": "[resourceId('Microsoft.Insights/dataCollectionRules', take(format('dcr-{0}-linux', parameters('namePrefix')), 64))]"
+                    },
+                    "avdHostDataCollectionRuleId": {
+                      "type": "string",
+                      "value": "[resourceId('Microsoft.Insights/dataCollectionRules', take(format('dcr-{0}-avd', parameters('namePrefix')), 64))]"
+                    }
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Resources/deployments', 'nfsStorage')]",
+                "[resourceId('Microsoft.Resources/deployments', 'observability')]"
+              ]
             },
             {
               "type": "Microsoft.Resources/deployments",
@@ -4299,6 +5160,14 @@
             "nfsSharePath": {
               "type": "string",
               "value": "[variables('effectiveNfsShare')]"
+            },
+            "linuxHostDataCollectionRuleId": {
+              "type": "string",
+              "value": "[if(parameters('deployHostMonitoring'), reference(resourceId('Microsoft.Resources/deployments', 'hostMonitoring'), '2025-04-01').outputs.linuxHostDataCollectionRuleId.value, '')]"
+            },
+            "avdHostDataCollectionRuleId": {
+              "type": "string",
+              "value": "[if(parameters('deployHostMonitoring'), reference(resourceId('Microsoft.Resources/deployments', 'hostMonitoring'), '2025-04-01').outputs.avdHostDataCollectionRuleId.value, '')]"
             }
           }
         }
@@ -4623,6 +5492,14 @@
     "nfsSharePath": {
       "type": "string",
       "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.nfsSharePath.value]"
+    },
+    "linuxHostDataCollectionRuleId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.linuxHostDataCollectionRuleId.value]"
+    },
+    "avdHostDataCollectionRuleId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.avdHostDataCollectionRuleId.value]"
     }
   }
 }

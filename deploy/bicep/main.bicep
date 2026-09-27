@@ -253,6 +253,24 @@ param avdVmNamePrefix string = 'avdhost'
 @description('AVD session host VM size.')
 param avdVmSize string = 'Standard_D8s_v5'
 
+@description('Deploy the host monitoring: log collection from the Linux hosts and AVD session hosts, the fleet workbook, and the alerts. Set to false in a cloud that lacks data collection rules, workbooks or log search alerts. Enable-HostMonitoring.ps1 installs the Azure Monitor agent after provisioning.')
+param deployHostMonitoring bool = true
+
+@description('Email addresses that receive the alerts, separated by commas or semicolons. For a Teams channel, use the channel\'s email address. Leave empty to deploy the alerts without notifications.')
+param alertEmailAddresses string = ''
+
+@description('Refused checkouts (HTTP 409) in 15 minutes that raise an alert.')
+@minValue(1)
+param alertCheckoutRefusalThreshold int = 1
+
+@description('API responses with a 5xx status in 15 minutes that raise an alert.')
+@minValue(1)
+param alertApiErrorThreshold int = 5
+
+@description('Average end-to-end latency of the provisioned NFS share over 15 minutes, in milliseconds, that raises an alert.')
+@minValue(1)
+param alertNfsLatencyThresholdMs int = 50
+
 @description('Resource group used for deployment.')
 var effectiveResourceGroupName = empty(resourceGroupName) ? 'rg-${appName}-${environmentName}' : resourceGroupName
 var deployAvdSessionHosts = deployAvdHosts && avdSessionHostCount > 0 && !empty(avdHostPoolName)
@@ -323,6 +341,11 @@ module resources 'main.resources.bicep' = {
     hostNamesNotRunning: hostNamesNotRunning
     avdVmNamePrefix: avdVmNamePrefix
     avdVmSize: avdVmSize
+    deployHostMonitoring: deployHostMonitoring
+    alertEmailAddresses: alertEmailAddresses
+    alertCheckoutRefusalThreshold: alertCheckoutRefusalThreshold
+    alertApiErrorThreshold: alertApiErrorThreshold
+    alertNfsLatencyThresholdMs: alertNfsLatencyThresholdMs
   }
 }
 
@@ -382,3 +405,5 @@ output sqlDatabaseName string = resources.outputs.sqlDatabaseName
 output virtualNetworkName string = resources.outputs.virtualNetworkName
 output linuxHostDomainName string = resources.outputs.linuxHostDomainName
 output nfsSharePath string = resources.outputs.nfsSharePath
+output linuxHostDataCollectionRuleId string = resources.outputs.linuxHostDataCollectionRuleId
+output avdHostDataCollectionRuleId string = resources.outputs.avdHostDataCollectionRuleId

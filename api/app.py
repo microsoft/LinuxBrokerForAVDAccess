@@ -319,6 +319,7 @@ def reset_caches():
     _checkout_event_state['missing_logged'] = False
     _checkout_event_state['client_version_retry_at'] = 0.0
     _start_on_demand_state['missing_logged'] = False
+    _fleet_snapshot_state['missing_logged'] = False
     cache.clear()
 
 def is_duplicate_key_error(error) -> bool:
@@ -3382,6 +3383,47 @@ def append_scaling_note(activity_id, note):
     except Exception:
         logger.exception("Could not append a note to scaling activity %s.", activity_id)
 
+FLEET_SNAPSHOT_FIELDS = (
+    'ReadyHosts', 'PoweredOn', 'Serviceable', 'InUse', 'Waiting', 'Booting', 'StaleHeartbeats',
+    'NfsUnreachable', 'XrdpInactive', 'Draining', 'Maintenance', 'TotalHosts',
+    'EffectiveMinVMs', 'MaxVMs', 'StartOnDemandEnabled', 'StaleAfterSeconds',
+)
+_fleet_snapshot_state = {'missing_logged': False}
+
+
+def log_fleet_snapshot():
+    """Log dbo.GetFleetSnapshot as "fleet snapshot", each figure a custom dimension.
+
+    The scaling trigger runs every five minutes, and the monitoring workbook and alerts read
+    these from AppTraces. Returns the figures logged, or None. Never raises: a scaling run must
+    not fail because its snapshot could not be read. A database without dbo.GetFleetSnapshot,
+    while the API is upgraded ahead of SQL, is logged once per process.
+    """
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetFleetSnapshot")
+                row = cursor.fetchone()
+    except Exception as e:
+        if not is_missing_procedure_error(e):
+            logger.warning("Could not read the fleet snapshot.", exc_info=True)
+        elif not _fleet_snapshot_state['missing_logged']:
+            _fleet_snapshot_state['missing_logged'] = True
+            logger.warning("GetFleetSnapshot is not deployed yet; fleet snapshots are not logged until the SQL upgrade.")
+        return None
+    if not row:
+        return None
+    # Integers, so the queries' toint() reads them; a figure the database left NULL, such as the
+    # minimum with no scaling rule configured, is left out.
+    snapshot = {}
+    for field in FLEET_SNAPSHOT_FIELDS:
+        try:
+            snapshot[field] = int(row[field])
+        except (KeyError, TypeError, ValueError):
+            continue
+    logger.info("fleet snapshot", extra=snapshot)
+    return snapshot
+
 @app.route('/api/scaling/trigger', methods=['POST'])
 @token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
 @audited('scaling.trigger', target_type='fleet')
@@ -3470,6 +3512,8 @@ def trigger_scaling_logic():
             'failed': len(failed),
             'corrections': len(corrections),
         }
+
+        log_fleet_snapshot()
 
         return jsonify({
             'PoweredOnVMs': powered_on_vms,

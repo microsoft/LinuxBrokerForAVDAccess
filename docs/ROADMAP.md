@@ -1070,7 +1070,61 @@ Tracker that kept failing on an index written by another distribution's Tracker 
 
 ### 4.7 Host log shipping and observability
 
-**Status: Planned** · pairs with 2.2
+**Status: Done, except the checks on live hosts** · pairs with 2.2; the checks wait for the
+Phase 4 validation
+
+**Shipped.** A new Bicep module, `modules/core/host-monitoring.bicep`, adds a data collection rule
+for the Linux hosts and one for the AVD session hosts, the **Linux Broker fleet** workbook and the
+alerts, and `deploy/Enable-HostMonitoring.ps1`, which `postprovision` runs, connects the hosts to
+the rules. `deployHostMonitoring` leaves all of it out, and an `AzureCustom` cloud has to opt in.
+Where it differs from the design below:
+
+- **A script installs the agent, not the deployment.** Azure refuses to add an extension to a VM
+  that isn't running, and scaling, start on demand and AVD autoscale all stop hosts, so an agent
+  extension in Bicep would fail `azd provision` whenever a host is off. The script associates each
+  VM tagged `broker-role=linux-host` or `broker-role=avd-host` with its rule, which works on a
+  stopped VM, and installs the Azure Monitor agent, with automatic upgrades, on the running ones.
+  It names each host that isn't running, to be connected with `-HostNames` once it is started, and
+  `postprovision` reports its failure as a warning. The agent authenticates with each VM's
+  system-assigned identity and needs no data collection endpoint.
+- **More logs.** The Linux rule also collects `linuxbroker-session-control.log` and
+  `linuxbroker-patch.log`, from 2.3 and 2.9. Each line of the broker's logs starts with a
+  `YYYY-MM-DD HH:MM:SS` timestamp, which starts a record, so a message of several lines stays one
+  record; `createuser.log` had no timestamps and now has them. xrdp starts its lines in a format the
+  agent doesn't recognize, so each line of `xrdp.log` and `xrdp-sesman.log` is a record of its own.
+  Syslog comes from `auth` and `authpriv` at `info` and up, from `kern` and `user` at `notice` and
+  up, because the kernel reports an NFS server that stops answering at `notice`, and from every
+  other facility at `warning` and up. The AVD rule collects the events of `Connect-LinuxBroker.ps1`
+  and the Remote Desktop client's critical events, errors and warnings.
+- **The `syslog` group can read the release agent's logs.** They name the users signed in to the
+  host, so only root could read them. At each run, the release agent and its watcher now give them
+  mode 640 and the `syslog` group where the host has one, and keep them at 600 where it doesn't.
+- **A fleet snapshot from the database.** The heartbeats from 2.2 go to the broker's database, not
+  to Log Analytics, so SQL script `157` adds `GetFleetSnapshot`, and at the end of each scaling run,
+  every five minutes, the API logs its figures as a `fleet snapshot` trace: ready, powered-on,
+  in-use and booting hosts, waiting users, stale heartbeats, unreachable shares, missing xrdp, and
+  the scaling minimum and maximum in effect, among others. The workbook's fleet charts and three of
+  the alerts read it. An API ahead of the database logs once per process that the procedure is
+  missing.
+- **The alerts.** "No ready hosts" fires only while the scaling minimum is above 0 or users are
+  waiting, so a pool that 4.1 scaled to zero raises nothing. "A host with no heartbeat" became
+  "Unhealthy hosts", which also covers a host that reports the share unreachable or no xrdp. Both
+  need every snapshot in the 15-minute window to show the problem, so a host that is briefly busy
+  or starting raises nothing. "No fleet snapshot" is new, and fires when the scaling runs stop or
+  the API can't read the snapshot. Refused checkouts and API errors count `409` and `5xx` responses
+  against thresholds that are parameters. The throttling and latency alerts watch only a share the
+  deployment creates.
+- **Email only.** One action group notifies the addresses in `alertEmailAddresses`, and a Teams
+  channel through its email address. Without addresses, the alerts still appear in Azure Monitor.
+- **Log rotation shipped with 4.6.**
+
+**Open.** On live hosts, confirm that every log arrives, the release agent's included, and xrdp's
+own; the agent's documentation doesn't say which account reads the files, or whether a `syslog`
+group exists on RHEL before the agent is installed. Check that the agent sends only new lines,
+including after `linuxbroker-patch.log` trims itself, and that the share's metric dimensions match
+the throttling alert, and fire each alert where practical.
+
+**Design.**
 
 - Deploy the Azure Monitor Agent to Linux hosts, plus a Data Collection Rule for
   `/var/log/release-session.log`, `/var/log/release-session-watcher.log`,

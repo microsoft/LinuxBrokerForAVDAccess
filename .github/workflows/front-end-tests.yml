@@ -12,6 +12,8 @@ on:
       - 'custom_script_extensions/**'
       - 'deploy/bicep/**'
       - 'deploy/Update-AvdHostBrokerScript.ps1'
+      - 'deploy/Enable-HostMonitoring.ps1'
+      - 'deploy/Post-Provision.ps1'
       - 'deploy/Migrate-ExistingEnvironment.ps1'
       - 'deploy/Initialize-DeploymentEnvironment.ps1'
       - '.github/workflows/front-end-tests.yml'
@@ -26,6 +28,8 @@ on:
       - 'custom_script_extensions/**'
       - 'deploy/bicep/**'
       - 'deploy/Update-AvdHostBrokerScript.ps1'
+      - 'deploy/Enable-HostMonitoring.ps1'
+      - 'deploy/Post-Provision.ps1'
       - 'deploy/Migrate-ExistingEnvironment.ps1'
       - 'deploy/Initialize-DeploymentEnvironment.ps1'
       - '.github/workflows/front-end-tests.yml'
@@ -222,8 +226,9 @@ jobs:
           Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser -SkipPublisherCheck
           Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Force -Scope CurrentUser -SkipPublisherCheck
 
-      # Also runs Update-AvdHostBrokerScript.ps1, Migrate-ExistingEnvironment.ps1 and the autoscale
-      # checks of Initialize-DeploymentEnvironment.ps1 with Azure mocked.
+      # Also runs Update-AvdHostBrokerScript.ps1, Enable-HostMonitoring.ps1, Post-Provision.ps1's
+      # call to it, Migrate-ExistingEnvironment.ps1 and the autoscale and monitoring checks of
+      # Initialize-DeploymentEnvironment.ps1 with Azure mocked.
       - name: Run the Pester tests
         shell: powershell
         run: |
@@ -240,7 +245,8 @@ jobs:
           Import-Module PSScriptAnalyzer -RequiredVersion 1.24.0
           $findings = @(
               'avd_host/broker/Connect-LinuxBroker.ps1',
-              'deploy/Update-AvdHostBrokerScript.ps1'
+              'deploy/Update-AvdHostBrokerScript.ps1',
+              'deploy/Enable-HostMonitoring.ps1'
           ) | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Settings avd_host/tests/PSScriptAnalyzerSettings.psd1 }
           if (@($findings).Count -gt 0) {
               $findings | Format-Table -Property ScriptName, Line, Severity, RuleName, Message -AutoSize -Wrap | Out-String -Width 240 | Write-Output

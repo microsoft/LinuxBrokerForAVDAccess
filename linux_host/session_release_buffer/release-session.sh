@@ -10,6 +10,9 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 LINUXBROKER_AGENT_VERSION="1.2.0"
 
 LOG_FILE="/var/log/release-session.log"
+# The users signed in to the host must not read the log, which names them. Azure Monitor Agent may
+# collect logs as the syslog account rather than root, so where that group exists it may read it.
+LOG_READER_GROUP="syslog"
 LOCATION_PATH="/usr/local/bin"
 XORG_USERS_INFO_SCRIPT="$LOCATION_PATH/xrdp-who-xorg.sh"
 APPLY_SETTINGS_SCRIPT="$LOCATION_PATH/apply-host-settings.sh"
@@ -56,13 +59,25 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - [$RUN_MODE] - $1" | tee -a "$LOG_FILE"
 }
 
+# Readable by root and LOG_READER_GROUP only, or by root alone where the group does not exist yet.
+# Every run applies it, so the group gains access once it exists, which on some distributions may
+# be only after Azure Monitor Agent is installed.
+protect_log_file() {
+    if getent group "$LOG_READER_GROUP" >/dev/null 2>&1 && chgrp "$LOG_READER_GROUP" "$1" 2>/dev/null; then
+        chmod 640 "$1"
+    else
+        chmod 600 "$1"
+    fi
+}
+
 ensure_state_files() {
     mkdir -p "$STATE_DIRECTORY"
     # Temporary files are written here so the final mv is an atomic rename, and API
     # responses and lease state must not be readable by the users signed in to the host.
     chmod 700 "$STATE_DIRECTORY"
     touch "$LOG_FILE" "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE" "$IDLE_WARNED_USERS_FILE"
-    chmod 600 "$LOG_FILE" "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE" "$IDLE_WARNED_USERS_FILE"
+    chmod 600 "$CURRENT_USERS_DETAILS" "$PREVIOUS_USERS_FILE" "$DISCONNECTED_USERS_FILE" "$IDLE_WARNED_USERS_FILE"
+    protect_log_file "$LOG_FILE"
 }
 
 acquire_reconcile_lock() {

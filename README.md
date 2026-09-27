@@ -275,7 +275,7 @@ Because the profile is versioned, the portal shows which hosts have applied the 
 - **Azure Key Vault**: Stores SSH keys and database passwords securely, accessed via managed identities.
 - **Login keyring**: The Linux password changes at every checkout, so it cannot protect a user's GNOME login keyring. The broker keeps a separate random key for each user in a vault of its own, where the API can write secrets but cannot change the deployment's, and `xrdp-startwm.sh` unlocks the keyring with it before the desktop starts. The key reaches the host over the checkout's SSH session and stays in memory-backed storage under `/run`, readable only by the user, until the host is returned.
 - **API Permissions**: Specific API permissions are granted to components to restrict access based on roles.
-- **Logging and Monitoring**: All activities are logged to Azure Application Insights and Log Analytics Workspace.
+- **Logging and Monitoring**: The portal, the API and the task function log to Azure Application Insights and a Log Analytics workspace. Unless `deployHostMonitoring` is `false`, the Linux hosts' broker logs, xrdp logs and syslog, and the **Linux Desktop** events of the AVD session hosts, are collected in the same workspace, and a workbook and alerts show the state of the Linux host fleet. See [Host Monitoring](deploy/DEPLOYMENT.md#host-monitoring).
 
 ### AVD Host Sizing Recommendations
 
@@ -362,7 +362,7 @@ The distribution and desktop support release needs `azd provision` and agent 1.2
 - **Review the idle timeout.** It had never disconnected anyone before this release, and migrated Ubuntu hosts now enforce any timeout already set.
 - **Replace or bootstrap again any Ubuntu hosts.** Earlier releases deployed them with no desktop and without the packages NFS homes need.
 
-The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription, the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0, and the Linux hosts need the host migration. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
+The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription and for the host monitoring, the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0, and the Linux hosts need the host migration. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
 
 - **A checkout can start a host.** When no host is ready, the broker starts a stopped one and the user's **Linux Desktop** waits for it, for up to 10 minutes. It is on after the upgrade, and the **Scaling** page turns it off or limits how many hosts start at once.
 - **Update the AVD session hosts.** `deploy/Migrate-ExistingEnvironment.ps1` now also runs `deploy/Update-AvdHostBrokerScript.ps1`, which replaces the script on every running session host. An older script tells its user that no host is available while one starts for them.
@@ -370,6 +370,7 @@ The start on demand release needs `azd provision`, for the AVD scaling plan and 
 - **The Linux desktop opens full screen across every monitor.** Set `avdLinuxDesktopFullScreen` or `avdLinuxDesktopMultiMonitor` to `false` to open it in a window or on one monitor, but only after every session host runs the new script. See [Linux Desktop Display](deploy/DEPLOYMENT.md#linux-desktop-display).
 - **The AVD session hosts start and stop on a schedule.** `azd provision` adds a scaling plan, turns on Start VM on Connect and gives the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription, which needs Owner or User Access Administrator there. Update the session hosts' script first, while they all still run, and review the schedule before you provision, or set `avdScalingPlanEnabled` to `false`. See [AVD Autoscale](deploy/DEPLOYMENT.md#avd-autoscale).
 - **Caches move off the NFS share.** `deploy/Migrate-LinuxHostReleaseAgent.ps1`, which `deploy/Migrate-ExistingEnvironment.ps1` runs, installs `install-host-config.sh` on the running Linux hosts. Each user's cache then stays on the host's own disk, NFS mounts read ahead 15 MiB, and the broker's logs rotate. Caches already in `~/.cache` on the share can be deleted. See [Home Directory Share](deploy/DEPLOYMENT.md#home-directory-share).
+- **Host logs, a fleet workbook and alerts.** `azd provision` adds data collection rules, a workbook and alerts, and `postprovision` installs the Azure Monitor agent on the running hosts, so their logs reach Log Analytics. Set `alertEmailAddresses` to get the alerts by email, and once each host that `postprovision` names as not running is started, connect it with `deploy/Enable-HostMonitoring.ps1 -HostNames`. See [Host Monitoring](deploy/DEPLOYMENT.md#host-monitoring).
 
 ## Roadmap
 

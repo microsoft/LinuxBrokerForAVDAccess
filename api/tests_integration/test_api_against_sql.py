@@ -1,6 +1,7 @@
 """End-to-end checks of the handlers against the real stored procedures and driver."""
 
 import json
+import logging
 import types
 from pathlib import Path
 
@@ -204,6 +205,23 @@ def test_scaling_starts_hosts_to_reach_the_minimum(app_module, client, db, remot
     assert vm["PowerState"] == "On" and vm["NetworkStatus"] == "Unreachable"
     log = db.one("SELECT TOP 1 * FROM dbo.VmScalingActivityLog ORDER BY ActivityID DESC")
     assert log["ActionTaken"] == "Scale Up" and log["VMsPoweredOn"] == 1
+
+
+def test_each_scaling_run_logs_the_fleet_as_the_database_sees_it(app_module, client, db, remote, monkeypatch, caplog):
+    db.add_vm("lnxhost-01")
+    db.add_vm("lnxhost-02", power="Off", network="Unreachable")
+    compute = _Compute({"lnxhost-01": "PowerState/running", "lnxhost-02": "PowerState/deallocated"})
+    monkeypatch.setattr(app_module, "ComputeManagementClient", lambda *a, **k: compute)
+    caplog.set_level(logging.INFO, logger="linuxbroker.api")
+
+    assert client.post("/api/scaling/trigger", json={}).status_code == 200
+
+    [record] = [r for r in caplog.records if r.getMessage() == "fleet snapshot"]
+    # The run started lnxhost-02 to reach the minimum of two, so the snapshot sees it booting;
+    # lnxhost-01 has been on longer than the allowance and its agent has never reported.
+    assert (record.ReadyHosts, record.PoweredOn, record.Booting, record.Serviceable) == (1, 2, 1, 2)
+    assert (record.StaleHeartbeats, record.TotalHosts, record.EffectiveMinVMs, record.MaxVMs) == (1, 2, 2, 10)
+    assert record.StartOnDemandEnabled == 1 and record.StaleAfterSeconds == 180
 
 
 def test_scaling_down_honours_the_deallocate_stop_mode(app_module, client, db, remote, monkeypatch):

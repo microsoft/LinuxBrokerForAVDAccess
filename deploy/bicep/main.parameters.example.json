@@ -199,6 +199,21 @@
     },
     "avdVmSize": {
       "value": "Standard_D8s_v5"
+    },
+    "deployHostMonitoring": {
+      "value": true
+    },
+    "alertEmailAddresses": {
+      "value": "<alert-email-addresses>"
+    },
+    "alertCheckoutRefusalThreshold": {
+      "value": 1
+    },
+    "alertApiErrorThreshold": {
+      "value": 5
+    },
+    "alertNfsLatencyThresholdMs": {
+      "value": 50
     }
   }
 }

@@ -39,6 +39,9 @@ new_form_success() {
     assert_file_contains "$FAKE_CALLS" "mount -t nfs nfs.example:/profiles /nfs_profiles"
     assert_file_contains "$FAKE_CALLS" "umount /nfs_profiles"
     assert_file_contains /var/log/createuser.log "Mount NFS root on /nfs_profiles"
+    # Azure Monitor starts a record at each timestamp, so every line must begin with one.
+    ! grep -Evq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} - ' /var/log/createuser.log \
+        || fail "a createuser.log line has no timestamp: $(grep -Ev '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} - ' /var/log/createuser.log | head -n 1)"
     cleanup_user "$user"
 }
 

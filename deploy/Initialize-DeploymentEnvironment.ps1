@@ -889,6 +889,49 @@ function ConvertTo-PercentParameterValue {
     return $value
 }
 
+function ConvertTo-PositiveIntParameterValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][int]$DefaultValue
+    )
+
+    $value = ConvertTo-IntParameterValue -Key $Key -DefaultValue $DefaultValue
+    if ($value -lt 1) {
+        throw "azd environment value '$Key' must be a whole number of 1 or more, but was '$value'."
+    }
+
+    return $value
+}
+
+# Email addresses separated by commas or semicolons, returned comma-separated without repeats.
+function ConvertTo-EmailListParameterValue {
+    param([Parameter(Mandatory = $true)][string]$Key)
+
+    $value = Get-AzdEnvValue -Key $Key
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return ''
+    }
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $addresses = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in ($value -split '[,;]')) {
+        $address = $entry.Trim()
+        if ($address.Length -eq 0) {
+            continue
+        }
+
+        if ($address -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+\z') {
+            throw "azd environment value '$Key' must list email addresses separated by commas or semicolons, but '$address' is not an email address."
+        }
+
+        if ($seen.Add($address)) {
+            $addresses.Add($address)
+        }
+    }
+
+    return ($addresses -join ',')
+}
+
 # The scaling plan's phases start in order within one day: ramp-up, peak, ramp-down, off-peak.
 function Assert-AvdScalingPlanTimeOrder {
     param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Times)
@@ -1631,6 +1674,12 @@ Ensure-DefaultEnvValue -Key 'domainName' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'nfsShare' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'deployNfsShare' -ValueFactory { 'true' } | Out-Null
 Ensure-DefaultEnvValue -Key 'nfsShareQuotaGiB' -ValueFactory { '100' } | Out-Null
+# An air-gapped cloud may lack the resource types or API versions the monitoring uses, so it opts in.
+Ensure-DefaultEnvValue -Key 'deployHostMonitoring' -ValueFactory { if ($cloudContext.Name -eq 'AzureCustom') { 'false' } else { 'true' } } | Out-Null
+Ensure-DefaultEnvValue -Key 'alertEmailAddresses' -ValueFactory { '' } | Out-Null
+Ensure-DefaultEnvValue -Key 'alertCheckoutRefusalThreshold' -ValueFactory { '1' } | Out-Null
+Ensure-DefaultEnvValue -Key 'alertApiErrorThreshold' -ValueFactory { '5' } | Out-Null
+Ensure-DefaultEnvValue -Key 'alertNfsLatencyThresholdMs' -ValueFactory { '50' } | Out-Null
 Ensure-DefaultEnvValue -Key 'avdUsersGroupId' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'vmHostResourceGroup' -ValueFactory { '' } | Out-Null
 Ensure-DefaultEnvValue -Key 'scriptSourceRoot' -ValueFactory { 'https://raw.githubusercontent.com/microsoft/LinuxBrokerForAVDAccess/refs/heads/main' } | Out-Null
@@ -1915,6 +1964,11 @@ Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterNa
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'stsIssuerHost' -Value (Get-RequiredAzdEnvValue -Key 'stsIssuerHost')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'appServiceDomain' -Value (Get-RequiredAzdEnvValue -Key 'appServiceDomain')
 Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'scriptSourceRoot' -Value (Get-RequiredAzdEnvValue -Key 'scriptSourceRoot')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'deployHostMonitoring' -Value (ConvertTo-BoolParameterValue -Key 'deployHostMonitoring' -DefaultValue $true)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'alertEmailAddresses' -Value (ConvertTo-EmailListParameterValue -Key 'alertEmailAddresses')
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'alertCheckoutRefusalThreshold' -Value (ConvertTo-PositiveIntParameterValue -Key 'alertCheckoutRefusalThreshold' -DefaultValue 1)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'alertApiErrorThreshold' -Value (ConvertTo-PositiveIntParameterValue -Key 'alertApiErrorThreshold' -DefaultValue 5)
+Add-BicepParameterValue -ParameterCollection $bicepParameterEntries -ParameterName 'alertNfsLatencyThresholdMs' -Value (ConvertTo-PositiveIntParameterValue -Key 'alertNfsLatencyThresholdMs' -DefaultValue 50)
 
 $bicepParameters = [ordered]@{
     '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'

@@ -127,6 +127,17 @@ param avdVmNamePrefix string = 'avdhost'
 ])
 param avdVmSize string = 'Standard_D8s_v5'
 
+@description('Deploy host log collection, the fleet workbook and the alerts.')
+param deployHostMonitoring bool = true
+@description('Email addresses that receive the alerts, separated by commas or semicolons.')
+param alertEmailAddresses string = ''
+@minValue(1)
+param alertCheckoutRefusalThreshold int = 1
+@minValue(1)
+param alertApiErrorThreshold int = 5
+@minValue(1)
+param alertNfsLatencyThresholdMs int = 50
+
 var sanitizedApp = toLower(replace(appName, '-', ''))
 var sanitizedEnv = toLower(replace(environmentName, '-', ''))
 var sqlLocation = location == 'eastus2' ? 'eastus' : location
@@ -202,6 +213,26 @@ module observability 'modules/core/observability.bicep' = {
     logAnalyticsWorkspaceName: logAnalyticsName
     applicationInsightsName: applicationInsightsName
   }
+}
+
+// deploy/Enable-HostMonitoring.ps1 installs the agent and associates the rules after provisioning.
+module hostMonitoring 'modules/core/host-monitoring.bicep' = if (deployHostMonitoring) {
+  name: 'hostMonitoring'
+  params: {
+    location: location
+    tags: tags
+    namePrefix: '${appName}-${environmentName}'
+    logAnalyticsWorkspaceName: observability.outputs.logAnalyticsWorkspaceName
+    apiAppName: apiAppName
+    nfsStorageAccountName: provisionNfsShare ? nfsStorageAccountName : ''
+    alertEmailAddresses: alertEmailAddresses
+    alertCheckoutRefusalThreshold: alertCheckoutRefusalThreshold
+    alertApiErrorThreshold: alertApiErrorThreshold
+    alertNfsLatencyThresholdMs: alertNfsLatencyThresholdMs
+  }
+  dependsOn: [
+    nfsStorage
+  ]
 }
 
 module containerRegistry 'modules/core/container-registry.bicep' = {
@@ -635,3 +666,5 @@ output sqlDatabaseName string = sql.outputs.databaseName
 output virtualNetworkName string = networking.outputs.vnetName
 output linuxHostDomainName string = effectiveDomainName
 output nfsSharePath string = effectiveNfsShare
+output linuxHostDataCollectionRuleId string = deployHostMonitoring ? hostMonitoring!.outputs.linuxHostDataCollectionRuleId : ''
+output avdHostDataCollectionRuleId string = deployHostMonitoring ? hostMonitoring!.outputs.avdHostDataCollectionRuleId : ''

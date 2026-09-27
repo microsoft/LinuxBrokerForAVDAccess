@@ -200,6 +200,7 @@ The scripts do not contain `USE <database>` statements. The target database come
 - `154_alter_procedure-GetCheckoutStats.sql`: leaves `Starting` out of the total and adds the waits for a host to start, how many were served, their median and 95th percentile, and who is waiting now
 - `155_alter_procedure-GetUtilizationSeries.sql`: counts only scaling runs, leaves `Starting` out of checkouts, and adds `Waited`, the users who waited in each bucket
 - `156_alter_procedure-GetAttentionItems.sql`: does not report no ready hosts for a pool scaled to zero that nobody is waiting on
+- `157_create_procedure-GetFleetSnapshot.sql`: one row describing the fleet now: ready, powered-on, serviceable, in-use and booting hosts, waiting users, hosts whose heartbeat is stale or reports the share or xrdp down, and the minimum as scaling reads it. The API logs it to Application Insights as `fleet snapshot` after every scaling run, for the monitoring workbook and alerts
 
 `033` exists as its own file rather than being folded into `014` because `014` runs before `029` adds those columns, and SQL Server validates column references against existing tables when a procedure is created.
 

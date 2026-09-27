@@ -25,8 +25,10 @@ usage() {
     exit 1
 }
 
+# Each record starts with the time, as in the broker's other logs. Azure Monitor starts a new
+# record at each timestamp, so a line without one would be joined to the line before it.
 log() {
-    echo "$1" >> "$LOGFILE"
+    printf '%s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOGFILE"
 }
 
 fail() {

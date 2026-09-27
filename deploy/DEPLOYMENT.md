@@ -67,6 +67,7 @@ At a high level, the deployment provisions and configures the following:
 - Optional Linux hosts and optional AVD hosts, depending on azd environment settings.
 - When AVD hosts are deployed, a RemoteApp application group that publishes **Linux Desktop**, which runs `Connect-LinuxBroker.ps1` on the session host to check out a Linux host and open an RDP session to it.
 - When AVD hosts are deployed, an Azure Virtual Desktop scaling plan that starts and stops the session hosts on a schedule, and Start VM on Connect on the host pool. See [AVD Autoscale](#avd-autoscale).
+- Unless `deployHostMonitoring` is `false`, data collection rules that send the hosts' logs to Log Analytics, a workbook that shows the state of the Linux host fleet, and alerts. See [Host Monitoring](#host-monitoring).
 - Two Entra app registrations: frontend and API.
 - Two Entra security groups for VM authorization: AVD hosts and Linux hosts.
 - When AVD hosts are deployed and `avdUsersGroupId` is not set, a third Entra security group for AVD users, with the deploying user added as a member.
@@ -120,6 +121,9 @@ The checked-in [bicep/main.parameters.example.json](bicep/main.parameters.exampl
 - `avdScalingPlanTimeZone`: Windows time zone ID the scaling plan's times are in, such as `Eastern Standard Time`. Defaults to `UTC`. The schedule itself comes from `avdScalingPlanRampUpStart`, `avdScalingPlanPeakStart`, `avdScalingPlanRampDownStart`, `avdScalingPlanOffPeakStart` and the five `avdScalingPlan...Pct` values; see [AVD Autoscale](#avd-autoscale).
 - `assignAvdAutoscaleRole`: `true` or `false`. Defaults to `true`, which lets the deployment give the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription when it does not hold it. Set it to `false` when an administrator manages that role.
 - `avdServicePrincipalObjectId`: object ID of the Azure Virtual Desktop service principal in your tenant. Leave empty to have `preprovision` find it by its app ID, `avdServicePrincipalAppId`, which defaults to `9cdead84-a844-4324-93f2-b2e6bb768d07`.
+- `deployHostMonitoring`: `true` or `false`. Defaults to `true`, or to `false` when `azureCloudName` is `AzureCustom`. Collects the hosts' logs in Log Analytics and adds the fleet workbook and the alerts. See [Host Monitoring](#host-monitoring).
+- `alertEmailAddresses`: email addresses that receive the alerts, separated by commas or semicolons. For a Teams channel, use the channel's email address. Leave empty, the default, to deploy the alerts without notifications.
+- `alertCheckoutRefusalThreshold`, `alertApiErrorThreshold` and `alertNfsLatencyThresholdMs`: the refused checkouts and the API `5xx` responses in 15 minutes, and the average latency of the home directory share in milliseconds, that raise an alert. They default to `1`, `5` and `50`. See [Alerts](#alerts).
 - `vmHostResourceGroup`: override if managed VMs live in a different resource group.
 - `brokerReaderGroupId`, `brokerOperatorGroupId`, `brokerAdminGroupId`: optional object IDs of Entra groups to assign the Broker API's `Reader`, `Operator` and `FullAccess` app roles to. Assigning an app role to a group needs Microsoft Entra ID P1 or P2; without it, assign the roles to users in **Enterprise applications**. See [Portal roles](#portal-roles).
 - `sqlDatabaseSkuName`: Azure SQL Database SKU, for example `Basic`, `S1` or `GP_S_Gen5_1`. Defaults to `Basic`, which suits small pools. Use `S1` or higher when many hosts and portal users call the broker at once; each API worker process opens at most `DB_MAX_CONCURRENCY` connections (6 by default).
@@ -585,6 +589,141 @@ Some caches still go to the share:
 Caches that sessions left in `~/.cache` before the host was updated stay on the share and can be
 deleted; an application rebuilds a cache it needs.
 
+## Host Monitoring
+
+With `deployHostMonitoring`, which is `true` unless `azureCloudName` is `AzureCustom`, the
+deployment collects the hosts' logs in the Log Analytics workspace that Application Insights writes
+to, adds a workbook that shows the state of the fleet, and adds alerts for the problems that keep
+users from a Linux desktop. With `<prefix>` for `<appName>-<environmentName>`, it creates:
+
+- the `LinuxBrokerHost_CL` table in the workspace, for the broker's logs from the Linux hosts
+- two data collection rules, `dcr-<prefix>-linux` for the Linux hosts and `dcr-<prefix>-avd` for
+  the AVD session hosts
+- the **Linux Broker fleet (`<prefix>`)** workbook
+- five log search alert rules and, when the deployment creates the NFS share, two metric alert
+  rules on the share, all named `alert-<prefix>-...`
+- the action group `ag-<prefix>`, when `alertEmailAddresses` is set
+
+A data collection rule collects nothing until a VM is associated with it and runs the Azure
+Monitor agent. Azure refuses to add an extension to a VM that is not running, and scaling, start on
+demand and autoscale all stop hosts, so the deployment doesn't install the agent itself;
+[Enable-HostMonitoring.ps1](Enable-HostMonitoring.ps1) does, from `postprovision`.
+
+Set `deployHostMonitoring` to `false` to leave all of this out, for example in a cloud that lacks
+data collection rules, workbooks or log search alerts, which is why an `AzureCustom` cloud has to
+opt in. Setting it to `false` later removes nothing that an earlier deployment created.
+
+### What the hosts send
+
+| From | Table | What |
+| --- | --- | --- |
+| Linux hosts | `LinuxBrokerHost_CL` | The records of `release-session.log`, `release-session-watcher.log`, `linuxbroker-host-settings.log`, `createuser.log`, `linuxbroker-session-control.log`, `linuxbroker-patch.log`, `xrdp.log` and `xrdp-sesman.log` in `/var/log`, in `RawData`, with the file in `FilePath` and the host in `Computer` |
+| Linux hosts | `Syslog` | The messages of the `auth` and `authpriv` facilities from `info` up, of `kern` and `user` from `notice` up, and of every other facility from `warning` up |
+| AVD session hosts | `Event` | The events that `Connect-LinuxBroker.ps1` writes to the Application log under the `LinuxBrokerScript` source, and the critical, error and warning events in the Remote Desktop client's `Microsoft-Windows-TerminalServices-RDPClient/Operational` log |
+| The broker API | `AppTraces` | A fleet snapshot every five minutes, described below |
+
+- Each line of the broker's logs starts with a `YYYY-MM-DD HH:MM:SS` timestamp, which starts a
+  record, so a message of several lines arrives as one record. xrdp starts its lines in a format
+  the agent doesn't recognize, so each line of its logs arrives on its own.
+- The kernel reports an NFS server that stops answering at `notice`, which is why `kern` is
+  collected from there. The agent takes syslog messages from rsyslog or syslog-ng, so a host that
+  runs neither sends no syslog.
+- The logs of the release agent and its watcher name the users signed in to the host, so only
+  root can read them, and, for the Azure Monitor agent, the `syslog` group, where the host has
+  one.
+- Log Analytics charges for what it ingests. Each sign-in, `sudo` command and SSH connection, the
+  broker's own included, adds a few `auth` lines, and each broker action a few log lines, so the
+  volume follows how busy the hosts are. Each alert rule also has a small monthly charge.
+
+The broker's own host heartbeats, which **Fleet health** shows, go to its database rather than to
+Log Analytics, so at the end of each scaling run, every five minutes, the API logs a
+`fleet snapshot` trace with the figures of the `GetFleetSnapshot` procedure as custom dimensions:
+`ReadyHosts`, the hosts a new user could be given at once; `PoweredOn`, `Serviceable` and `InUse`,
+counted as scaling counts them; `Waiting` users and `Booting` hosts; the hosts whose heartbeat is
+older than `StaleAfterSeconds` (`StaleHeartbeats`), that report the home directory share
+unreachable (`NfsUnreachable`) or that report no xrdp (`XrdpInactive`); `Draining`, `Maintenance`
+and `TotalHosts`; the scaling minimum and maximum in effect, `EffectiveMinVMs` and `MaxVMs`; and
+`StartOnDemandEnabled`. Until SQL script `157` is applied, the API logs no snapshot, and each API
+process logs once that `GetFleetSnapshot` is not deployed yet.
+
+### Connecting the hosts
+
+`postprovision` runs [Enable-HostMonitoring.ps1](Enable-HostMonitoring.ps1) after every other step,
+so every `azd up` and `azd provision` connects the hosts, new ones included. The script:
+
+1. Associates each VM tagged `broker-role=linux-host` with the Linux rule, and each VM tagged
+   `broker-role=avd-host` with the AVD rule, under the name `linuxbroker-host-monitoring`. An
+   association works whether the VM is running or not.
+2. Installs the Azure Monitor agent, `AzureMonitorLinuxAgent` or `AzureMonitorWindowsAgent`, with
+   automatic upgrades, on each running VM that doesn't have it, and installs it again, under its
+   existing name, where an earlier install failed. The agent authenticates with the VM's
+   system-assigned managed identity.
+3. Waits for the installs, for up to 20 minutes, which `-AgentTimeoutMinutes` changes.
+
+A host that isn't running keeps its association but gets no agent, so it sends nothing, and the
+script names it. A host keeps the agent once it has it, so start each host the script named once
+and run the script for it:
+
+```powershell
+Set-Location .\deploy
+.\Enable-HostMonitoring.ps1 -EnvironmentName <environment-name> -HostNames <host-name>, <host-name>
+```
+
+Scaling leaves a Linux host running for at least 10 minutes after it starts, which is usually long
+enough, so run the script as soon as the host is up. While the scaling plan is assigned, autoscale
+can stop an AVD session host you started before its agent is installed, so tag the session host
+`excludeFromScaling` before you start it and remove the tag afterwards; see
+[AVD Autoscale](#avd-autoscale). An install that failed is repaired the next time the script runs.
+
+The script tries every host, reports the ones it could not set up together, and exits with an
+error naming them, which `postprovision` reports as a warning, because the rest of the deployment
+is in place by then. Running it again is safe. It reads the rules, the resource group and the
+subscription from the azd environment unless you pass them, and it finds the hosts by their
+`broker-role` tag in that resource group, so hosts elsewhere need `-ResourceGroupName` and the tag.
+Without `-HostNames`, it goes through every host.
+
+The agent sends over HTTPS. If you restrict the hosts' outbound traffic, allow the `AzureMonitor`
+and `AzureResourceManager` service tags on port 443, which the agent
+[needs](https://learn.microsoft.com/azure/azure-monitor/agents/azure-monitor-agent-network-configuration).
+
+### The workbook
+
+Open **Linux Broker fleet (`<prefix>`)** from **Workbooks** in the Log Analytics workspace, or from
+the resource group. For the time range you choose, it shows:
+
+- the latest fleet snapshot, and the ready, in-use, waiting, booting and powered-on hosts over time
+- checkouts by outcome: assigned, told to wait while a host starts, refused, or failed
+- how long successful checkouts took, at the 50th and 95th percentile
+- releases and returns, and whether they succeeded
+- hosts started on demand, and starts that failed
+- the host settings that a host could not apply
+- the errors and warnings in each Linux host's broker logs, and its syslog errors
+- NFS home directory share failures: mounts that failed, and an NFS server that stopped answering
+- errors and warnings by AVD session host
+
+### Alerts
+
+The alerts are evaluated every five minutes over the last 15 minutes, and resolve themselves once
+the problem is gone.
+
+| Alert | Severity | Fires when |
+| --- | --- | --- |
+| No ready hosts | 1 | Every fleet snapshot in the window showed no ready Linux host while the scaling minimum is above 0 or users are waiting. A pool scaled to zero that nobody is waiting for raises nothing. |
+| No fleet snapshot | 2 | The window has no fleet snapshot: the task function, the API or the database may be down, or SQL script `157` isn't applied. |
+| Checkouts refused | 2 | The API refused at least `alertCheckoutRefusalThreshold` checkouts with `409`, 1 by default. |
+| Unhealthy hosts | 2 | Every fleet snapshot in the window showed a Linux host with a stale heartbeat, an unreachable home directory share or no xrdp. |
+| API errors | 2 | The API answered at least `alertApiErrorThreshold` requests with a `5xx` status, 5 by default. |
+| NFS throttling | 2 | Azure Files throttled a request to the home directory share. See [Sizing the share](#sizing-the-share). |
+| NFS latency | 3 | Requests to the home directory share took more than `alertNfsLatencyThresholdMs` milliseconds on average, 50 by default. |
+
+- Because the fleet alerts need every snapshot in the window to show the problem, a host that is
+  briefly busy or starting raises nothing.
+- The NFS alerts exist only when the deployment creates the share. A share of your own, named in
+  `nfsShare`, isn't watched.
+- Without `alertEmailAddresses`, the alerts appear only under **Alerts** in Azure Monitor. Set it to
+  one or more addresses, separated by commas or semicolons, to get them by email. For a Teams
+  channel, use the channel's email address.
+
 ## Quick Start
 
 From the repository root:
@@ -656,6 +795,7 @@ Important deployment characteristics:
 - RHEL, Rocky Linux and AlmaLinux hosts use Generation 2 images so they can run with Trusted Launch.
 - The AVD host pool prefers RemoteApp and sets RDP properties that enable Microsoft Entra single sign-on to the Microsoft Entra joined session hosts.
 - The AVD host pool has Start VM on Connect on, and a scaling plan starts and stops its session hosts on a schedule. See [AVD Autoscale](#avd-autoscale).
+- Unless `deployHostMonitoring` is `false`, the host monitoring's data collection rules, workbook and alerts are created, but no host gets the Azure Monitor agent until `postprovision`. See [Host Monitoring](#host-monitoring).
 - Hosts that were not running when `preprovision` listed them keep their VM extensions as they were. Changes that the extensions carry, such as the API URL, `scriptSourceRoot`, `linuxHostDesktop` and `linuxHostDisableScreenLock`, reach such a host the next time `azd provision` runs while it is running.
 - Linux hosts run the desktop that `linuxHostDesktop` names, GNOME by default, with the screen saver and screen lock disabled unless `linuxHostDisableScreenLock` is `false`. See [Linux Host Screen Lock](#linux-host-screen-lock).
 - Key Vault stores `db-password` and `linux-host`.
@@ -673,6 +813,7 @@ It currently runs, in order:
 3. [Build-ContainerImages.ps1](Build-ContainerImages.ps1)
 4. [Assign-VmApiRoles.ps1](Assign-VmApiRoles.ps1)
 5. [Register-LinuxHostSqlRecords.ps1](Register-LinuxHostSqlRecords.ps1)
+6. [Enable-HostMonitoring.ps1](Enable-HostMonitoring.ps1)
 
 That means `postprovision` does all of the following:
 
@@ -683,6 +824,7 @@ That means `postprovision` does all of the following:
 - Restarts the API app, then the function app, then the frontend app, so nothing starts ahead of the API endpoints it calls.
 - Adds AVD and Linux VM managed identities to the corresponding Entra groups, retrying while new identities replicate, and fails the hook if a membership still cannot be confirmed.
 - Registers Linux hosts into `dbo.VirtualMachines` through `dbo.RegisterLinuxHostVm`.
+- Connects the Linux hosts and AVD session hosts to the host monitoring and installs the Azure Monitor agent on the running ones. A host it cannot set up is a warning that names the host, not a failure of the hook. See [Connecting the hosts](#connecting-the-hosts).
 
 ### Front End Build Requirements
 
@@ -705,7 +847,7 @@ That script intentionally stays separate from `azd up`:
 
 By default, the migration script does three things:
 
-1. Runs [Post-Provision.ps1](Post-Provision.ps1) so the existing environment gets the latest container images, SQL scripts, role assignments, VM group sync, and Linux host SQL registration.
+1. Runs [Post-Provision.ps1](Post-Provision.ps1) so the existing environment gets the latest container images, SQL scripts, role assignments, VM group sync, and Linux host SQL registration, and its hosts are connected to the host monitoring.
 2. Runs [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1) so existing Linux hosts get the current release-agent files, one-minute reconciliation timer, and `systemd-logind` watcher.
 3. Runs [Update-AvdHostBrokerScript.ps1](Update-AvdHostBrokerScript.ps1) so existing AVD session hosts get the current `Connect-LinuxBroker.ps1`, the script the **Linux Desktop** RemoteApp runs.
 
@@ -899,7 +1041,7 @@ Every layer tolerates the others being one release behind during the rollout, an
 
 ## Upgrading To Start On Demand
 
-This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)), opens the Linux desktop full screen across every monitor (item 4.8), starts and stops the AVD session hosts on a schedule (item 4.5), and moves users' caches off the home directory share (item 4.6). The schedule adds a scaling plan and a role assignment on the subscription, so the release needs `azd provision`, the AVD session hosts need the new `Connect-LinuxBroker.ps1`, and the Linux hosts need the host migration.
+This release lets a checkout that finds no ready host start one, so a pool can scale to zero when nobody needs it (item 4.1 of the [roadmap](../docs/ROADMAP.md)), opens the Linux desktop full screen across every monitor (item 4.8), starts and stops the AVD session hosts on a schedule (item 4.5), moves users' caches off the home directory share (item 4.6), and collects the hosts' logs in Log Analytics, with a workbook and alerts for the fleet (item 4.7). The schedule adds a scaling plan and a role assignment on the subscription, and the monitoring adds data collection rules, a workbook and alerts, so the release needs `azd provision`, the AVD session hosts need the new `Connect-LinuxBroker.ps1`, and the Linux hosts need the host migration.
 
 - **Start on demand.** When a checkout finds no ready host, the API starts a stopped one for the user and answers `202` with how long to wait, instead of refusing. On the AVD session host, **Linux Desktop** shows *Your Linux desktop is starting…* with **Cancel**, asks again when the broker says to, and opens the desktop as soon as the host is reachable, for up to 10 minutes. The start is recorded as a scaling start is, in the scaling activity log as `Start On Demand` and in the audit log as `vm.start_on_demand`, and uses the API's existing **Desktop Virtualization Power On Off Contributor** role. It never takes the pool past the active rule's or window's `MaxVMs`, so a user who arrives when that many hosts are on and none is free is refused as before. Start on demand is on after the upgrade; an administrator can turn it off, and set how many hosts may start at once for waiting users (2 by default, up to 20), in the **Start on demand** card on the **Scaling** page.
 - **Scale to zero.** While start on demand is on, the default rule and schedule windows may keep a minimum of 0 hosts, so idle hosts stop, for example overnight, and the first user to arrive waits a minute or two for one to start. Scaling counts waiting users as demand, and a scale-down keeps a host for each of them. A minimum of 0 cannot be saved while start on demand is off. If it is turned off afterwards, scaling keeps one host on for those rules and windows, and the card says so.
@@ -912,16 +1054,19 @@ This release lets a checkout that finds no ready host start one, so a pool can s
 - **NFS read-ahead of 15 MiB.** Linux hosts now read ahead 15 MiB at a time on NFS mounts, instead of 128 KiB, as Microsoft recommends for Azure Files NFS shares. This applies to every NFS mount on a host, not only to the home directory share.
 - **The broker's logs rotate.** The logs of the release agent, its watcher, `create-user.sh`, the host settings and `session-control.sh` in `/var/log` grew without limit until now. They now rotate every week, or sooner once one passes 50 MB, and each keeps four compressed copies.
 - **`install-host-config.sh`.** The three bootstraps and the host migration install `/usr/local/bin/install-host-config.sh` and run it as root. It writes the read-ahead rule, the log rotation, the cache directory with the file that empties it at every restart, and the profile script, and it removes the unused `/awipsprofiles`, because `create-user.sh` now mounts the share on `/nfs_profiles` while it creates a home directory. `azd provision` doesn't run the bootstrap again on existing hosts, so they get the script from the migration; a host the migration skips because it is stopped keeps its caches in the home directory until it is migrated. The script can be run again at any time. See [Sizing the share](#sizing-the-share) for how the share's size sets its IOPS.
+- **Host monitoring.** `azd provision` creates the data collection rules, the **Linux Broker fleet** workbook and the alerts, and its `postprovision` step then connects the hosts and installs the Azure Monitor agent on the running ones, so their logs arrive in Log Analytics. Once SQL script `157` is applied, the API logs a fleet snapshot every five minutes, which the workbook's fleet charts and three of the alerts use. The alerts notify nobody until you set `alertEmailAddresses`. Set `deployHostMonitoring` to `false` before you provision to leave the monitoring out. See [Host Monitoring](#host-monitoring).
+- **Log timestamps and permissions.** Each line of `createuser.log` now starts with the date and time, as the broker's other logs do. The logs of the release agent and its watcher name the users signed in to the host, so only root could read them; now the `syslog` group can too, where the host has one, so that the Azure Monitor agent can collect them.
 
 ### Recommended order
 
-1. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1). It applies SQL scripts `144`–`156` before the new images start, restarts the apps in the order API, task, front end, migrates the Linux hosts, and then updates `Connect-LinuxBroker.ps1` on the running AVD session hosts. Running it before `azd provision` updates the session hosts before autoscale starts stopping them.
+1. Run [Migrate-ExistingEnvironment.ps1](Migrate-ExistingEnvironment.ps1). It applies SQL scripts `144`–`157` before the new images start, restarts the apps in the order API, task, front end, migrates the Linux hosts, and then updates `Connect-LinuxBroker.ps1` on the running AVD session hosts. Running it before `azd provision` updates the session hosts before autoscale starts stopping them. Its post-provision step reports that the deployment has no host monitoring yet, which `azd provision` adds next.
 2. Start any AVD session host the migration skipped because it was not running, and update it with `-SkipPostProvision -SkipLinuxHostReleaseAgentMigration -AvdHostNames <session-host>`.
-3. Review the [AVD autoscale](#avd-autoscale) values, then run `azd provision`. It creates the scaling plan and the role assignment and turns on Start VM on Connect, and its `postprovision` step builds the images and restarts the apps again. If `preprovision` warns that it cannot assign the role, have an Owner or User Access Administrator run the command it prints, then run `azd provision` again.
-4. With a test user, open **Linux Desktop** while no host is free, for example with every idle host stopped, and confirm that the wait window appears and the desktop opens once the host is up. In a terminal in that session, `echo $XDG_CACHE_HOME` should print `/var/cache/linuxbroker/users/<user>`.
-5. Before you set any minimum to 0, confirm that the **Start on demand** card names no session host whose script cannot wait. The card goes by each session host's latest checkout in the last seven days, so a session host updated since then is listed until its next checkout.
+3. Review the [AVD autoscale](#avd-autoscale) values and the [host monitoring](#host-monitoring) values, such as `alertEmailAddresses`, then run `azd provision`. It creates the scaling plan, the role assignment and the host monitoring and turns on Start VM on Connect, and its `postprovision` step builds the images, restarts the apps again and connects the hosts to the host monitoring. If `preprovision` warns that it cannot assign the role, have an Owner or User Access Administrator run the command it prints, then run `azd provision` again.
+4. For each host that `postprovision` named because it was not running, start it and run [Enable-HostMonitoring.ps1](Enable-HostMonitoring.ps1) for it, as [Connecting the hosts](#connecting-the-hosts) describes. Within about 15 minutes, the workbook should show a fleet snapshot, and `Heartbeat | where Category == "Azure Monitor Agent"` in the workspace should list each host that has the agent.
+5. With a test user, open **Linux Desktop** while no host is free, for example with every idle host stopped, and confirm that the wait window appears and the desktop opens once the host is up. In a terminal in that session, `echo $XDG_CACHE_HOME` should print `/var/cache/linuxbroker/users/<user>`.
+6. Before you set any minimum to 0, confirm that the **Start on demand** card names no session host whose script cannot wait. The card goes by each session host's latest checkout in the last seven days, so a session host updated since then is listed until its next checkout.
 
-Every layer tolerates the others being one release behind during the rollout. Against a database without the new procedures, the new API refuses a checkout that finds no host with `409`, as before, and logs it once, and the portal says that the broker does not support start on demand yet. The previous API build keeps working against the new database: it never answers `202`, so nobody waits, and it refuses a minimum of 0 as before. Session hosts that still run an older script behave as described above. The Linux host changes don't depend on the API: a migrated host keeps caches on its own disk with either API, and a host that is not migrated yet keeps them in the home directory.
+Every layer tolerates the others being one release behind during the rollout. Against a database without the new procedures, the new API refuses a checkout that finds no host with `409`, as before, and logs it once, and the portal says that the broker does not support start on demand yet. Without `GetFleetSnapshot`, it logs no fleet snapshot, and neither does the previous API build, so the **No fleet snapshot** alert fires until both SQL script `157` and the new API are in place. The previous API build keeps working against the new database: it never answers `202`, so nobody waits, and it refuses a minimum of 0 as before. Session hosts that still run an older script behave as described above. The Linux host changes don't depend on the API: a migrated host keeps caches on its own disk with either API, and a host that is not migrated yet keeps them in the home directory. A host that is not migrated yet gets the agent too, but its release agent keeps its own logs readable by root only, and its `createuser.log` lines have no timestamp, so each line arrives as a record of its own.
 
 ## Manual Steps After `azd up`
 
@@ -977,6 +1122,7 @@ Verify that the expected resources exist in the target resource group:
 - the `linuxbroker.internal` private DNS zone with an A record for each Linux host, unless `domainName` was supplied
 - the NFS storage account, its `home` share, and its private endpoint, unless `nfsShare` was supplied or `deployNfsShare` is `false`
 - for AVD, the host pool, the desktop and RemoteApp application groups, the workspace, and the **Linux Desktop** application
+- unless `deployHostMonitoring` is `false`, the data collection rules `dcr-<appName>-<environmentName>-linux` and `dcr-<appName>-<environmentName>-avd`, the **Linux Broker fleet** workbook, the `alert-<appName>-<environmentName>-...` alert rules, and, when `alertEmailAddresses` is set, the action group
 
 ### Key Vault
 
@@ -1029,6 +1175,7 @@ Confirm that:
 - the portal's connectivity test succeeds for each Linux host, which confirms DNS resolution and SSH from the API
 - a user in the AVD users group can open **Linux Desktop** and land on a Linux desktop, and their home directory is on the NFS share (`df -h ~` on the Linux host)
 - AVD checkout and Linux host release operations work end to end
+- with the host monitoring, each running host appears in `Heartbeat | where Category == "Azure Monitor Agent"` in the Log Analytics workspace, and the **Linux Broker fleet** workbook shows a fleet snapshot from the last 15 minutes
 
 ## Rerunning Parts Of The Deployment
 
@@ -1048,7 +1195,16 @@ Set-Location .\deploy
 .\Post-Provision.ps1 -EnvironmentName <environment-name>
 ```
 
-That reruns the image build, SQL bootstrap, function-role assignment, VM group sync, and Linux host SQL registration.
+That reruns the image build, SQL bootstrap, function-role assignment, VM group sync, Linux host SQL registration, and the host monitoring setup.
+
+### Connect hosts to the host monitoring
+
+```powershell
+Set-Location .\deploy
+.\Enable-HostMonitoring.ps1 -EnvironmentName <environment-name>
+```
+
+That connects every Linux host and AVD session host and installs the Azure Monitor agent on the running ones that lack it. Add `-HostNames` to limit it to some hosts. See [Connecting the hosts](#connecting-the-hosts).
 
 ## Troubleshooting
 
@@ -1274,6 +1430,35 @@ Check `/var/log/release-session.log` on the host once the session has been idle 
 
 The bootstrap fails deliberately if the host settings cannot be applied, so the problem is visible instead of silently leaving the lock screen enabled. Check that `scriptSourceRoot` is reachable from the host so `apply-host-settings.sh` can be downloaded, or set `linuxHostDisableScreenLock` to `false` to seed the profile with the lock screen left enabled.
 
+### A host's logs do not appear in Log Analytics
+
+First check whether the host's Azure Monitor agent reaches the workspace:
+
+```kusto
+Heartbeat
+| where Category == "Azure Monitor Agent" and Computer startswith "<host-name>"
+| summarize LastHeartbeat = max(TimeGenerated) by Computer
+```
+
+- **No heartbeat** means the host has no working agent. While the host is running, run [Enable-HostMonitoring.ps1](Enable-HostMonitoring.ps1) with `-HostNames <host-name>`: it associates the host again, installs the agent, or installs it again where the install failed, and says why when it cannot. If the agent is installed and still sends nothing, check that the host can reach the `AzureMonitor` and `AzureResourceManager` service tags on port 443 and that the VM has its system-assigned managed identity.
+- **A heartbeat but no `Syslog` rows** from a Linux host means that rsyslog or syslog-ng doesn't pass messages to the agent. See Microsoft's [troubleshooting guide for Linux](https://learn.microsoft.com/azure/azure-monitor/agents/azure-monitor-agent-troubleshoot-linux-vm).
+- **A heartbeat but no rows from a log file** in `LinuxBrokerHost_CL`: the agent sends a file's lines as they are added, so a file that gains none sends nothing. Otherwise check the file's owner and mode:
+
+  ```bash
+  ls -l /var/log/release-session.log /var/log/release-session-watcher.log
+  getent group syslog
+  ```
+
+  At each run, the release agent and its watcher give their logs to the `syslog` group with mode `-rw-r-----` where the group exists, and keep them `-rw-------` where it doesn't. Logs that are still `-rw-------` although the group exists mean an agent older than 1.3.0; migrate the host with [Migrate-LinuxHostReleaseAgent.ps1](Migrate-LinuxHostReleaseAgent.ps1).
+
+### The No fleet snapshot alert fires
+
+The API logs a fleet snapshot at the end of each scaling run that succeeds, so the alert means that none has succeeded for 15 minutes, or that the API cannot read the snapshot:
+
+- In **Application Insights**, search the API's traces for `GetFleetSnapshot is not deployed yet`. The API logs it once per process until SQL script `157` is applied. Rerun `Post-Provision.ps1`, which applies the SQL scripts, or run [Initialize-Database.ps1](Initialize-Database.ps1).
+- Search them for `Could not read the fleet snapshot`, which the API logs with the database's error.
+- Check that the function app runs and that the scaling activity log gains an entry every five minutes. When it doesn't, the task function cannot reach the API, or the scaling run fails; the API's failed requests to `/api/scaling/trigger` say why.
+
 ## Related Files
 
 - [azure.yaml](azure.yaml)
@@ -1282,5 +1467,7 @@ The bootstrap fails deliberately if the host settings cannot be applied, so the 
 - [Build-ContainerImages.ps1](Build-ContainerImages.ps1)
 - [Initialize-Database.ps1](Initialize-Database.ps1)
 - [Register-LinuxHostSqlRecords.ps1](Register-LinuxHostSqlRecords.ps1)
+- [Enable-HostMonitoring.ps1](Enable-HostMonitoring.ps1)
 - [bicep/main.bicep](bicep/main.bicep)
+- [bicep/modules/core/host-monitoring.bicep](bicep/modules/core/host-monitoring.bicep)
 - [../sql_queries/README.md](../sql_queries/README.md)
