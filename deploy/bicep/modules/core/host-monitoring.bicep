@@ -38,9 +38,10 @@ param alertNfsLatencyThresholdMs int = 50
 var hostLogTableName = 'LinuxBrokerHost_CL'
 var hostLogStreamName = 'Custom-${hostLogTableName}'
 
-// Each broker log line starts with a YYYY-MM-DD HH:MM:SS timestamp, which starts a record. The xrdp
-// logs start theirs with [YYYYMMDD-HH:MM:SS] instead, and a file in which no line starts with the
-// format is split into records at each line end.
+// Each broker log line starts with a YYYY-MM-DD HH:MM:SS timestamp, which starts a record. xrdp
+// starts its lines with a timestamp in brackets instead, [YYYYMMDD-HH:MM:SS] in 0.9 and
+// [YYYY-MM-DDTHH:MM:SS.mmm+zzzz] in 0.10, and a file in which no line starts with the format is
+// split into records at each line end.
 var linuxHostLogFiles = [
   '/var/log/release-session.log'
   '/var/log/release-session-watcher.log'

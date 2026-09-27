@@ -844,7 +844,9 @@ there before Phase 3.
 
 **Status: In progress.** The foundations, items 4.1 and 4.5–4.9, shipped together, with host
 agent 1.3.0, and the home directory share now mounts on `/nfs_profiles`. Each has a **Shipped**
-note on where it differs from the design below it. 4.3 and 4.4 come next, together, then 4.2 and
+note on where it differs from the design below it, and a **Validated** note on what the Phase 4
+validation confirmed in a public-cloud test environment with two RHEL 9 hosts and a Windows
+session host, which had no interactive AVD client. 4.3 and 4.4 come next, together, then 4.2 and
 4.10.
 
 ### 4.1 Start a host on demand at checkout
@@ -879,6 +881,25 @@ design below:
 - Checkout events gain a `Starting` outcome. Scaling counts waiting users as demand and keeps a
   host for each of them when scaling down, and the dashboard reports waits, how many were
   served, and their median and 95th percentile.
+
+**Validated** with the minimum at 0 and both hosts stopped:
+
+- The first checkout from the 2.0.0 script got `202` and started one host. The API probed the
+  host on the script's next requests, and the script had it 67 seconds after the first request.
+  The dashboard showed the wait, with a median of 65 seconds, and the audit entry carried the
+  script's version.
+- With `MaxPendingStarts` at 1, a second waiting user got `202` and no second start; at 2, a
+  second host started. At `MaxVMs`, a checkout got `409`. The `Retry-After` header matched the
+  body each time.
+- A minimum of 0 was refused while start on demand was off. Once the hosts were returned, scaling
+  stopped both again. The broker listed the two test clients, which sent no version, among the
+  session hosts whose script can't wait.
+- One user on the only running host fills the pool, so the next scaling run started
+  `ScaleUpIncrement` more hosts, as it does for any full pool. `README.md` and `DEPLOYMENT.md` now
+  say so.
+
+**Open.** From a real AVD session: **Cancel** in the waiting window, and what a script older than
+2.0.0 shows while a host starts for its user.
 
 **Why.** When the pool is exhausted, the user sees "No Linux host is available right now.
 Try again in a few minutes." (`Connect-LinuxBroker.ps1`). The script retries three times
@@ -999,9 +1020,17 @@ differs from the design below:
   and the deployment leaves out their extensions. A deployment also replaces a VM's tags, so it
   writes back the `excludeFromScaling` tag that keeps autoscale away from a session host.
 
-**Open.** Check in Azure that the role check sees an existing assignment, that the plan can be
-assigned right after the role, that `UTC` is accepted as the time zone, and that Start VM on
-Connect starts a session host. `Update-AvdHostBrokerScript.ps1` skips session hosts that
+**Validated.** `azd provision` created the plan in `UTC`, with both schedules and
+`excludeFromScaling` as its exclusion tag, assigned it to the host pool and turned on Start VM on
+Connect.
+`preprovision` found that the Azure Virtual Desktop service principal already held the role on the
+subscription, from an earlier deployment, and assigned nothing. The deployment left out the
+extensions of the session host that was stopped, and kept the `excludeFromScaling` tag the
+validation had given it.
+
+**Open.** Check that the plan can be assigned right after the role, in a subscription where the
+service principal doesn't hold it yet, and that Start VM on Connect starts a session host for a
+real client. `Update-AvdHostBrokerScript.ps1` skips session hosts that
 autoscale has stopped, so updating one means tagging, starting and updating it by hand; the
 script could start them itself, or session hosts could update the script when they boot.
 
@@ -1047,10 +1076,19 @@ differs from the design below:
   when it is empty and nothing is mounted on it.
 - The alerts on throttling and latency are part of 4.7.
 
+**Validated** on both hosts after the host migration. The share's read-ahead was 15,360 KiB,
+`/awipsprofiles` was gone, and `/nfs_profiles` was an empty directory with nothing mounted on it
+between checkouts. A checkout created the user's cache with mode 700 and the user as its owner, a
+login shell pointed `XDG_CACHE_HOME` at it, and the return removed it with the account. The share's
+`Transactions` metric splits by `ResponseType`, which the throttling alert filters on, and its
+end-to-end latency averaged about 3 ms, and 31 ms at most, over the day of the validation.
+
 **Open.** Measure a sign-in's I/O on the share and add figures per user to the sizing guide.
 Offer the provisioned v2 model, which Microsoft now recommends for new shares and which provisions
 IOPS apart from capacity; a v1 storage account can't be converted, so an existing environment
-would need a new share and a copy of the profiles.
+would need a new share and a copy of the profiles. SELinux labels the caches `var_t`, which does no
+harm while the broker's users are unconfined, as they are by default on RHEL; a host that confines
+them would need a file context for the directory.
 
 **Why.** Every user's home, including caches, is on a Premium Azure Files NFS share that
 defaults to 100 GiB (`deploy/bicep/modules/core/nfs-storage.bicep`). Premium performance
@@ -1075,8 +1113,7 @@ Tracker that kept failing on an index written by another distribution's Tracker 
 
 ### 4.7 Host log shipping and observability
 
-**Status: Done, except the checks on live hosts** · pairs with 2.2; the checks wait for the
-Phase 4 validation
+**Status: Done** · pairs with 2.2
 
 **Shipped.** A new Bicep module, `modules/core/host-monitoring.bicep`, adds a data collection rule
 for the Linux hosts and one for the AVD session hosts, the **Linux Broker fleet** workbook and the
@@ -1123,11 +1160,29 @@ Where it differs from the design below:
   channel through its email address. Without addresses, the alerts still appear in Azure Monitor.
 - **Log rotation shipped with 4.6.**
 
-**Open.** On live hosts, confirm that every log arrives, the release agent's included, and xrdp's
-own; the agent's documentation doesn't say which account reads the files, or whether a `syslog`
-group exists on RHEL before the agent is installed. Check that the agent sends only new lines,
-including after `linuxbroker-patch.log` trims itself, and that the share's metric dimensions match
-the throttling alert, and fire each alert where practical.
+**Validated** on the two RHEL 9 hosts and the Windows session host:
+
+- `Enable-HostMonitoring.ps1` installed agent 1.45 on the Linux hosts, with automatic upgrades,
+  and associated all three VMs with their rules, the stopped session host included. Once that host
+  was started, `-HostNames` installed the Windows agent on it in under a minute.
+- The agent reads the text logs as root, so their modes don't matter. Installing it created the
+  `syslog` user and group on RHEL 9, which the hosts didn't have before.
+- Every broker log that had new lines arrived in `LinuxBrokerHost_CL`, `createuser.log` with its
+  new timestamps, and so did `xrdp.log`. The agent sent only the lines written after it started,
+  not the files' history. xrdp 0.10 starts its lines with `[2026-09-27T06:17:15.790+0000]` rather
+  than 0.9's format, and each line arrived as a record of its own. `authpriv` messages arrived in
+  `Syslog`, and test events under the script's `LinuxBrokerScript` source, an information event and
+  a warning, in `Event`.
+- Every workbook query ran without error over 24 hours.
+- "Checkouts refused" fired four and a half minutes after a refused checkout. With both hosts
+  checked out and a minimum of 2, "no ready hosts" fired 19 minutes later, once its window held
+  only snapshots with no ready host. With xrdp stopped on one host, "unhealthy hosts" fired
+    14 minutes later. The share's `Transactions` metric has the `ResponseType` dimension that the
+  throttling alert filters on.
+
+**Open.** `linuxbroker-patch.log` and `xrdp-sesman.log` got no lines during the validation, so
+check that the agent picks up the patch log after it trims itself. "No fleet snapshot" and
+"API errors" weren't fired.
 
 **Design.**
 
@@ -1142,8 +1197,8 @@ the throttling alert, and fire each alert where practical.
 
 ### 4.8 Tuning the double RDP hop
 
-**Status: Done, except the checks through AVD and the CPU measurements** · both wait for the
-Phase 4 validation
+**Status: Done, except the checks through AVD and the CPU measurements** · both need an
+interactive AVD client, which the Phase 4 validation didn't have
 
 **Shipped.** `Connect-LinuxBroker.ps1` opens the Linux desktop full screen across every monitor of
 the user's AVD session, with `mstsc /v:<address> /f /multimon`. Where it differs from the design
@@ -1182,7 +1237,7 @@ below:
 
 **Open.** Through AVD, check full screen and two monitors, including whether a RemoteApp session
 gives the inner `mstsc` more than one monitor, and measure CPU on both hops with GNOME and with
-Xfce, which feeds 3.2 and 4.3. Both are part of the Phase 4 validation and the 3.8 `mstsc` checks.
+Xfce, which feeds 3.2 and 4.3. Both belong with the 3.8 `mstsc` checks.
 
 The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
 - xrdp ≥ 0.10.2 supports **H.264** in the graphics pipeline. Check the version on each
@@ -1194,7 +1249,7 @@ The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
 
 ### 4.9 Scaling out the portal and API
 
-**Status: Done, except the checks in Azure** · the checks wait for the Phase 4 validation
+**Status: Done, except the checks in Azure Government** · they need a Government environment
 
 **Shipped.** The portal keeps its sessions in a Redis cache that every instance shares, the API
 reuses its database connections, and `appServicePlanCapacity` sets how many instances the App
@@ -1210,7 +1265,10 @@ Service plan runs, 1 by default. Where it differs from the design below:
   1 April 2026. Azure Government gets Azure Cache for Redis, because Azure Managed Redis isn't
   offered there; move it when it is, and before Azure Cache for Redis retires on 30 September 2028.
   The Government default is `Standard_C1`, not `Standard_C0`, which shares a CPU core and which
-  Microsoft recommends only for dev/test. `portalRedisSku` picks another size.
+  Microsoft recommends only for dev/test. `portalRedisSku` picks another size, and
+  `portalRedisLocation` another region, for where the deployment's region doesn't offer the cache
+  or has no room for it. The private endpoint stays in the virtual network, so the portal still
+  reaches a cache in another region privately.
 - **Token resource in Azure Government.** The portal asks for tokens for `https://redis.azure.com`
   by default. In Azure Government the deployment asks for Azure Cache for Redis's application ID,
   `acca5fbb-b7e4-4009-81f1-37e38fd66d78`, instead, since Microsoft's documentation accepts both in
@@ -1223,9 +1281,9 @@ Service plan runs, 1 by default. Where it differs from the design below:
   answers `503` with `Retry-After` instead of failing to load.
 - **A pool without Entra SQL authentication.** Each API worker process keeps the connections it has
   finished with and reuses the newest first. It closes a connection idle for 120 seconds, rather
-    than 300, because App Service forgets an outbound connection after four minutes without traffic,
-    or open for 30 minutes. A
-  connection is rolled back when it returns and closed if that fails. Its next transaction begins
+  than 300, because App Service forgets an outbound connection after four minutes without traffic,
+  or open for 30 minutes. A connection is rolled back when it returns and closed if that fails. Its
+  next transaction begins
   when it is handed out again, not when it returned: the SQL integration tests showed that SQL
   Server stamps a change to a system-versioned table with its transaction's start time and refuses
   one older than the row's current version (error 13535), which a transaction left open in the
@@ -1239,11 +1297,26 @@ Service plan runs, 1 by default. Where it differs from the design below:
   own, or Flex Consumption, would add cost and a second virtual network integration for no gain.
 - The two stray `flask_session/` files are no longer tracked.
 
-**Open.** In Azure, check that the portal signs in to the cache as its managed identity in each
-cloud, including the Government token resource; that a cache created with Entra authentication on
-and access keys off accepts it at once; that a sign-in on one instance works on another, with the
-capacity at 2 for the test; that the portal answers `503` while the cache is unreachable and
-recovers; and that `Balanced_B0` and the Government API versions are available.
+**Validated** in the public cloud:
+
+- **No room in eastus2.** Azure refused every size of Azure Managed Redis there with
+  `InsufficientCapacity`, and left a failed cache that failed the deployment and can't be resized.
+  Nearby regions accepted `Balanced_B0`, so `portalRedisLocation` was added, and the validation's
+  cache is in eastus, behind a private endpoint in eastus2.
+- The cache came up with high availability, TLS 1.2, public access off and access keys off. The
+  portal's first request, about five minutes after the deployment gave its identity access, signed
+  in to it as the managed identity.
+- With the plan at two instances, 40 requests that carried one session cookie were answered by both
+  instances, and every one saw the same session. The cookie is `Secure`, `HttpOnly` and
+  `SameSite=Lax`, and lasts 12 hours.
+- With the portal pointed at a port the cache doesn't serve, `/api/ui` answered `503` with
+  `Retry-After: 30` in about six seconds, while the page shell and `/health` kept answering, and it
+  answered normally within 36 seconds of the port being put back.
+
+**Open.** In Azure Government, check the token resource and that the Azure Cache for Redis API
+versions are available. Sign in with a browser on one instance and carry on on another, with the
+capacity at 2; the validation shared one session between the instances through the portal's API,
+without a browser sign-in.
 
 **Design.**
 
@@ -1364,6 +1437,8 @@ A separate track, prioritized independently of the phases.
 | 2026-09 | The portal's sessions move to **Redis**, with access keys off and the portal's managed identity: Azure Managed Redis in the public cloud, where new customers can't create Azure Cache for Redis since April 2026, and Azure Cache for Redis `Standard_C1` in Azure Government, which doesn't offer Azure Managed Redis. `portalSessionStore=filesystem` keeps sessions on disk, with ARR affinity. |
 | 2026-09 | The API pools its `pymssql` connections in each worker process, and the task function stays on the shared App Service plan. Entra SQL authentication and the mssql-python driver stay in the hardening backlog. |
 | 2026-09 | GPU-accelerated OpenGL (4.10) goes to a pool of GPU hosts once host pools (4.4) exist, rather than to every host. |
+| 2026-09 | The portal's session cache may be in another region than the rest of the deployment (`portalRedisLocation`), behind a private endpoint in the deployment's virtual network, because Azure had no room for Azure Managed Redis in eastus2 during the Phase 4 validation. The default stays the deployment's region. |
+| 2026-09 | A pool that start on demand wakes from zero scales up like any full pool: its first user fills it, so the next scaling run starts `ScaleUpIncrement` more hosts, ready for the users after them. This is documented rather than special-cased. |
 
 ## Glossary
 
