@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - only when the telemetry package is abs
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.171'
+app.config['VERSION'] = '0.172'
 
 # Backs is_member_of_group_cached, which keeps token validation off the Graph API on
 # every request.

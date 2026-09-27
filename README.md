@@ -102,18 +102,20 @@ What an administrator can do depends on their role (see [RBAC Permissions](#rbac
 4. **Manage Scaling**:
    - **Edit the default rule**: Set the minimum and maximum number of running VMs, the scale-up and scale-down thresholds and increments, and whether scale-down powers VMs off or deallocates them.
    - **Add schedule windows**: Override the default rule on chosen days and times in one time zone, for example business hours, and see what the next run would do before saving.
+   - **Start on demand**: Let a checkout that finds no ready host start one, limit how many hosts start at once for waiting users, and see which AVD session hosts run a broker script that can wait.
 5. **Manage Linux Host Settings**:
    - **Edit the fleet-wide profile**: Change the reconnect grace period, whether disconnected sessions are kept alive, the reconcile interval, watcher timings, idle session timeout, and screen lock policy without editing or redeploying any script.
    - **Apply Now**: Optionally push the profile to hosts immediately instead of waiting for them to pick it up.
    - **Review drift**: See which hosts have applied the current settings version.
    - **Version history**: See what changed in each saved version of the profile, and who saved it.
 6. **Monitor System**:
-   - **Overview**: Capacity and checkout health over a day or a week, including checkouts that found no host, and an **Attention** panel for what needs an operator now.
+   - **Overview**: Capacity and checkout health over a day or a week, including checkouts that found no host and users who waited for one to start, and an **Attention** panel for what needs an operator now.
    - **View VM Details**: Access detailed information about VMs, including what the host's agent last reported.
    - **Fleet health**: See each host's last heartbeat, agent version, OS, desktop, xrdp and NFS state, load, memory, disk and sessions, and which hosts need attention, without SSH.
    - **Audit log**: See who did what: every portal action, every denied attempt, and the changes the broker makes on its own, with CSV export.
    - **View Scaling Activity Logs**: Monitor scaling activities and history, including why each run did or did not act.
    - **View VM History**: Track the usage and status changes of VMs.
+   - **Host logs and alerts**: Search the Linux hosts' and AVD session hosts' logs in Log Analytics, follow the fleet in the **Linux Broker fleet** workbook, and get alerts by email. See [Host Monitoring](deploy/DEPLOYMENT.md#host-monitoring).
 
 ## Service Management Portal
 
@@ -215,12 +217,13 @@ These scripts:
 
 - **One default rule**: the rule with the lowest ID. Creating a second rule is refused; edit the existing one.
 - **Schedule windows**: Optional windows override the default rule on chosen days and times, read in one policy time zone, for example Monday to Friday 08:00–18:00 with a higher minimum. A window can run past midnight, enabled windows cannot overlap, and outside every window the default rule applies. A window takes effect at the next scaling run, about every five minutes.
-- **Minimum VMs Running**: At least 1. Whenever fewer serviceable hosts are running (powered on, not in maintenance, and reachable or still booting), hosts are started to reach it.
-- **Maximum VMs Running**: The maximum number of Linux VMs allowed to be powered on, including hosts in maintenance. When the two conflict, the minimum wins: a scale-down never leaves fewer serviceable hosts than the minimum.
-- **Scale-Up Ratio**: The utilization at which more VMs are started (e.g., 80%). Utilization is hosts in use (checked out, released within their grace period, or pending cleanup) divided by serviceable hosts.
+- **Minimum VMs Running**: At least 1, or 0 while start on demand is on, so that idle hosts stop until someone needs one and the first user to arrive waits for a host to start. If start on demand is turned off later, scaling keeps one host on instead. Whenever fewer serviceable hosts are running (powered on, not in maintenance, and reachable or still booting), hosts are started to reach it.
+- **Maximum VMs Running**: The maximum number of Linux VMs allowed to be powered on, including hosts in maintenance. When the two conflict, the minimum wins: a scale-down never leaves fewer serviceable hosts than the minimum, or, while users wait for a host to start, fewer than the hosts in use plus the users waiting.
+- **Scale-Up Ratio**: The utilization at which more VMs are started (e.g., 80%). Utilization is hosts in use (checked out, released within their grace period, or pending cleanup), plus users waiting for a host to start, divided by serviceable hosts.
 - **Scale-Up Increment**: The number of VMs to start when scaling up.
 - **Scale-Down Ratio**: The utilization at or below which VMs are stopped (e.g., 30%).
 - **Scale-Down Increment**: The number of VMs to stop when scaling down. Only idle, reachable, unassigned hosts that have stayed in their current power state for at least 10 minutes are stopped, highest VMID first.
+- **Start on demand**: When a checkout finds no ready host, the broker starts a stopped one for the user, up to the maximum, instead of refusing. It is on by default, and the **Scaling** page turns it off and sets how many hosts may start at once for waiting users, 2 by default. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
 - **Stop mode**: **Power off** (the default) keeps the VM's compute allocation, so it starts quickly but compute is still billed. **Deallocate** stops compute billing, but starts take longer, and in a capacity-constrained region or VM size a start can fail with `AllocationFailed` (the broker records the host as off and retries on a later run). Deallocation also wipes the temporary disk; private IP addresses and host names are kept.
 
 Every run first reads each host's power state from Azure and corrects the broker's record, runs never overlap, and each run writes an activity log entry whose notes explain the decision. Before this release, scaling decisions were recorded but never sent to Azure, so upgrading makes scaling start and stop VMs for the first time.
@@ -363,20 +366,21 @@ The distribution and desktop support release needs `azd provision` and agent 1.2
 - **Review the idle timeout.** It had never disconnected anyone before this release, and migrated Ubuntu hosts now enforce any timeout already set.
 - **Replace or bootstrap again any Ubuntu hosts.** Earlier releases deployed them with no desktop and without the packages NFS homes need.
 
-The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription, for the host monitoring and for the portal's session cache, the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0, and the Linux hosts need the host migration. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
+The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription, for the host monitoring and for the portal's session cache, the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0, and the Linux hosts need agent 1.3.0. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
 
 - **A checkout can start a host.** When no host is ready, the broker starts a stopped one and the user's **Linux Desktop** waits for it, for up to 10 minutes. It is on after the upgrade, and the **Scaling** page turns it off or limits how many hosts start at once.
 - **Update the AVD session hosts.** `deploy/Migrate-ExistingEnvironment.ps1` now also runs `deploy/Update-AvdHostBrokerScript.ps1`, which replaces the script on every running session host. An older script tells its user that no host is available while one starts for them.
 - **A pool can scale to zero.** With start on demand on, a rule or schedule window may keep a minimum of 0 hosts. Set one only after the **Scaling** page shows that every session host runs a script that can wait.
 - **The Linux desktop opens full screen across every monitor.** Set `avdLinuxDesktopFullScreen` or `avdLinuxDesktopMultiMonitor` to `false` to open it in a window or on one monitor, but only after every session host runs the new script. See [Linux Desktop Display](deploy/DEPLOYMENT.md#linux-desktop-display).
 - **The AVD session hosts start and stop on a schedule.** `azd provision` adds a scaling plan, turns on Start VM on Connect and gives the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription, which needs Owner or User Access Administrator there. Update the session hosts' script first, while they all still run, and review the schedule before you provision, or set `avdScalingPlanEnabled` to `false`. See [AVD Autoscale](deploy/DEPLOYMENT.md#avd-autoscale).
-- **Caches move off the NFS share.** `deploy/Migrate-LinuxHostReleaseAgent.ps1`, which `deploy/Migrate-ExistingEnvironment.ps1` runs, installs `install-host-config.sh` on the running Linux hosts. Each user's cache then stays on the host's own disk, NFS mounts read ahead 15 MiB, and the broker's logs rotate. Caches already in `~/.cache` on the share can be deleted. See [Home Directory Share](deploy/DEPLOYMENT.md#home-directory-share).
+- **Update the Linux hosts to agent 1.3.0.** Fleet health flags every host as outdated until `deploy/Migrate-LinuxHostReleaseAgent.ps1` from this release, which `deploy/Migrate-ExistingEnvironment.ps1` runs, has updated it. Hosts that are not migrated keep working as before.
+- **Caches move off the NFS share.** The migration installs `install-host-config.sh` on the running Linux hosts. Each user's cache then stays on the host's own disk, NFS mounts read ahead 15 MiB, and the broker's logs rotate. Caches already in `~/.cache` on the share can be deleted. See [Home Directory Share](deploy/DEPLOYMENT.md#home-directory-share).
 - **Host logs, a fleet workbook and alerts.** `azd provision` adds data collection rules, a workbook and alerts, and `postprovision` installs the Azure Monitor agent on the running hosts, so their logs reach Log Analytics. Set `alertEmailAddresses` to get the alerts by email, and once each host that `postprovision` names as not running is started, connect it with `deploy/Enable-HostMonitoring.ps1 -HostNames`. See [Host Monitoring](deploy/DEPLOYMENT.md#host-monitoring).
 - **Portal sessions move to Redis.** `azd provision` creates a cache for the portal's sign-ins, Azure Managed Redis or, in Azure Government, Azure Cache for Redis. Moving the sessions there signs every administrator out once. The cache is billed by the hour; set `portalSessionStore` to `filesystem` to keep the sessions on the portal's disk. With the cache, `appServicePlanCapacity` can run the portal and the API on more than one instance. See [Portal And API Scale-Out](deploy/DEPLOYMENT.md#portal-and-api-scale-out).
 
 ## Roadmap
 
-Planned work beyond this release, including RHEL 10 and Ubuntu 26.04 support, golden images and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
+Planned work beyond this release, including RHEL 10 and Ubuntu 26.04 support, multi-session hosts, host pools, golden images and GPU-accelerated OpenGL, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contributing
 

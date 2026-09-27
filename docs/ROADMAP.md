@@ -842,6 +842,11 @@ there before Phase 3.
 
 ## Phase 4: strategic scale
 
+**Status: In progress.** The foundations, items 4.1 and 4.5–4.9, shipped together, with host
+agent 1.3.0, and the home directory share now mounts on `/nfs_profiles`. Each has a **Shipped**
+note on where it differs from the design below it. 4.3 and 4.4 come next, together, then 4.2 and
+4.10.
+
 ### 4.1 Start a host on demand at checkout
 
 **Status: Done** · depends on Phase 1 (readiness and scaling fixes)
@@ -858,8 +863,8 @@ design below:
 - `retryAfterSeconds` isn't fixed at 60: it's the median start-to-reachable time over the last
   week, less how long the oldest starting host has taken, kept between 30 and 120 seconds, and
   the `Retry-After` header carries it too. While a user waits, each request probes the starting
-  hosts on port 22, so a host is handed out without waiting for the task's minute-by-minute
-  probe.
+  hosts on port 22, so a host is handed out without waiting for the task's probe, which runs
+  every two minutes.
 - Start on demand is on by default. The **Start on demand** card on the Scaling page turns it
   off and sets the pending-start limit. A minimum of 0 can be saved only while it's on, and if
   it's turned off later, scaling reads 0 as 1.
@@ -1250,6 +1255,46 @@ recovers; and that `Balanced_B0` and the Government API versions are available.
 - Split the task function onto its own plan, or use a Flex Consumption plan, if its timers
   compete with the API.
 
+### 4.10 GPU-accelerated OpenGL
+
+**Status: Planned** · depends on 4.4 (host pools); benefits from 4.2 (golden image) and 4.3
+
+**Why.** The hosts have no GPU, so OpenGL in an xrdp session renders in software, with Mesa's
+llvmpipe, on the same CPU as everything else on the host. That serves office work and browsers,
+but 3D visualization, CAD and other OpenGL applications draw slowly, and on a multi-session host
+(4.3) one of them slows every session.
+
+**Design.**
+
+- **A pool of GPU hosts.** Host pools (4.4) give GPU VMs their own pool, image and RemoteApp, so
+  only the users who need a GPU get one. The candidates are the sizes Microsoft supports with
+  NVIDIA's GRID drivers for virtual workstations: NVadsA10 v5, which offers from a sixth of an
+  NVIDIA A10 up to whole GPUs, and NCasT4_v3, with NVIDIA T4s. NVv3 retires on 30 September 2026.
+  Check which of them each target region offers, Azure Government's included, and the
+  subscription's GPU quota, before choosing.
+- **Drivers.** Microsoft redistributes the GRID drivers for these sizes with the vGPU license
+  included, so no NVIDIA license server is needed. They support Ubuntu 20.04 to 24.04, RHEL 8.10
+  and RHEL 9.4, 9.6 and 9.7, but not Rocky Linux or AlmaLinux. Microsoft's installation steps need
+  Secure Boot and vTPM off, while the deployment gives Linux hosts Trusted Launch with both on, so
+  a GPU pool needs its own security profile. The driver belongs in the pool's image (4.2). It's
+  built for the running kernel, so rolling maintenance (2.9) must check `nvidia-smi` after a
+  kernel update.
+- **VirtualGL in the session.** xrdp's X server has no GPU, so OpenGL applications run under
+  VirtualGL's `vglrun`, which renders them on the GPU and copies each finished frame into the
+  session. Its EGL back end reaches the GPU without a second X server, but it emulates only part of
+  GLX; an application that needs the rest needs the GLX back end and an X server on the GPU. The
+  session launcher can set VirtualGL up, and a pool setting can name the applications to wrap, so
+  users start them from the menu as usual.
+- **Encoding stays on the CPU at first.** The frames still reach the user as RFX, encoded on the
+  host's CPU (4.8). H.264 encoded on the GPU, through xrdp's graphics pipeline, is later work for
+  once the pool exists.
+- **Measure** frame rate, GPU and CPU use for the applications the pool is for, with and without
+  `vglrun`, on each candidate size, and how many sessions one GPU serves.
+
+**Open questions.** Which sizes to offer, and in which regions. Whether Secure Boot can stay on.
+How many sessions share one GPU partition. How Wayland-only distributions (3.5) change the
+approach.
+
 ---
 
 ## Security hardening backlog
@@ -1258,7 +1303,7 @@ A separate track, prioritized independently of the phases.
 
 | Item | Why | Direction |
 | --- | --- | --- |
-| API connects to SQL as the **server admin** | `DB_USERNAME` is the SQL admin login (`deploy/bicep/main.resources.bicep`) | A contained database user with EXECUTE on the broker procedures only, or Entra managed-identity authentication (pyodbc with an access token) |
+| API connects to SQL as the **server admin** | `DB_USERNAME` is the SQL admin login (`deploy/bicep/main.resources.bicep`) | A contained database user with EXECUTE on the broker procedures only, or Entra managed-identity authentication, with the mssql-python driver or pyodbc and an access token |
 | `avdadmin` sudo allowlist is root-equivalent | `usermod`, `userdel`, `groupadd` and `chpasswd` with arbitrary arguments (`Configure-*-Host.sh`) | Once every host runs `create-user.sh --password-stdin` (Phase 1), drop `chpasswd`, `groupadd` and `usermod`. Move `userdel` into `manage-lease.sh`. The allowlist then holds only validated scripts. |
 | SSH host keys not verified | `StrictHostKeyChecking=no` in `run_remote_command` | Record host keys at provisioning (Key Vault or SQL) and pin them, or use an SSH CA |
 | RDP server identity not verified | `AuthenticationLevelOverride=0` in `Connect-LinuxBroker.ps1`; xrdp self-signed certificates | Issue xrdp certificates from Key Vault or enterprise PKI, and restore server authentication |
@@ -1268,6 +1313,7 @@ A separate track, prioritized independently of the phases.
 | NFS `AUTH_SYS` trust | `sec=sys`, `NoRootSquash` (`nfs-storage.bicep`, `create-user.sh`); root on any host in the subnet can read every home | Restrict private endpoint access to the Linux host subnet with an NSG. Consider Azure NetApp Files with Kerberos (krb5p) for strong isolation. |
 | Hosts download scripts from `main` at provisioning | `scriptSourceRoot` defaults to the `main` branch | Pin to a release tag or commit and verify checksums, or bake scripts into the image (4.2) |
 | Checkout abuse | The AvdHost role can check out any username | Rate-limit per AVD host. Optionally verify that the username belongs to the user signed in to that AVD session. |
+| Portal sign-in has no `state`, nonce or PKCE | `/login` builds the sign-in URL with `get_authorization_request_url` alone, and `/getAToken` redeems any `code` it receives (`front_end/route_authentication.py`), so another site can finish a sign-in in an operator's browser with an authorization code of its own (login CSRF) | Start the sign-in with MSAL's `initiate_auth_code_flow` and keep the flow in the session, which every instance now shares (4.9), then redeem it with `acquire_token_by_auth_code_flow`, which checks `state` and the nonce and sends the PKCE verifier |
 
 ---
 
@@ -1307,6 +1353,17 @@ A separate track, prioritized independently of the phases.
 | 2026-09 | Ubuntu desktop hosts keep systemd-networkd as the network renderer, at the cost of GNOME's network indicator, so a package install can't take a host off the network. |
 | 2026-09 | Idle time never counts from before the user's current connection, so a resumed session isn't disconnected for the time it spent disconnected. |
 | 2026-09 | Ubuntu 26.04 and RHEL 10 wait for 3.5 or 3.8. Rocky Linux 9 is offered through its Marketplace image, and `alma-9` is recommended where Marketplace purchases are blocked. |
+| 2026-09 | Phase 4 ships in stages. The first PR covers the foundations: 4.1 start on demand, 4.5 the AVD scaling plan, 4.6 NFS home performance, 4.7 host log shipping, 4.8 the double RDP hop and 4.9 portal and API scale-out, with one host agent rollout (1.3.0). 4.3 and 4.4 follow in one PR, then 4.2. |
+| 2026-09 | Start on demand is **on by default**. It starts at most one host for each waiting user, and at most `MaxPendingStarts` (2 by default) at once, never past `MaxVMs`. `MinVMs` may be 0 only while it is on, and if it is turned off later, scaling reads 0 as 1. This replaces the `MinVMs ≥ 1` rule. |
+| 2026-09 | While a user waits, each checkout request probes the starting hosts on port 22 and records those that answer as reachable, rather than waiting for the task's probe. Readiness still comes from a TCP probe, never from the heartbeat. |
+| 2026-09 | The AVD script reports its version with each checkout, kept with the checkout event, and the **Start on demand** card names the session hosts whose latest checkout reported none, because their script can't wait. That's the check before setting a minimum of 0. |
+| 2026-09 | The AVD autoscale role is assigned on the **subscription**, because autoscale needs it there, not on the host resource group. `preprovision` finds the Azure Virtual Desktop service principal by app ID only, assigns nothing when the role is already held, and prints the command for an Owner instead of failing when it can't assign it. |
+| 2026-09 | A script installs the Azure Monitor agent, not the deployment, because Azure refuses extension changes on a stopped VM and scaling, start on demand and autoscale all stop VMs. For the same reason, a deployment leaves out the extensions of the hosts that aren't running. |
+| 2026-09 | The home directory share mounts on `/nfs_profiles` while `create-user.sh` creates a home, and users' caches stay on the host's disk in `/var/cache/linuxbroker/users/<user>`, whose parent only root can write, rather than in world-writable `/var/tmp`. |
+| 2026-09 | The launcher keeps `mstsc /v:` and adds `/f` and `/multimon`, both on by default, rather than writing an `.rdp` file, because since the April 2026 update every unsigned `.rdp` file opens with its redirections off. Signed connection files are in the hardening backlog. The Linux hosts keep RFX, and H.264 waits for GPU hosts (4.10). |
+| 2026-09 | The portal's sessions move to **Redis**, with access keys off and the portal's managed identity: Azure Managed Redis in the public cloud, where new customers can't create Azure Cache for Redis since April 2026, and Azure Cache for Redis `Standard_C1` in Azure Government, which doesn't offer Azure Managed Redis. `portalSessionStore=filesystem` keeps sessions on disk, with ARR affinity. |
+| 2026-09 | The API pools its `pymssql` connections in each worker process, and the task function stays on the shared App Service plan. Entra SQL authentication and the mssql-python driver stay in the hardening backlog. |
+| 2026-09 | GPU-accelerated OpenGL (4.10) goes to a pool of GPU hosts once host pools (4.4) exist, rather than to every host. |
 
 ## Glossary
 
