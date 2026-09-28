@@ -5,7 +5,7 @@ import { ButtonLink } from '../../components/ui/Button';
 import { PageHeader } from '../../components/ui/Feedback';
 import { useToast } from '../../components/ui/Toast';
 import { useConfirm } from '../../hooks/useConfirm';
-import { useCreateScalingRule } from '../../hooks/useBroker';
+import { useCreateScalingRule, useZeroMinimumAllowed } from '../../hooks/useBroker';
 import { errorMessage } from '../../lib/api';
 import { EMPTY_RULE, RuleForm } from './RuleForm';
 
@@ -13,6 +13,7 @@ export function CreateRule() {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const createRule = useCreateScalingRule();
+  const zeroMinimumAllowed = useZeroMinimumAllowed();
   const { confirm, dialog } = useConfirm();
   const [form, setForm] = useState(EMPTY_RULE);
 
@@ -60,6 +61,7 @@ export function CreateRule() {
         submitLabel="Create rule"
         busy={createRule.isPending}
         cancelTo="/scaling"
+        zeroMinimumAllowed={zeroMinimumAllowed}
       />
       {dialog}
     </>

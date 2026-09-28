@@ -7,7 +7,7 @@ moved into the client are covered by the Vitest suite in front_end/web.
 
 import pytest
 
-from conftest import API, HISTORY_PATHS, VMS, csrf_token, post
+from conftest import API, HISTORY_PATHS, UI_SESSION_PATH, VMS, csrf_token, post
 
 
 # ============================================================== SPA shell
@@ -104,7 +104,7 @@ def test_session_endpoint_reports_the_signed_in_user(signed_in_client):
 def test_session_endpoint_survives_a_malformed_session(signed_in_client):
     """base.html used to guard against this; a non-mapping user must not turn a
     handled state into a 500."""
-    with signed_in_client.session_transaction() as session:
+    with signed_in_client.session_transaction(UI_SESSION_PATH) as session:
         session["user"] = "not-a-mapping"
 
     response = signed_in_client.get(f"{API}/session")
@@ -284,7 +284,7 @@ def test_filters_are_not_stored_in_the_session(signed_in_client, path):
     session cannot grow without bound."""
     signed_in_client.get(f"{path}?startdate=2026-01-15&limit=37")
 
-    with signed_in_client.session_transaction() as session:
+    with signed_in_client.session_transaction(UI_SESSION_PATH) as session:
         for key in session.keys():
             assert "history" not in key
             assert "filters" not in key
@@ -576,7 +576,7 @@ def test_a_broker_5xx_becomes_a_502(signed_in_client, monkeypatch):
 def test_an_expired_token_returns_401_json(signed_in_client):
     from datetime import datetime, timedelta
 
-    with signed_in_client.session_transaction() as session:
+    with signed_in_client.session_transaction(UI_SESSION_PATH) as session:
         # Matches the app's naive datetime.utcnow().timestamp() convention.
         session["token_expiry"] = (datetime.utcnow() - timedelta(minutes=5)).timestamp()
 

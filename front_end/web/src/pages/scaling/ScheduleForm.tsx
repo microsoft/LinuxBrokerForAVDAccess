@@ -285,7 +285,12 @@ export function ScheduleForm() {
             </div>
 
             <h2 className="mt-7 mb-4 text-xs font-semibold tracking-wider text-muted uppercase">During this window</h2>
-            <RuleFields value={form} onChange={setForm} inheritStopMode />
+            <RuleFields
+              value={form}
+              onChange={setForm}
+              inheritStopMode
+              zeroMinimumAllowed={policy.StartOnDemandEnabled === true}
+            />
 
             {clashes.length ? (
               <Notice tone="danger" className="mt-5">

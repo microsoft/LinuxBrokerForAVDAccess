@@ -25,6 +25,9 @@ _ENV = {
     "DB_PASSWORD_NAME": "db-password",
     "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET": "provider-secret",
     "NFS_SHARE": "/mnt/test",
+    # Each test counts the connections its requests open. test_db_pool.py covers the pool,
+    # and the integration tests run with it on.
+    "DB_POOL_ENABLED": "false",
 }
 for key, value in _ENV.items():
     os.environ.setdefault(key, value)
@@ -160,6 +163,8 @@ class FakeConnection:
     def __init__(self, db):
         self.db = db
         self.closed = False
+        self.rollbacks = 0
+        self.autocommit_calls = []
         self.db.connections.append(self)
 
     def cursor(self, as_dict=False):
@@ -167,6 +172,12 @@ class FakeConnection:
 
     def commit(self):
         self.db.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def autocommit(self, status):
+        self.autocommit_calls.append(status)
 
     def close(self):
         self.closed = True

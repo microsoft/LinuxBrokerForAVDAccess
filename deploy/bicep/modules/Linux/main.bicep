@@ -46,6 +46,9 @@ param disableScreenLock bool = true
 @description('Desktop the hosts run in xrdp sessions. Changing it changes the extension command, which runs the bootstrap again on existing hosts.')
 param desktop string = 'gnome'
 
+@description('Hosts whose bootstrap extension this deployment leaves out, because Azure refuses to change an extension on a VM that is not running. The preprovision hook passes the ones that are deallocated or stopped.')
+param skipExtensionVmNames array = []
+
 var normalizedScriptSourceRoot = endsWith(scriptSourceRoot, '/') ? take(scriptSourceRoot, length(scriptSourceRoot) - 1) : scriptSourceRoot
 var bootstrapArgs = '"${linuxBrokerApiBaseUrl}" "${linuxBrokerApiClientId}"'
 // GNOME is what the bootstrap installs without LINUXBROKER_DESKTOP, so leaving the variable out
@@ -54,6 +57,7 @@ var desktopEnv = desktop == 'gnome' ? '' : ' LINUXBROKER_DESKTOP="${desktop}"'
 var bootstrapEnv = 'LINUXBROKER_SCRIPT_SOURCE_ROOT="${normalizedScriptSourceRoot}" LINUXBROKER_DISABLE_SCREEN_LOCK="${disableScreenLock ? 'true' : 'false'}"${desktopEnv}'
 
 var vmNames = [for i in range(1, numberOfVMs): '${vmNamePrefix}-${padLeft(i, 2, '0')}']
+var skipExtensionVmNamesLower = [for vmName in skipExtensionVmNames: toLower(vmName)]
 var adminCredentials = authType == 'Password' ? {
   adminPassword: adminPassword
 } : {}
@@ -236,8 +240,10 @@ resource vmLinuxHost 'Microsoft.Compute/virtualMachines@2022-03-01' = [
   }
 ]
 
+// Scaling and start on demand leave hosts deallocated, and Azure refuses to change an extension on
+// a VM that is not running, even to the same settings, so those hosts' extensions are left out.
 resource linuxCustomScriptExtension 'Microsoft.Compute/virtualMachines/extensions@2022-03-01' = [
-  for (name, i) in vmNames: {
+  for (name, i) in vmNames: if (!contains(skipExtensionVmNamesLower, toLower(name))) {
     name: '${name}/customScript'
     location: location
     properties: {

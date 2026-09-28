@@ -46,6 +46,8 @@ patch_host_script_url="$script_source_root/linux_host/patch-host.sh"
 patch_host_script="/usr/local/bin/patch-host.sh"
 xrdp_startwm_script_url="$script_source_root/linux_host/xrdp-startwm.sh"
 xrdp_startwm_script="/usr/local/bin/xrdp-startwm.sh"
+install_host_config_script_url="$script_source_root/linux_host/install-host-config.sh"
+install_host_config_script="/usr/local/bin/install-host-config.sh"
 
 # Disable the screen saver and screen lock on this host. Enabled by default because a
 # locked greeter inside an xrdp session often cannot be unlocked after a reconnect, which
@@ -271,6 +273,9 @@ wget -O "$patch_host_script" "$patch_host_script_url"
 echo "Downloading xrdp-startwm.sh..."
 wget -O "$xrdp_startwm_script" "$xrdp_startwm_script_url"
 
+echo "Downloading install-host-config.sh..."
+wget -O "$install_host_config_script" "$install_host_config_script_url"
+
 echo "Setting execute permissions for downloaded scripts..."
 chmod +x "$SCRIPT_PATH"
 chmod +x "$output_directory/xrdp-who-xorg.sh"
@@ -281,6 +286,7 @@ chmod +x "$apply_settings_script"
 chmod +x "$session_control_script"
 chmod +x "$patch_host_script"
 chmod +x "$xrdp_startwm_script"
+chmod +x "$install_host_config_script"
 echo "Downloaded scripts are now executable."
 
 # xrdp starts every session through xrdp-startwm.sh, which starts the desktop named here.
@@ -297,6 +303,13 @@ chmod 644 "$desktop_file"
 if ! "$xrdp_startwm_script" --install; then
     echo "ERROR: Could not configure xrdp to start sessions through $xrdp_startwm_script."
     exit 1
+fi
+
+# Log rotation, the NFS read-ahead and the users' local caches. The host works without them,
+# so a failure is reported and the bootstrap goes on.
+echo "Installing the Linux Broker host configuration..."
+if ! "$install_host_config_script"; then
+    echo "WARNING: install-host-config.sh did not complete. The host works without it; run it again as root."
 fi
 
 # A restart, rather than the reload --install asks for, so xrdp also joins ssl-cert.

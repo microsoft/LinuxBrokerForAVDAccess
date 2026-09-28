@@ -8,8 +8,14 @@ on:
       - 'task/**'
       - 'sql_queries/**'
       - 'linux_host/**'
+      - 'avd_host/**'
       - 'custom_script_extensions/**'
       - 'deploy/bicep/**'
+      - 'deploy/Update-AvdHostBrokerScript.ps1'
+      - 'deploy/Enable-HostMonitoring.ps1'
+      - 'deploy/Post-Provision.ps1'
+      - 'deploy/Migrate-ExistingEnvironment.ps1'
+      - 'deploy/Initialize-DeploymentEnvironment.ps1'
       - '.github/workflows/front-end-tests.yml'
   push:
     paths:
@@ -18,8 +24,14 @@ on:
       - 'task/**'
       - 'sql_queries/**'
       - 'linux_host/**'
+      - 'avd_host/**'
       - 'custom_script_extensions/**'
       - 'deploy/bicep/**'
+      - 'deploy/Update-AvdHostBrokerScript.ps1'
+      - 'deploy/Enable-HostMonitoring.ps1'
+      - 'deploy/Post-Provision.ps1'
+      - 'deploy/Migrate-ExistingEnvironment.ps1'
+      - 'deploy/Initialize-DeploymentEnvironment.ps1'
       - '.github/workflows/front-end-tests.yml'
 
 jobs:
@@ -197,6 +209,49 @@ jobs:
       # Also lints the bootstrap scripts in custom_script_extensions.
       - name: Run the host script tests
         run: bash linux_host/tests/run.sh
+
+  avd-scripts:
+    name: AVD session host scripts
+    # Connect-LinuxBroker.ps1 runs in Windows PowerShell 5.1 on the session hosts.
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pester and PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Install-Module Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Force -Scope CurrentUser -SkipPublisherCheck
+
+      # Also runs Update-AvdHostBrokerScript.ps1, Enable-HostMonitoring.ps1, Post-Provision.ps1's
+      # call to it, Migrate-ExistingEnvironment.ps1 and the autoscale and monitoring checks of
+      # Initialize-DeploymentEnvironment.ps1 with Azure mocked.
+      - name: Run the Pester tests
+        shell: powershell
+        run: |
+          Import-Module Pester -RequiredVersion 5.7.1
+          $configuration = New-PesterConfiguration
+          $configuration.Run.Path = 'avd_host/tests'
+          $configuration.Run.Exit = $true
+          $configuration.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $configuration
+
+      - name: Lint the scripts
+        shell: powershell
+        run: |
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.24.0
+          $findings = @(
+              'avd_host/broker/Connect-LinuxBroker.ps1',
+              'deploy/Update-AvdHostBrokerScript.ps1',
+              'deploy/Enable-HostMonitoring.ps1'
+          ) | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Settings avd_host/tests/PSScriptAnalyzerSettings.psd1 }
+          if (@($findings).Count -gt 0) {
+              $findings | Format-Table -Property ScriptName, Line, Severity, RuleName, Message -AutoSize -Wrap | Out-String -Width 240 | Write-Output
+              throw "PSScriptAnalyzer reported $(@($findings).Count) finding(s)."
+          }
 
   bicep-build:
     name: Bicep templates

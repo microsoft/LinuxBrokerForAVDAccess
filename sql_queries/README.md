@@ -67,6 +67,9 @@ Use that path when you need to:
 - `116_create_table-host_start_events.sql`: creates `dbo.HostStartEvents`, how long each start took to become reachable
 - `124_create_table-maintenance_runs.sql`: creates `dbo.MaintenanceRuns`
 - `125_create_table-maintenance_run_hosts.sql`: creates `dbo.MaintenanceRunHosts`, each host's progress through a run
+- `144_add_start_on_demand_to_scaling_policy.sql`: adds `StartOnDemandEnabled` (on by default) and `MaxPendingStarts` (1–20, default 2) to `dbo.ScalingPolicy`
+- `145_add_starting_outcome_to_checkout_events.sql`: lets `dbo.CheckoutEvents` record `Starting`, a request answered while a host starts for the user, and adds `ClientVersion`, the version the AVD host's broker script reports
+- `147_allow_zero_minimum_hosts.sql`: lets the default rule and schedule windows keep a minimum of 0 hosts; a window's maximum must still be above its minimum
 
 The table scripts above are written to be rerunnable.
 
@@ -187,6 +190,17 @@ The scripts do not contain `USE <database>` statements. The target database come
 - `140_alter_procedure-TriggerScalingLogic.sql`: keeps one more host serviceable while a run waits for a spare ready host, never past `MaxVMs`
 - `141_create_procedure-GetVmsPaged.sql`, `142_create_procedure-GetVmStatusCounts.sql`: the host list's page, filtered, searched and sorted, and its status counts
 - `143_create_procedure-ImportLinuxHostVm.sql`: registers a host found in Azure as `Unreachable` with its Azure power state, or reports `Exists`
+- `146_alter_procedure-RecordCheckoutEvent.sql`: accepts the `Starting` outcome and `@ClientVersion`
+- `148_create_function-fnWaitingCheckoutUsers.sql`: the users waiting for a host to start: those whose latest checkout event in the last five minutes is `Starting`
+- `149_alter_procedure-GetScalingPolicy.sql`: adds `StartOnDemandEnabled`, `MaxPendingStarts`, `ZeroMinimumCount` (the default rule and enabled windows with a minimum of 0), and the AVD hosts seen in the last week whose broker script cannot wait for a host to start
+- `150_create_procedure-SetScalingPolicyStartOnDemand.sql`: turns start on demand on or off and sets the pending-start limit (`Updated`, `Unchanged`, `Invalid`)
+- `151_alter_procedure-SaveScalingSchedule.sql`: accepts a minimum of 0 only while start on demand is on
+- `152_create_procedure-ReserveVmForStart.sql`: when a checkout finds no ready host, picks a stopped host to start for the user under the scaling application lock, or says why not (`Started`, `AlreadyStarting`, `ReadyNow`, `AtMaximum`, `NoCandidate`, `Busy`, `Disabled`), with how long to wait before asking again
+- `153_alter_procedure-TriggerScalingLogic.sql`: counts waiting users as demand, leaves a host for each of them when scaling down, and reads a minimum of 0 as 1 while start on demand is off
+- `154_alter_procedure-GetCheckoutStats.sql`: leaves `Starting` out of the total and adds the waits for a host to start, how many were served, their median and 95th percentile, and who is waiting now
+- `155_alter_procedure-GetUtilizationSeries.sql`: counts only scaling runs, leaves `Starting` out of checkouts, and adds `Waited`, the users who waited in each bucket
+- `156_alter_procedure-GetAttentionItems.sql`: does not report no ready hosts for a pool scaled to zero that nobody is waiting on
+- `157_create_procedure-GetFleetSnapshot.sql`: one row describing the fleet now: ready, powered-on, serviceable, in-use and booting hosts, waiting users, hosts whose heartbeat is stale or reports the share or xrdp down, and the minimum as scaling reads it. The API logs it to Application Insights as `fleet snapshot` after every scaling run, for the monitoring workbook and alerts
 
 `033` exists as its own file rather than being folded into `014` because `014` runs before `029` adds those columns, and SQL Server validates column references against existing tables when a procedure is created.
 
@@ -227,6 +241,8 @@ Two current behaviors are worth calling out:
 - `dbo.CheckoutEvents` and `dbo.HostStartEvents` are kept for the API's `CHECKOUT_EVENT_RETENTION_DAYS` and purged with the audit log.
 - Only one maintenance run is active, paused or stopping at a time. Admission takes the scaling application lock, so neither admission nor scaling can take ready capacity below the minimum while the other acts, and a run waiting for a spare ready host makes scaling keep one more host on. `dbo.SetMaintenanceHostState` is a compare-and-set, so overlapping advances cannot both act on a step.
 - `dbo.GetVmsPaged` and `dbo.GetVmStatusCounts` apply the same status tests as `dbo.CheckoutVm`, so a host the list calls ready is one a checkout could take. Imported hosts start `Unreachable`.
+- Start on demand: when `dbo.CheckoutVm` finds no ready host, `dbo.ReserveVmForStart` takes the scaling application lock and marks one stopped host `On` for the waiting user, the way scaling would, logging it as `Start On Demand`. It starts at most one host per waiting user and at most `MaxPendingStarts` at once, never past the active phase's `MaxVMs`. The API commits at once to release the lock, then asks Azure to start the host. Two first requests close together can see one start where two were needed; the second user's next request starts another host, so a race can only delay a start, never add one.
+- A minimum of 0 is allowed only while start on demand is on. If start on demand is turned off with a minimum of 0 saved, `dbo.TriggerScalingLogic` reads it as 1 and notes it on the run, and `dbo.GetScalingPolicy` reports how many such minimums remain in `ZeroMinimumCount`.
 
 Linux host settings are a single fleet-wide profile:
 
@@ -416,7 +432,9 @@ WHERE name IN (
     'GetMaintenanceAttention',
     'GetVmsPaged',
     'GetVmStatusCounts',
-    'ImportLinuxHostVm'
+    'ImportLinuxHostVm',
+    'SetScalingPolicyStartOnDemand',
+    'ReserveVmForStart'
 )
 ORDER BY name;
 ```
@@ -427,7 +445,7 @@ ORDER BY name;
 SELECT name
 FROM sys.objects
 WHERE type IN ('FN', 'IF', 'TF')
-  AND name IN ('fnScheduleWeekIntervals', 'fnActiveScalingPhase', 'fnMaintenanceRunSummary')
+  AND name IN ('fnScheduleWeekIntervals', 'fnActiveScalingPhase', 'fnMaintenanceRunSummary', 'fnWaitingCheckoutUsers')
 ORDER BY name;
 ```
 

@@ -5,7 +5,7 @@ import { ButtonLink } from '../../components/ui/Button';
 import { ErrorPanel, LoadingPanel, PageHeader } from '../../components/ui/Feedback';
 import { useToast } from '../../components/ui/Toast';
 import { useConfirm } from '../../hooks/useConfirm';
-import { useScalingRule, useUpdateScalingRule } from '../../hooks/useBroker';
+import { useScalingRule, useUpdateScalingRule, useZeroMinimumAllowed } from '../../hooks/useBroker';
 import { errorMessage } from '../../lib/api';
 import type { ScalingRuleInput } from '../../types/broker';
 import { EMPTY_RULE, RuleForm } from './RuleForm';
@@ -16,6 +16,7 @@ export function UpdateRule() {
   const { showToast } = useToast();
   const { data: rule, isPending, error } = useScalingRule(ruleid);
   const updateRule = useUpdateScalingRule(ruleid);
+  const zeroMinimumAllowed = useZeroMinimumAllowed();
   const { confirm, dialog } = useConfirm();
 
   const [form, setForm] = useState<ScalingRuleInput>(EMPTY_RULE);
@@ -100,6 +101,7 @@ export function UpdateRule() {
         submitLabel="Save changes"
         busy={updateRule.isPending}
         cancelTo={`/scaling/rules/${loadedRule.RuleID}`}
+        zeroMinimumAllowed={zeroMinimumAllowed}
       />
       {dialog}
     </>

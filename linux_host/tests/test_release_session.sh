@@ -316,3 +316,78 @@ jq_install_for() {
 jq_install_for apt-get
 jq_install_for dnf
 jq_install_for yum
+
+# The logs name the users signed in to the host, so nobody else reads them, but the group Azure
+# Monitor Agent may collect logs as can, once that group exists. Each script is sourced in a
+# subshell, because both define log and ensure_state_files.
+log_permissions_for() {
+    local script="$1" label="$2" log_file
+
+    reset_work
+    log_file="$WORK_DIR/$label.log"
+    printf 'an earlier line\n' > "$log_file"
+    chmod 644 "$log_file"
+    (
+        # shellcheck source=/dev/null
+        . "$script"
+        STATE_DIRECTORY="$WORK_DIR/state-$label"
+        CURRENT_USERS_DETAILS="$STATE_DIRECTORY/current_users.txt"
+        PREVIOUS_USERS_FILE="$STATE_DIRECTORY/previous_users.txt"
+        DISCONNECTED_USERS_FILE="$STATE_DIRECTORY/disconnected_users.tsv"
+        IDLE_WARNED_USERS_FILE="$STATE_DIRECTORY/idle_warned_users.tsv"
+        LOG_FILE="$log_file"
+        WATCHER_LOG_FILE="$log_file"
+
+        LOG_READER_GROUP="lbtest-no-such-group"
+        ensure_state_files
+        assert_eq "$(stat -c '%a %U %G' "$log_file")" "600 root root" "$label log without the reader group"
+
+        LOG_READER_GROUP="adm"
+        ensure_state_files
+        assert_eq "$(stat -c '%a %U %G' "$log_file")" "640 root adm" "$label log with the reader group"
+        assert_file_contains "$log_file" "an earlier line"
+        if [ -e "$CURRENT_USERS_DETAILS" ]; then
+            assert_eq "$(stat -c '%a %G' "$CURRENT_USERS_DETAILS")" "600 root" "$label state stays private"
+        fi
+
+        # A group that goes away takes its access with it.
+        LOG_READER_GROUP="lbtest-no-such-group"
+        ensure_state_files
+        assert_eq "$(stat -c '%a' "$log_file")" "600" "$label log after the reader group is gone"
+    ) || exit 1
+}
+
+log_permissions_for "$ROOT_DIR/linux_host/session_release_buffer/release-session.sh" release-agent
+log_permissions_for "$ROOT_DIR/linux_host/session_release_buffer/logind-session-watcher.sh" watcher
+
+# The watcher runs for as long as the host does, and the reader group may appear only when the
+# Azure Monitor agent is installed, so each wake-up brings the log's access up to date.
+watcher_wakeup_protects_log() {
+    local log_file
+
+    reset_work
+    log_file="$WORK_DIR/watcher.log"
+    (
+        # shellcheck source=/dev/null
+        . "$ROOT_DIR/linux_host/session_release_buffer/logind-session-watcher.sh"
+        STATE_DIRECTORY="$WORK_DIR/watcher-state"
+        WATCHER_LOG_FILE="$log_file"
+        LAST_TRIGGER_FILE="$STATE_DIRECTORY/logind-watcher.last_trigger"
+        TRIGGER_LOCK_FILE="$STATE_DIRECTORY/logind-watcher.trigger.lock"
+        SETTLE_SECONDS=0
+        RECONCILE_SCRIPT="$WORK_DIR/reconcile"
+        printf '#!/bin/bash\nexit 0\n' > "$RECONCILE_SCRIPT"
+        chmod 755 "$RECONCILE_SCRIPT"
+
+        LOG_READER_GROUP="lbtest-no-such-group"
+        ensure_state_files
+        assert_eq "$(stat -c '%a' "$log_file")" "600" "watcher log before the reader group exists"
+
+        LOG_READER_GROUP="adm"
+        trigger_reconciliation "SessionNew" > /dev/null
+        assert_eq "$(stat -c '%a %G' "$log_file")" "640 adm" "watcher log once a wake-up finds the reader group"
+        assert_file_contains "$log_file" "Reconciliation completed for SessionNew."
+    ) || exit 1
+}
+
+watcher_wakeup_protects_log

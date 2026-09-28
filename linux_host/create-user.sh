@@ -5,15 +5,18 @@
 
 # The Linux Broker host agent version. Every script in linux_host/ declares the same value
 # and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
-LINUXBROKER_AGENT_VERSION="1.2.0"
+LINUXBROKER_AGENT_VERSION="1.3.0"
 
 # Constants
-NFS_MOUNT_ROOT="/awipsprofiles"
+NFS_MOUNT_ROOT="/nfs_profiles"
 NFS_OPTIONS="vers=4,minorversion=1,sec=sys,nconnect=4"
 LOGFILE=/var/log/createuser.log
 LEASE_DIRECTORY="/var/lib/linuxbroker-release-session/leases"
 # The key that opens each user's login keyring, left on tmpfs for the xrdp session launcher.
 KEYRING_KEY_DIRECTORY="/run/linuxbroker-keyring"
+# Each user's cache on the local disk, where the xrdp session launcher points XDG_CACHE_HOME.
+USER_CACHE_PARENT="/var/cache/linuxbroker"
+USER_CACHE_ROOT="$USER_CACHE_PARENT/users"
 PASSWORD_MODE="false"
 SCRIPT_MOUNTED_NFS_ROOT="false"
 
@@ -22,8 +25,10 @@ usage() {
     exit 1
 }
 
+# Each record starts with the time, as in the broker's other logs. Azure Monitor starts a new
+# record at each timestamp, so a line without one would be joined to the line before it.
 log() {
-    echo "$1" >> "$LOGFILE"
+    printf '%s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOGFILE"
 }
 
 fail() {
@@ -110,6 +115,43 @@ store_keyring_key() {
     log "Stored the keyring key of $USERNAME."
 }
 
+# The user's cache on the local disk, which xrdp-startwm.sh and
+# /etc/profile.d/linuxbroker-cache.sh point XDG_CACHE_HOME at, so caches stay off the NFS
+# share. Only root can add entries to $USER_CACHE_ROOT, so a directory there that the user
+# owns was made here for them, and a reconnect keeps it; anything else is replaced. Without it
+# the cache stays in the home directory, so a failure is logged and the sign-in goes ahead.
+prepare_user_cache() {
+    local cache="$USER_CACHE_ROOT/$USERNAME" uid
+
+    if ! uid=$(id -u "$USERNAME" 2>/dev/null); then
+        log "Could not look up $USERNAME, so its cache stays in the home directory."
+        return 0
+    fi
+    if ! mkdir -p "$USER_CACHE_ROOT" || ! chown root:root "$USER_CACHE_PARENT" "$USER_CACHE_ROOT" \
+        || ! chmod 755 "$USER_CACHE_PARENT" || ! chmod 711 "$USER_CACHE_ROOT"; then
+        log "Could not prepare $USER_CACHE_ROOT, so the cache of $USERNAME stays in the home directory."
+        return 0
+    fi
+
+    if [ -d "$cache" ] && [ ! -L "$cache" ] && [ "$(stat -c %u "$cache" 2>/dev/null)" = "$uid" ]; then
+        chmod 700 "$cache" || log "Could not set the mode of $cache."
+        return 0
+    fi
+    if [ -e "$cache" ] || [ -L "$cache" ]; then
+        log "Replacing $cache, which was not a directory that $USERNAME owns."
+        if ! rm -rf --one-file-system -- "$cache"; then
+            log "Could not remove $cache, so the cache of $USERNAME stays in the home directory."
+            return 0
+        fi
+    fi
+    if ! mkdir -m 700 "$cache" || ! chown "$USERNAME:$USERNAME" "$cache"; then
+        rm -rf --one-file-system -- "$cache"
+        log "Could not create $cache, so the cache of $USERNAME stays in the home directory."
+        return 0
+    fi
+    log "Created the local cache of $USERNAME in $cache."
+}
+
 if [ "${1:-}" = "--password-stdin" ]; then
     if [ $# -ne 5 ]; then
         usage
@@ -150,7 +192,7 @@ if [ ! -d "$NFS_MOUNT_ROOT" ]; then
 fi
 
 # Mount NFS root if not already mounted
-log "Mount NFS root on /awipsprofiles"
+log "Mount NFS root on $NFS_MOUNT_ROOT"
 if ! mountpoint -q "$NFS_MOUNT_ROOT"; then
     if [ "$PASSWORD_MODE" = "true" ]; then
         run_checked "Failed to mount NFS share: $NFS_SHARE" mount -t nfs "$NFS_SHARE" "$NFS_MOUNT_ROOT" -o "$NFS_OPTIONS"
@@ -267,6 +309,7 @@ if ! mountpoint -q "$LOCAL_USERHOME"; then
 fi
 
 if [ "$PASSWORD_MODE" = "true" ]; then
+    prepare_user_cache
     printf '%s:%s\n' "$USERNAME" "$PASSWORD" | chpasswd || fail "Failed to set password for $USERNAME."
     unset PASSWORD
     store_keyring_key

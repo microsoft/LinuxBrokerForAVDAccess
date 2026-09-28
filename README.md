@@ -35,7 +35,7 @@ The solution consists of the following components:
 
 - **Azure Function for Scaling Tasks**: An Azure Function that runs on a schedule to manage scaling of Linux hosts based on the scaling rules. It updates VM network statuses, turns VMs on or off, performs health checks on the Linux hosts, returns released hosts, advances rolling maintenance runs, and purges old audit entries and checkout events.
 
-- **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as finding and acting on hosts in bulk, importing hosts from Azure, helping users with their sessions, scheduling scaling, patching hosts in rolling maintenance runs, charting capacity and unmet demand, and viewing logs. It is a React 18 and TypeScript single-page app built with Vite and Tailwind CSS, served by a Flask backend-for-frontend that holds the Entra ID token server-side and calls the Broker API on the administrator's behalf.
+- **Service Management Portal**: A front-end web application that allows administrators to manage VMs, scaling rules, and monitor the system. It provides functionalities such as finding and acting on hosts in bulk, importing hosts from Azure, helping users with their sessions, scheduling scaling, patching hosts in rolling maintenance runs, charting capacity and unmet demand, and viewing logs. It is a React 18 and TypeScript single-page app built with Vite and Tailwind CSS, served by a Flask backend-for-frontend that holds the Entra ID token server-side and calls the Broker API on the administrator's behalf. By default, the sign-in sessions live in Redis, which every instance of the portal shares.
 
 - **Azure Key Vault**: Stores sensitive information such as SSH keys and database passwords, accessed securely by the Broker API using managed identity. A second vault holds the key that unlocks each user's login keyring.
 
@@ -55,6 +55,7 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 - **Broker Database**: Azure SQL Database for storing VM and scaling data.
 - **Azure Function for Scaling Tasks**: Manages scaling of Linux hosts.
 - **Service Management Portal**: React and TypeScript front-end application for administrators, served by a Flask backend-for-frontend.
+- **Portal Session Cache**: Azure Managed Redis, or Azure Cache for Redis in Azure Government, which keeps the portal's sign-ins so that the portal can run on more than one instance.
 - **Azure Key Vault**: Secure storage for SSH keys, passwords and each user's login keyring key.
 - **Managed Identities**: Used for secure authentication between components.
 - **Security Groups**: Controls access permissions for managed identities.
@@ -65,11 +66,11 @@ The architecture ensures secure, efficient, and scalable management of Linux hos
 2. **Selects Linux Host Connection**: The user opens the **Linux Desktop** RemoteApp, which the `azd` deployment publishes, for a full RDP session to a Linux host.
 3. **Broker Agent Initiates Connection**:
    - The Broker Agent script (`Connect-LinuxBroker.ps1`) connects to the Broker API using the AVD host's managed identity.
-   - It checks out an available Linux VM for the user.
+   - It checks out an available Linux VM for the user. When none is ready, the broker can start a stopped one, and the user waits a minute or two in a small window that says their desktop is starting.
    - The user's ID is added to the Linux host with a unique 25-character password.
    - The user is added to appropriate user groups on the Linux host for RDP access.
    - The host also receives the key that unlocks the user's login keyring, so applications that save passwords do not ask for one.
-4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP and can work as needed.
+4. **User Connects to Linux Host**: The user is connected to the Linux host via RDP, full screen across every monitor unless the deployment chose a window or one monitor, and can work as needed.
 5. **Session Management**:
    - If the user disconnects or logs off, the Session Release Agent on the Linux host reconciles the XRDP/Xorg session state immediately when possible and otherwise on the next safety-net poll.
    - A reconnect timer is initiated, 20 minutes by default and configurable from the portal.
@@ -101,18 +102,20 @@ What an administrator can do depends on their role (see [RBAC Permissions](#rbac
 4. **Manage Scaling**:
    - **Edit the default rule**: Set the minimum and maximum number of running VMs, the scale-up and scale-down thresholds and increments, and whether scale-down powers VMs off or deallocates them.
    - **Add schedule windows**: Override the default rule on chosen days and times in one time zone, for example business hours, and see what the next run would do before saving.
+   - **Start on demand**: Let a checkout that finds no ready host start one, limit how many hosts start at once for waiting users, and see which AVD session hosts run a broker script that can wait.
 5. **Manage Linux Host Settings**:
    - **Edit the fleet-wide profile**: Change the reconnect grace period, whether disconnected sessions are kept alive, the reconcile interval, watcher timings, idle session timeout, and screen lock policy without editing or redeploying any script.
    - **Apply Now**: Optionally push the profile to hosts immediately instead of waiting for them to pick it up.
    - **Review drift**: See which hosts have applied the current settings version.
    - **Version history**: See what changed in each saved version of the profile, and who saved it.
 6. **Monitor System**:
-   - **Overview**: Capacity and checkout health over a day or a week, including checkouts that found no host, and an **Attention** panel for what needs an operator now.
+   - **Overview**: Capacity and checkout health over a day or a week, including checkouts that found no host and users who waited for one to start, and an **Attention** panel for what needs an operator now.
    - **View VM Details**: Access detailed information about VMs, including what the host's agent last reported.
    - **Fleet health**: See each host's last heartbeat, agent version, OS, desktop, xrdp and NFS state, load, memory, disk and sessions, and which hosts need attention, without SSH.
    - **Audit log**: See who did what: every portal action, every denied attempt, and the changes the broker makes on its own, with CSV export.
    - **View Scaling Activity Logs**: Monitor scaling activities and history, including why each run did or did not act.
    - **View VM History**: Track the usage and status changes of VMs.
+   - **Host logs and alerts**: Search the Linux hosts' and AVD session hosts' logs in Log Analytics, follow the fleet in the **Linux Broker fleet** workbook, and get alerts by email. See [Host Monitoring](deploy/DEPLOYMENT.md#host-monitoring).
 
 ## Service Management Portal
 
@@ -202,6 +205,7 @@ These scripts:
 
 - **Install xrdp**: Set up xrdp for full desktop access over RDP, enabling users to connect via AVD. The host firewall allows only SSH and RDP.
 - **Start the desktop**: xrdp starts every session through `xrdp-startwm.sh`, which unlocks the user's login keyring and runs the desktop the deployment chose. GNOME's file indexer is turned off, because it would crawl the home directories on the NFS share.
+- **Keep caches local**: `install-host-config.sh` keeps each user's cache on the host's own disk rather than in the home directory on the NFS share, sets the NFS read-ahead Microsoft recommends for Azure Files, and rotates the broker's logs. See [Home Directory Share](deploy/DEPLOYMENT.md#home-directory-share) for how to size the share.
 - **Configure Authentication**: Sets up authentication mechanisms for secure user access.
 - **Deploy the Linux Session Release Agent**: Installs the timer-based reconciliation service plus a `systemd-logind` watcher that can trigger early reconciliations. The timer remains the fallback path so the system still converges even if event delivery is delayed or unavailable.
 - **Install the Host Settings Agent**: Installs `apply-host-settings.sh` and seeds the settings profile, so screen lock policy and session timings are applied consistently on every supported distribution rather than only on RHEL 8. `LINUXBROKER_DISABLE_SCREEN_LOCK` still chooses the screen lock posture that is seeded; from then on the values are managed from the portal.
@@ -213,12 +217,13 @@ These scripts:
 
 - **One default rule**: the rule with the lowest ID. Creating a second rule is refused; edit the existing one.
 - **Schedule windows**: Optional windows override the default rule on chosen days and times, read in one policy time zone, for example Monday to Friday 08:00–18:00 with a higher minimum. A window can run past midnight, enabled windows cannot overlap, and outside every window the default rule applies. A window takes effect at the next scaling run, about every five minutes.
-- **Minimum VMs Running**: At least 1. Whenever fewer serviceable hosts are running (powered on, not in maintenance, and reachable or still booting), hosts are started to reach it.
-- **Maximum VMs Running**: The maximum number of Linux VMs allowed to be powered on, including hosts in maintenance. When the two conflict, the minimum wins: a scale-down never leaves fewer serviceable hosts than the minimum.
-- **Scale-Up Ratio**: The utilization at which more VMs are started (e.g., 80%). Utilization is hosts in use (checked out, released within their grace period, or pending cleanup) divided by serviceable hosts.
+- **Minimum VMs Running**: At least 1, or 0 while start on demand is on, so that idle hosts stop until someone needs one and the first user to arrive waits for a host to start. That user then fills the pool, so the next scaling run starts **Scale-Up Increment** more hosts, as it does for any full pool. If start on demand is turned off later, scaling keeps one host on instead. Whenever fewer serviceable hosts are running (powered on, not in maintenance, and reachable or still booting), hosts are started to reach it.
+- **Maximum VMs Running**: The maximum number of Linux VMs allowed to be powered on, including hosts in maintenance. When the two conflict, the minimum wins: a scale-down never leaves fewer serviceable hosts than the minimum, or, while users wait for a host to start, fewer than the hosts in use plus the users waiting.
+- **Scale-Up Ratio**: The utilization at which more VMs are started (e.g., 80%). Utilization is hosts in use (checked out, released within their grace period, or pending cleanup), plus users waiting for a host to start, divided by serviceable hosts.
 - **Scale-Up Increment**: The number of VMs to start when scaling up.
 - **Scale-Down Ratio**: The utilization at or below which VMs are stopped (e.g., 30%).
 - **Scale-Down Increment**: The number of VMs to stop when scaling down. Only idle, reachable, unassigned hosts that have stayed in their current power state for at least 10 minutes are stopped, highest VMID first.
+- **Start on demand**: When a checkout finds no ready host, the broker starts a stopped one for the user, up to the maximum, instead of refusing. It is on by default, and the **Scaling** page turns it off and sets how many hosts may start at once for waiting users, 2 by default. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
 - **Stop mode**: **Power off** (the default) keeps the VM's compute allocation, so it starts quickly but compute is still billed. **Deallocate** stops compute billing, but starts take longer, and in a capacity-constrained region or VM size a start can fail with `AllocationFailed` (the broker records the host as off and retries on a later run). Deallocation also wipes the temporary disk; private IP addresses and host names are kept.
 
 Every run first reads each host's power state from Azure and corrects the broker's record, runs never overlap, and each run writes an activity log entry whose notes explain the decision. Before this release, scaling decisions were recorded but never sent to Azure, so upgrading makes scaling start and stop VMs for the first time.
@@ -274,7 +279,7 @@ Because the profile is versioned, the portal shows which hosts have applied the 
 - **Azure Key Vault**: Stores SSH keys and database passwords securely, accessed via managed identities.
 - **Login keyring**: The Linux password changes at every checkout, so it cannot protect a user's GNOME login keyring. The broker keeps a separate random key for each user in a vault of its own, where the API can write secrets but cannot change the deployment's, and `xrdp-startwm.sh` unlocks the keyring with it before the desktop starts. The key reaches the host over the checkout's SSH session and stays in memory-backed storage under `/run`, readable only by the user, until the host is returned.
 - **API Permissions**: Specific API permissions are granted to components to restrict access based on roles.
-- **Logging and Monitoring**: All activities are logged to Azure Application Insights and Log Analytics Workspace.
+- **Logging and Monitoring**: The portal, the API and the task function log to Azure Application Insights and a Log Analytics workspace. Unless `deployHostMonitoring` is `false`, the Linux hosts' broker logs, xrdp logs and syslog, and the **Linux Desktop** events of the AVD session hosts, are collected in the same workspace, and a workbook and alerts show the state of the Linux host fleet. See [Host Monitoring](deploy/DEPLOYMENT.md#host-monitoring).
 
 ### AVD Host Sizing Recommendations
 
@@ -300,7 +305,7 @@ Given that AVD acts as a pass-through in this solution, starting with **light to
    - Avoid using VMs with more than 24 vCPUs to prevent diminishing returns due to increased synchronization overhead.
 4. **Optimize for Multi-Session Workloads**:
    - Use multiple smaller VMs (e.g., 8-core instances) rather than fewer large VMs. This allows for better load balancing and resource management.
-   - Smaller VMs can be shut down when not in use, conserving resources and reducing costs. Use Azure autoscale to manage VM power states based on demand.
+   - Smaller VMs can be shut down when not in use, conserving resources and reducing costs. The deployment's [scaling plan](deploy/DEPLOYMENT.md#avd-autoscale) starts and stops the AVD session hosts on a schedule.
 
 ## Getting Started
 
@@ -329,13 +334,13 @@ azd env new <environment-name>
 azd up
 ```
 
-For existing environments that need in-place rollout instead of new-environment provisioning, use [deploy/Migrate-ExistingEnvironment.ps1](deploy/Migrate-ExistingEnvironment.ps1) from the `deploy/` directory. `azd up` remains the supported greenfield path.
+For existing environments that need in-place rollout instead of new-environment provisioning, use [deploy/Migrate-ExistingEnvironment.ps1](deploy/Migrate-ExistingEnvironment.ps1) from the `deploy/` directory. It updates the apps, the database, the Linux hosts' agent and the AVD session hosts' broker script. `azd up` remains the supported greenfield path.
 
 The deployment targets Azure commercial by default. Set `azureCloudName` to `AzureUSGovernment` or `AzureCustom` to deploy elsewhere; commercial and Government resolve their endpoints automatically, while custom and sovereign clouds require their own authority, Graph, STS, and App Service FQDNs. Air-gapped environments should also set `scriptSourceRoot` to a reachable mirror of this repository, because the Linux hosts download their agent scripts from it during bootstrap.
 
 The Service Management Portal serves all of its front-end assets from its own container under `front_end/static/dist/`. The bundle is compiled during the container build, uses the system font stack, and draws its icons as inline SVG, so it makes no requests to a public CDN and renders correctly in Government, sovereign and air-gapped environments where outbound internet access is blocked. Note that building the portal image does require access to the npm registry, so a disconnected build host needs an internal npm mirror. See [front_end/README.md](front_end/README.md).
 
-The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps.
+The deployment defaults the App Service plan to Premium v3 `P2mv3`, which provides the minimum supported baseline of 4 vCPUs and 32 GB memory for the frontend, API, and task apps. It runs one instance unless you set `appServicePlanCapacity`; see [Portal And API Scale-Out](deploy/DEPLOYMENT.md#portal-and-api-scale-out) before you run more.
 
 Before running `azd up`, review the detailed guide and set any environment-specific values you need, especially networking, host counts, VM sizes, App Service plan sizing, and SQL firewall access. The deployment scripts under `deploy/` now handle the Entra bootstrap, SSH key flow, App Service health checks on `/health`, Application Insights wiring for the frontend and API, post-provision role assignment, container image builds, SQL initialization, and Linux host SQL registration used by this solution.
 
@@ -361,9 +366,21 @@ The distribution and desktop support release needs `azd provision` and agent 1.2
 - **Review the idle timeout.** It had never disconnected anyone before this release, and migrated Ubuntu hosts now enforce any timeout already set.
 - **Replace or bootstrap again any Ubuntu hosts.** Earlier releases deployed them with no desktop and without the packages NFS homes need.
 
+The start on demand release needs `azd provision`, for the AVD scaling plan and its role on the subscription, for the host monitoring and for the portal's session cache, the AVD session hosts need `Connect-LinuxBroker.ps1` 2.0.0, and the Linux hosts need agent 1.3.0. See [Upgrading To Start On Demand](deploy/DEPLOYMENT.md#upgrading-to-start-on-demand).
+
+- **A checkout can start a host.** When no host is ready, the broker starts a stopped one and the user's **Linux Desktop** waits for it, for up to 10 minutes. It is on after the upgrade, and the **Scaling** page turns it off or limits how many hosts start at once.
+- **Update the AVD session hosts.** `deploy/Migrate-ExistingEnvironment.ps1` now also runs `deploy/Update-AvdHostBrokerScript.ps1`, which replaces the script on every running session host. An older script tells its user that no host is available while one starts for them.
+- **A pool can scale to zero.** With start on demand on, a rule or schedule window may keep a minimum of 0 hosts. Set one only after the **Scaling** page shows that every session host runs a script that can wait.
+- **The Linux desktop opens full screen across every monitor.** Set `avdLinuxDesktopFullScreen` or `avdLinuxDesktopMultiMonitor` to `false` to open it in a window or on one monitor, but only after every session host runs the new script. See [Linux Desktop Display](deploy/DEPLOYMENT.md#linux-desktop-display).
+- **The AVD session hosts start and stop on a schedule.** `azd provision` adds a scaling plan, turns on Start VM on Connect and gives the Azure Virtual Desktop service principal **Desktop Virtualization Power On Off Contributor** on the subscription, which needs Owner or User Access Administrator there. Update the session hosts' script first, while they all still run, and review the schedule before you provision, or set `avdScalingPlanEnabled` to `false`. See [AVD Autoscale](deploy/DEPLOYMENT.md#avd-autoscale).
+- **Update the Linux hosts to agent 1.3.0.** Fleet health flags every host as outdated until `deploy/Migrate-LinuxHostReleaseAgent.ps1` from this release, which `deploy/Migrate-ExistingEnvironment.ps1` runs, has updated it. Hosts that are not migrated keep working as before.
+- **Caches move off the NFS share.** The migration installs `install-host-config.sh` on the running Linux hosts. Each user's cache then stays on the host's own disk, NFS mounts read ahead 15 MiB, and the broker's logs rotate. Caches already in `~/.cache` on the share can be deleted. See [Home Directory Share](deploy/DEPLOYMENT.md#home-directory-share).
+- **Host logs, a fleet workbook and alerts.** `azd provision` adds data collection rules, a workbook and alerts, and `postprovision` installs the Azure Monitor agent on the running hosts, so their logs reach Log Analytics. Set `alertEmailAddresses` to get the alerts by email, and once each host that `postprovision` names as not running is started, connect it with `deploy/Enable-HostMonitoring.ps1 -HostNames`. See [Host Monitoring](deploy/DEPLOYMENT.md#host-monitoring).
+- **Portal sessions move to Redis.** `azd provision` creates a cache for the portal's sign-ins, Azure Managed Redis or, in Azure Government, Azure Cache for Redis. Moving the sessions there signs every administrator out once. The cache is billed by the hour; set `portalSessionStore` to `filesystem` to keep the sessions on the portal's disk. With the cache, `appServicePlanCapacity` can run the portal and the API on more than one instance. See [Portal And API Scale-Out](deploy/DEPLOYMENT.md#portal-and-api-scale-out).
+
 ## Roadmap
 
-Planned work beyond this release, including RHEL 10 and Ubuntu 26.04 support, starting a host on demand, golden images and multi-session hosts, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
+Planned work beyond this release, including RHEL 10 and Ubuntu 26.04 support, multi-session hosts, host pools, golden images and GPU-accelerated OpenGL, is described in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contributing
 

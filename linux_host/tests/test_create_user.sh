@@ -12,7 +12,7 @@ setup_case() {
     install_basic_shims
     export FAKE_CALLS="$WORK_DIR/calls.log"
     : > "$FAKE_CALLS"
-    mkdir -p /awipsprofiles /var/lib/linuxbroker-release-session/leases
+    mkdir -p /nfs_profiles /var/lib/linuxbroker-release-session/leases
     rm -f /var/log/createuser.log
 }
 
@@ -36,7 +36,12 @@ new_form_success() {
     assert_eq "$(cat "$lease_file")" "$LEASE"
     assert_eq "$(stat -c %a "$lease_file")" "600"
     assert_not_contains_file /var/log/createuser.log 'S3cret!pass'
-    assert_file_contains "$FAKE_CALLS" "umount /awipsprofiles"
+    assert_file_contains "$FAKE_CALLS" "mount -t nfs nfs.example:/profiles /nfs_profiles"
+    assert_file_contains "$FAKE_CALLS" "umount /nfs_profiles"
+    assert_file_contains /var/log/createuser.log "Mount NFS root on /nfs_profiles"
+    # Azure Monitor starts a record at each timestamp, so every line must begin with one.
+    ! grep -Evq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} - ' /var/log/createuser.log \
+        || fail "a createuser.log line has no timestamp: $(grep -Ev '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} - ' /var/log/createuser.log | head -n 1)"
     cleanup_user "$user"
 }
 
@@ -89,6 +94,8 @@ legacy_form_still_works() {
     assert_eq "$(id -u "$user")" "21006"
     assert_eq "$(getent passwd "$user" | cut -d: -f7)" "/bin/bash" "login shell"
     assert_eq "$(cat "/var/lib/linuxbroker-release-session/leases/$user.lease")" "$LEASE"
+    # Only the broker that sends the password on stdin gets a local cache.
+    assert_not_exists "/var/cache/linuxbroker/users/$user"
     cleanup_user "$user"
 }
 
@@ -173,6 +180,91 @@ keyring_key_is_left_for_the_session() {
     fi
 }
 
+provision() {
+    printf 'pw\n' | bash "$SCRIPT" --password-stdin nfs.example:/profiles "$2" "$1" "$LEASE" >/dev/null \
+        || fail "provisioning $1 failed"
+}
+
+# Each user gets a cache on the local disk for the xrdp session launcher. Only root can add
+# entries to its parent, so one the user owns is kept for a reconnect and anything else is
+# replaced.
+local_cache_is_prepared_for_the_session() {
+    local user="lbtestcu11" uid="21011" cache="/var/cache/linuxbroker/users/lbtestcu11" saved="" out
+    setup_case
+    cleanup_user "$user"
+    if [ -e /var/cache/linuxbroker ]; then
+        saved="/var/cache/linuxbroker.lbtest-saved"
+        rm -rf "$saved"
+        mv /var/cache/linuxbroker "$saved"
+    fi
+
+    provision "$user" "$uid"
+    assert_eq "$(stat -c '%a %U %G' "$cache")" "700 $user $user" "a new cache"
+    assert_eq "$(stat -c '%a %U %G' /var/cache/linuxbroker)" "755 root root" "the cache parent"
+    assert_eq "$(stat -c '%a %U %G' /var/cache/linuxbroker/users)" "711 root root" "the cache root"
+    assert_file_contains /var/log/createuser.log "Created the local cache of $user in $cache."
+
+    # A reconnect keeps what the session cached.
+    mkdir -p "$cache/fontconfig"
+    printf 'cached\n' > "$cache/fontconfig/cache-1"
+    chown -R "$user:$user" "$cache/fontconfig"
+    chmod 755 "$cache"
+    : > /var/log/createuser.log
+    provision "$user" "$uid"
+    assert_eq "$(cat "$cache/fontconfig/cache-1")" "cached" "a reconnect keeps the cache"
+    assert_eq "$(stat -c '%a %U' "$cache")" "700 $user" "a reconnect restores the mode"
+    assert_not_contains_file /var/log/createuser.log "Created the local cache"
+    assert_not_contains_file /var/log/createuser.log "Replacing"
+
+    # A link, a file, or a directory someone else owns is replaced, and a link is not followed.
+    mkdir -p "$WORK_DIR/elsewhere"
+    printf 'keep\n' > "$WORK_DIR/elsewhere/file"
+    chown -R "$user:$user" "$WORK_DIR/elsewhere"
+    chmod 700 "$WORK_DIR/elsewhere"
+    rm -rf "$cache"
+    ln -s "$WORK_DIR/elsewhere" "$cache"
+    chown -h "$user:$user" "$cache"
+    provision "$user" "$uid"
+    [ ! -L "$cache" ] || fail "the link was kept"
+    assert_eq "$(stat -c '%a %U' "$cache")" "700 $user" "a link is replaced"
+    assert_eq "$(cat "$WORK_DIR/elsewhere/file")" "keep" "the link target is left alone"
+    assert_file_contains /var/log/createuser.log "Replacing $cache, which was not a directory that $user owns."
+
+    rm -rf "$cache"
+    printf 'not a directory\n' > "$cache"
+    provision "$user" "$uid"
+    assert_eq "$(stat -c '%F %a %U' "$cache")" "directory 700 $user" "a file is replaced"
+
+    rm -rf "$cache"
+    mkdir -p "$cache"
+    printf 'planted\n' > "$cache/planted"
+    chown -R nobody "$cache"
+    provision "$user" "$uid"
+    assert_eq "$(stat -c '%a %U' "$cache")" "700 $user" "a directory someone else owns is replaced"
+    assert_not_exists "$cache/planted"
+
+    # Loose modes on the parents are put back.
+    chmod 777 /var/cache/linuxbroker /var/cache/linuxbroker/users
+    provision "$user" "$uid"
+    assert_eq "$(stat -c '%a' /var/cache/linuxbroker)" "755" "the cache parent mode is restored"
+    assert_eq "$(stat -c '%a' /var/cache/linuxbroker/users)" "711" "the cache root mode is restored"
+
+    # Without a cache the session keeps its caches in the home directory, so the checkout
+    # still succeeds.
+    rm -rf /var/cache/linuxbroker
+    printf 'not a directory\n' > /var/cache/linuxbroker
+    out=$(printf 'pw\n' | bash "$SCRIPT" --password-stdin nfs.example:/profiles "$uid" "$user" "$LEASE") \
+        || fail "a checkout without a cache failed"
+    assert_contains "$out" "__CREATE_USER_RESULT=ok__"
+    assert_file_contains /var/log/createuser.log "so the cache of $user stays in the home directory."
+
+    cleanup_user "$user"
+    rm -rf /var/cache/linuxbroker
+    if [ -n "$saved" ]; then
+        mv "$saved" /var/cache/linuxbroker
+    fi
+}
+
 new_form_success
 validation_failures
 mount_failure
@@ -180,3 +272,4 @@ legacy_form_still_works
 existing_users_get_bash_instead_of_sh
 legacy_fixture_rejects_new_form
 keyring_key_is_left_for_the_session
+local_cache_is_prepared_for_the_session

@@ -30,12 +30,39 @@ Why the BFF stays:
 - Flask serves the SPA shell for **every** non-API path, so a bookmarked deep link or a hard
   refresh still resolves and React Router renders the right page.
 
+### Sessions
+
+The session holds the operator's access token, so it stays on the server, and the browser carries
+only an opaque id in the session cookie, which is `Secure`, `HttpOnly` and `SameSite=Lax`.
+`session_store.py` picks where it lives:
+
+- **Local runs and tests** keep sessions on disk, under `flask_session/` in the working directory,
+  which Git ignores.
+- **Deployments** keep them in Redis, so that every instance of the portal finds the session a
+  sign-in created on another: Azure Managed Redis, or Azure Cache for Redis in Azure Government,
+  reached through a private endpoint. The portal signs in to Redis as the web app's system-assigned
+  managed identity, through `redis-entraid`, so the Redis store works only where the portal has
+  one. See [Portal And API Scale-Out](../deploy/DEPLOYMENT.md#portal-and-api-scale-out).
+
+Only `/login`, `/getAToken`, `/logout` and `/api/ui/*` load the session; `SESSION_ROUTES` in
+`session_store.py` lists the routes outside `/api/ui`. The SPA shell, the static assets and
+`/health` never touch the store, so they keep working while it is down. Writing to the session on
+any other route raises an error naming the route, so a new route that needs a session fails in the
+tests rather than losing its data.
+
+When the store can't be reached, a request that needs the session gets `503` with
+`Retry-After: 30`: JSON with an `error` on `/api/ui/*`, plain text on the sign-in routes. The
+portal logs the cause through `linuxbroker.frontend`, which Application Insights collects. When a
+request only loses the refresh of the session's expiry, its response stands, and the portal logs a
+warning.
+
 ## Directory Layout
 
 | Path | Purpose |
 | --- | --- |
 | `app.py` | Creates the Flask app, serves the SPA shell, exposes `/api/ui/session` and `/api/ui/dashboard`, and defines the JSON and SPA error handlers. |
 | `config.py` | Reads cloud, Entra ID, and Broker API settings from environment variables. |
+| `session_store.py` | Server-side sessions: the disk or Redis store, the cookie policy, which routes load the session, and the `503` when the store can't be reached. |
 | `function_authentication.py` | `@login_required`. Returns `401` JSON for `/api/ui/*` and redirects page requests to `/login`. |
 | `function_api.py` | Authenticated Broker API helpers, request timeouts, JSON decoding, dashboard VM summary retrieval, history filter parsing, and paged history calls. |
 | `function_bff.py` | Shared JSON plumbing: the `@broker_endpoint` error decorator, request-body helpers, and the paged history envelope. |
@@ -99,8 +126,8 @@ a path that serves the SPA shell.
 | POST | `/api/ui/scaling/rules/<ruleid>/delete` | |
 | GET | `/api/ui/scaling/log` | Paged. |
 | GET | `/api/ui/scaling/rules/history` | Paged. |
-| GET | `/api/ui/scaling/policy` | The time zone, the default rule, the windows, and what applies now and next. `{Available: false}` when the broker predates it, so the Scaling section offers the scaling rules instead. |
-| POST | `/api/ui/scaling/policy` | Body `{timezone}`. |
+| GET | `/api/ui/scaling/policy` | The time zone, the default rule, the windows, what applies now and next, the start on demand settings, and the broker script versions the AVD hosts run. `{Available: false}` when the broker predates it, so the Scaling section offers the scaling rules instead. |
+| POST | `/api/ui/scaling/policy` | Body with any of `timezone`, `startondemandenabled` and `maxpendingstarts`, applied together. |
 | GET | `/api/ui/scaling/timezones` | |
 | POST | `/api/ui/scaling/schedules` | Adds a window. |
 | POST | `/api/ui/scaling/schedules/<scheduleid>/update` | |
@@ -335,6 +362,19 @@ Then open <http://localhost:5173>.
 
 `APPLY_TIMEOUT_SECONDS` controls the BFF timeout for `/api/ui/hosts/settings/apply` and defaults to `110` seconds.
 
+These settings control the [sessions](#sessions). A local run needs none of them:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SESSION_BACKEND` | `filesystem` | `filesystem` keeps sessions under `flask_session/`. `redis` keeps them in Redis and needs `REDIS_HOST`. |
+| `SESSION_LIFETIME_HOURS` | `12` | How long an idle session lasts, from 1 to 720. Each request that loads the session starts the period again. |
+| `SESSION_COOKIE_SECURE` | `true` | Marks the session cookie `Secure`. Edge, Chrome and Firefox accept it from `http://localhost`, so set `false` only to reach the portal over plain HTTP by another name. |
+| `REDIS_HOST` | | The Redis host name. |
+| `REDIS_PORT` | `10000` | 10000 for Azure Managed Redis, 6380 for Azure Cache for Redis. |
+| `REDIS_ENTRA_RESOURCE` | `https://redis.azure.com` | The Entra resource the managed identity gets tokens for. The deployment sets `acca5fbb-b7e4-4009-81f1-37e38fd66d78`, the application ID of Azure Cache for Redis, in Azure Government. |
+
+The portal checks them at startup and stops with a message naming the setting that is wrong.
+
 The app reads environment variables directly; it does not load `.env` files by itself. For Azure
 US Government set `AZURE_CLOUD_NAME=AzureUSGovernment`. For custom or sovereign clouds without a
 built-in profile set `AZURE_CLOUD_NAME=AzureCustom` and provide `AZURE_AUTHORITY_HOST`.
@@ -362,6 +402,9 @@ gunicorn --bind 0.0.0.0:8000 app:app
 the `web/` sources are removed. Nothing generated is committed; `package-lock.json` is, so `npm ci`
 is reproducible.
 
+`requirements.txt` pins every Python package. `redis-entraid` 1.2.1 requires PyJWT 2.13, so `pyjwt`
+can move past 2.13 only with a `redis-entraid` release that allows it.
+
 ## Testing
 
 Two suites, both run in `.github/workflows/front-end-tests.yml`.
@@ -383,6 +426,11 @@ knowing: `csrf_token(client)` fetches a token the way the client does, `post(cli
 sends a `POST` with that header attached, and the `spa_bundle` fixture supplies a stand-in shell so
 the SPA-serving tests do not depend on whether anyone has run `npm run build`. The Python suite
 therefore needs no Node toolchain.
+
+`tests/test_session_store.py` covers the session settings, the cookie policy, which routes load the
+session, the Redis client, a sign-in on one instance honoured by another, and the `503` when the
+store can't be reached. It fakes the managed identity and the Redis server, so nothing leaves the
+machine.
 
 Behaviour is tested on whichever side now owns it. Broadly: date conversion, ignore-filter
 semantics, pagination parameters, the legacy bare-list fallback, dashboard summary preference and

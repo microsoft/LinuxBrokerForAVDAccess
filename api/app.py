@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from flask_caching import Cache
 from azure.keyvault.secrets import SecretClient
 from config import *
+from db_pool import ConnectionPool
 
 try:
     # Installed with azure-monitor-opentelemetry. The trace id ties an audit entry to the
@@ -44,7 +45,7 @@ except ImportError:  # pragma: no cover - only when the telemetry package is abs
 # Flask App
 
 app = Flask(__name__)
-app.config['VERSION'] = '0.171'
+app.config['VERSION'] = '0.172'
 
 # Backs is_member_of_group_cached, which keeps token validation off the Graph API on
 # every request.
@@ -317,6 +318,9 @@ def reset_caches():
     with _keyring_lock:
         _keyring_state.update({'client': None, 'unavailable_until': 0.0})
     _checkout_event_state['missing_logged'] = False
+    _checkout_event_state['client_version_retry_at'] = 0.0
+    _start_on_demand_state['missing_logged'] = False
+    _fleet_snapshot_state['missing_logged'] = False
     cache.clear()
 
 def is_duplicate_key_error(error) -> bool:
@@ -435,14 +439,24 @@ class GroupCheckUnavailable(Exception):
 # cannot exceed the database tier's worker limit during a login storm.
 _db_slots = threading.BoundedSemaphore(DB_MAX_CONCURRENCY)
 
+# Idle connections kept for the next request. They count against DB_MAX_CONCURRENCY along
+# with the busy ones: db_connection() opens a connection only while holding a slot, and
+# puts it back or closes it before giving the slot up.
+_db_pool = ConnectionPool(
+    max_idle=DB_MAX_CONCURRENCY,
+    idle_seconds=DB_POOL_IDLE_SECONDS,
+    max_lifetime_seconds=DB_POOL_MAX_LIFETIME_SECONDS,
+) if DB_POOL_ENABLED else None
+
 
 @contextmanager
 def db_connection():
-    """Yield a database connection that is always closed.
+    """Yield a database connection that is always put back in the pool or closed.
 
     Most handlers previously called get_db_connection() and then conn.close() on the
     success path only, so any exception in between leaked the connection until the
-    pool was exhausted. Using this as a context manager makes the close unconditional.
+    pool was exhausted. Using this as a context manager makes the cleanup unconditional.
+    A connection whose block raised is closed rather than reused.
 
     Raises DatabaseUnavailable when a connection cannot be established, so callers do
     not have to repeat the `if not conn` check. Never nest these: a thread holding one
@@ -451,16 +465,28 @@ def db_connection():
     if not _db_slots.acquire(timeout=DB_ACQUIRE_TIMEOUT_SECONDS):
         raise DatabaseBusy("Timed out waiting for a database connection slot.")
     try:
-        conn = get_db_connection()
-        if not conn:
-            raise DatabaseUnavailable("Could not establish a database connection.")
-        try:
-            yield conn
-        finally:
+        pool = _db_pool
+        if pool is None:
+            conn = get_db_connection()
+            if not conn:
+                raise DatabaseUnavailable("Could not establish a database connection.")
             try:
-                conn.close()
-            except Exception:
-                logger.exception("Failed to close database connection.")
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    logger.exception("Failed to close database connection.")
+        else:
+            pooled = pool.acquire(get_db_connection)
+            if pooled is None:
+                raise DatabaseUnavailable("Could not establish a database connection.")
+            reusable = False
+            try:
+                yield pooled.connection
+                reusable = True
+            finally:
+                pool.release(pooled, reusable)
     finally:
         _db_slots.release()
 
@@ -2053,8 +2079,34 @@ def get_vm_summary():
         logger.exception("Failed to build the VM summary.")
         return error_response("Unable to retrieve the virtual machine summary.", 500)
 
-CHECKOUT_OUTCOMES = ('Assigned', 'Reused', 'NoneAvailable', 'ProvisionFailed', 'Error')
-_checkout_event_state = {'missing_logged': False}
+CHECKOUT_OUTCOMES = ('Assigned', 'Reused', 'NoneAvailable', 'ProvisionFailed', 'Error', 'Starting')
+CLIENT_VERSION_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._+-]*$')
+_checkout_event_state = {'missing_logged': False, 'client_version_retry_at': 0.0}
+_start_on_demand_state = {'missing_logged': False}
+# How long to leave out @ClientVersion after a database that predates it refused it.
+CLIENT_VERSION_RECHECK_SECONDS = 600
+
+
+def parse_client_version(value):
+    """The version the AVD host script reports, or None when it reports none or an unusable one."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > CLIENT_VERSION_MAX_CHARS or not CLIENT_VERSION_RE.match(value):
+        return None
+    return value
+
+
+def _write_checkout_event(params, client_version):
+    sql = "EXEC RecordCheckoutEvent @Username = %s, @AvdHost = %s, @Outcome = %s, @DurationMs = %s, @Hostname = %s"
+    if client_version is not None:
+        sql += ", @ClientVersion = %s"
+        params = params + (client_version,)
+    with db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params)
+            cursor.fetchone()
+        conn.commit()
 
 
 def record_checkout_event(event, started):
@@ -2062,24 +2114,189 @@ def record_checkout_event(event, started):
 
     Never raises: a checkout must not fail because its statistics could not be written. A
     database without dbo.RecordCheckoutEvent, while the API is upgraded ahead of SQL, is
-    logged once per process rather than on every checkout.
+    logged once per process rather than on every checkout. One whose procedure predates
+    @ClientVersion (146) gets the event without it.
     """
     duration_ms = max(0, int((time.monotonic() - started) * 1000))
+    params = (event.get('username'), event.get('avdhost'), event['outcome'], duration_ms, event.get('hostname'))
+    client_version = event.get('clientVersion')
+    if client_version is not None and time.monotonic() < _checkout_event_state['client_version_retry_at']:
+        client_version = None
     try:
-        with db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "EXEC RecordCheckoutEvent @Username = %s, @AvdHost = %s, @Outcome = %s, @DurationMs = %s, @Hostname = %s",
-                    (event.get('username'), event.get('avdhost'), event['outcome'], duration_ms, event.get('hostname'))
-                )
-                cursor.fetchone()
-            conn.commit()
+        try:
+            _write_checkout_event(params, client_version)
+        except DatabaseUnavailable:
+            raise
+        except Exception as e:
+            if client_version is None or 'ClientVersion' not in str(e):
+                raise
+            _checkout_event_state['client_version_retry_at'] = time.monotonic() + CLIENT_VERSION_RECHECK_SECONDS
+            logger.warning("RecordCheckoutEvent does not take @ClientVersion yet; AVD host script versions are not recorded until the SQL upgrade.")
+            _write_checkout_event(params, None)
     except Exception as e:
         if not is_missing_procedure_error(e):
             logger.warning("Could not record the checkout event (%s).", event.get('outcome'), exc_info=True)
         elif not _checkout_event_state['missing_logged']:
             _checkout_event_state['missing_logged'] = True
             logger.warning("RecordCheckoutEvent is not deployed yet; checkouts are not counted until the SQL upgrade.")
+
+
+def call_checkout_vm(username, avdhost):
+    with db_connection() as conn:
+        with conn.cursor(as_dict=True) as cursor:
+            cursor.callproc('CheckoutVm', (username, avdhost))
+            rows = cursor.fetchall()
+            conn.commit()
+    return rows
+
+
+def found_no_host(rows):
+    return not rows or 'Message' in rows[0]
+
+
+def reserve_vm_for_start(username, avdhost):
+    """dbo.ReserveVmForStart's decision for a user whose checkout found no ready host.
+
+    The procedure holds the scaling lock until the caller commits, so this commits at once,
+    before anything asks Azure. Returns None when the database made no decision: a database
+    that predates start on demand is logged once per process, any other failure every time,
+    and either way the checkout is refused as it was before start on demand.
+    """
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC ReserveVmForStart @Username = %s, @AvdHost = %s", (username, avdhost))
+                row = cursor.fetchone()
+            conn.commit()
+        return row or None
+    except DatabaseUnavailable:
+        raise
+    except Exception as e:
+        if not is_missing_procedure_error(e):
+            logger.exception("Could not decide whether to start a host for %s.", username)
+        elif not _start_on_demand_state['missing_logged']:
+            _start_on_demand_state['missing_logged'] = True
+            logger.warning("ReserveVmForStart is not deployed yet; a checkout that finds no ready host is refused until the SQL upgrade.")
+        return None
+
+
+def probe_ssh(ip_address):
+    """Whether a host accepts a connection on the port the reachability probe uses."""
+    try:
+        with socket.create_connection((ip_address, START_ON_DEMAND_PROBE_PORT), timeout=START_ON_DEMAND_PROBE_TIMEOUT_SECONDS):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def mark_started_hosts_reachable(hosts):
+    """Probe the hosts starting for waiting users, and record the ones that answer as Reachable.
+
+    Returns how many answered. The scheduled task probes every host each minute; this hands a
+    waiting user a host as soon as it is up. Never raises, except for an unreachable database.
+    """
+    candidates = [host for host in hosts or [] if isinstance(host, dict) and host.get('VMID') and host.get('IPAddress')]
+    if not candidates:
+        return 0
+
+    with ThreadPoolExecutor(max_workers=min(START_ON_DEMAND_PROBE_CONCURRENCY, len(candidates))) as pool:
+        answers = list(pool.map(lambda host: probe_ssh(str(host['IPAddress'])), candidates))
+    answered = [host for host, up in zip(candidates, answers) if up]
+    if not answered:
+        return 0
+
+    try:
+        with db_connection() as conn:
+            for host in answered:
+                with conn.cursor(as_dict=True) as cursor:
+                    cursor.execute("EXEC SetVmNetworkStatus @VMID = %s, @NetworkStatus = %s", (host['VMID'], 'Reachable'))
+                    cursor.fetchone()
+            conn.commit()
+    except DatabaseUnavailable:
+        raise
+    except Exception:
+        logger.exception("Could not record the started hosts that answered as reachable.")
+        return 0
+
+    for host in answered:
+        logger.info("%s answered while starting for a waiting user, so it was recorded as reachable.", host.get('Hostname'))
+    return len(answered)
+
+
+def _retry_after(value):
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return START_ON_DEMAND_RETRY_SECONDS
+    return min(300, max(5, seconds))
+
+
+def start_host_on_demand(username, avdhost, client_version):
+    """What to do for a user whose checkout found no ready host.
+
+    Returns {'retry': bool, 'wait': None or {'reason', 'retryAfterSeconds', 'hostname'}}. retry
+    means a host may now be ready, so the checkout should be tried once more; wait means the
+    user should ask again after retryAfterSeconds, rather than be refused.
+    """
+    row = reserve_vm_for_start(username, avdhost) or {}
+    result = row.get('Result')
+    retry_after = _retry_after(row.get('RetryAfterSeconds'))
+
+    if result == 'ReadyNow':
+        return {'retry': True, 'wait': {'reason': 'ReadyNow', 'retryAfterSeconds': START_ON_DEMAND_RETRY_SECONDS}}
+
+    if result == 'Busy':
+        return {'retry': False, 'wait': {'reason': 'Busy', 'retryAfterSeconds': retry_after}}
+
+    if result == 'AlreadyStarting':
+        answered = mark_started_hosts_reachable(_json_column(row.get('BootingHostsJson'), list))
+        return {'retry': answered > 0, 'wait': {'reason': 'AlreadyStarting', 'retryAfterSeconds': retry_after}}
+
+    if result == 'Started':
+        vm_name = row.get('VMName')
+        detail = {key: value for key, value in (
+            ('username', username), ('avdhost', avdhost), ('clientVersion', client_version),
+            ('activityId', row.get('ActivityID')), ('waiting', row.get('Waiting')), ('starting', row.get('Booting')),
+        ) if value is not None}
+        try:
+            if not VM_SUBSCRIPTION_ID or not VM_RESOURCE_GROUP:
+                raise RuntimeError("The Azure subscription or resource group of the Linux hosts is not configured.")
+            get_compute_client().virtual_machines.begin_start(VM_RESOURCE_GROUP, vm_name)
+        except Exception:
+            logger.exception("Azure refused to start %s for %s.", vm_name, username)
+            revert_power_action(row, 'Off')
+            append_scaling_note(row.get('ActivityID'), f"Starting {vm_name} failed, so it was recorded as off again.")
+            audit('vm.start_on_demand', 'vm', vm_name, AUDIT_FAILURE,
+                  dict(detail, error='The Azure start operation could not be requested.'))
+            return {'retry': False, 'wait': None}
+
+        logger.info("Started %s for %s, who found no ready host.", vm_name, username)
+        audit('vm.start_on_demand', 'vm', vm_name, AUDIT_SUCCESS, detail)
+        return {'retry': False, 'wait': {'reason': 'Started', 'retryAfterSeconds': retry_after, 'hostname': vm_name}}
+
+    if result in ('AtMaximum', 'NoCandidate'):
+        logger.warning("No host could be started for %s (%s).", username, result)
+    return {'retry': False, 'wait': None}
+
+
+START_ON_DEMAND_MESSAGES = {
+    'Started': "A Linux host is starting for you.",
+    'AlreadyStarting': "A Linux host is starting.",
+}
+
+
+def starting_response(wait):
+    """202: no host is ready yet, so the AVD host should ask again after Retry-After seconds."""
+    seconds = wait['retryAfterSeconds']
+    lead = START_ON_DEMAND_MESSAGES.get(wait['reason'], "No Linux host is ready yet.")
+    response = jsonify({
+        'status': 'Starting',
+        'reason': wait['reason'],
+        'retryAfterSeconds': seconds,
+        'message': f"{lead} Ask again in {seconds} seconds.",
+    })
+    response.headers['Retry-After'] = str(seconds)
+    return response, 202
 
 
 @app.route('/api/vms/checkout', methods=['POST'])
@@ -2111,23 +2328,38 @@ def _checkout_vm(event):
         if not username:
             return error_response("The username contains no characters a Linux account can use.", 400)
 
-        event.update(username=username, avdhost=avdhost, outcome='Error')
+        client_version = parse_client_version(req_body.get('clientVersion'))
+        event.update(username=username, avdhost=avdhost, outcome='Error', clientVersion=client_version)
         g.audit_detail = {'username': username, 'avdhost': avdhost}
+        if client_version:
+            g.audit_detail['clientVersion'] = client_version
         user_password = generate_secure_password()
 
-        with db_connection() as conn:
-            with conn.cursor(as_dict=True) as cursor:
-                cursor.callproc('CheckoutVm', (username, avdhost))
-                rows = cursor.fetchall()
-                conn.commit()
-
+        rows = call_checkout_vm(username, avdhost)
         if rows and is_procedure_error(rows[0]):
             logger.error("CheckoutVm failed with SQL error %s.", rows[0].get('ErrorNumber'))
             return error_response("Unable to check out a virtual machine.", 500)
 
-        if not rows or 'Message' in rows[0]:
-            event['outcome'] = 'NoneAvailable'
-            return error_response("No available VM found. Please try again.", 409)
+        if found_no_host(rows):
+            # Start on demand: start a host for this user, or wait for one already starting,
+            # instead of refusing them.
+            decision = start_host_on_demand(username, avdhost, client_version)
+            if decision['retry']:
+                rows = call_checkout_vm(username, avdhost)
+                if rows and is_procedure_error(rows[0]):
+                    logger.error("CheckoutVm failed with SQL error %s.", rows[0].get('ErrorNumber'))
+                    return error_response("Unable to check out a virtual machine.", 500)
+
+            if found_no_host(rows):
+                wait = decision['wait']
+                if wait:
+                    event['outcome'] = 'Starting'
+                    event['hostname'] = wait.get('hostname')
+                    g.audit_detail['startOnDemand'] = wait['reason']
+                    return starting_response(wait)
+
+                event['outcome'] = 'NoneAvailable'
+                return error_response("No available VM found. Please try again.", 409)
 
         checked_out_vm = rows[0]
         vmid = checked_out_vm.get("VMID")
@@ -3174,6 +3406,47 @@ def append_scaling_note(activity_id, note):
     except Exception:
         logger.exception("Could not append a note to scaling activity %s.", activity_id)
 
+FLEET_SNAPSHOT_FIELDS = (
+    'ReadyHosts', 'PoweredOn', 'Serviceable', 'InUse', 'Waiting', 'Booting', 'StaleHeartbeats',
+    'NfsUnreachable', 'XrdpInactive', 'Draining', 'Maintenance', 'TotalHosts',
+    'EffectiveMinVMs', 'MaxVMs', 'StartOnDemandEnabled', 'StaleAfterSeconds',
+)
+_fleet_snapshot_state = {'missing_logged': False}
+
+
+def log_fleet_snapshot():
+    """Log dbo.GetFleetSnapshot as "fleet snapshot", each figure a custom dimension.
+
+    The scaling trigger runs every five minutes, and the monitoring workbook and alerts read
+    these from AppTraces. Returns the figures logged, or None. Never raises: a scaling run must
+    not fail because its snapshot could not be read. A database without dbo.GetFleetSnapshot,
+    while the API is upgraded ahead of SQL, is logged once per process.
+    """
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetFleetSnapshot")
+                row = cursor.fetchone()
+    except Exception as e:
+        if not is_missing_procedure_error(e):
+            logger.warning("Could not read the fleet snapshot.", exc_info=True)
+        elif not _fleet_snapshot_state['missing_logged']:
+            _fleet_snapshot_state['missing_logged'] = True
+            logger.warning("GetFleetSnapshot is not deployed yet; fleet snapshots are not logged until the SQL upgrade.")
+        return None
+    if not row:
+        return None
+    # Integers, so the queries' toint() reads them; a figure the database left NULL, such as the
+    # minimum with no scaling rule configured, is left out.
+    snapshot = {}
+    for field in FLEET_SNAPSHOT_FIELDS:
+        try:
+            snapshot[field] = int(row[field])
+        except (KeyError, TypeError, ValueError):
+            continue
+    logger.info("fleet snapshot", extra=snapshot)
+    return snapshot
+
 @app.route('/api/scaling/trigger', methods=['POST'])
 @token_required([ROLE_SCHEDULED_TASK, ROLE_ADMIN])
 @audited('scaling.trigger', target_type='fleet')
@@ -3263,6 +3536,8 @@ def trigger_scaling_logic():
             'corrections': len(corrections),
         }
 
+        log_fleet_snapshot()
+
         return jsonify({
             'PoweredOnVMs': powered_on_vms,
             'PoweredOffVMs': powered_off_vms,
@@ -3340,14 +3615,31 @@ def parse_stop_mode(value):
         raise RuleValidationError("stopmode must be PowerOff or Deallocate.")
     return STOP_MODES[value.strip().lower()]
 
-def validate_rule(rule):
+def start_on_demand_enabled():
+    """Whether start on demand is on. A database that predates it (144, 149) has it off."""
+    try:
+        with db_connection() as conn:
+            with conn.cursor(as_dict=True) as cursor:
+                cursor.execute("EXEC GetScalingPolicy")
+                row = cursor.fetchone()
+    except DatabaseUnavailable:
+        raise
+    except Exception as e:
+        if is_missing_procedure_error(e):
+            return False
+        raise
+    return bool((row or {}).get('StartOnDemandEnabled'))
+
+def validate_rule(rule, zero_minimum_allowed=None):
     """Check a complete rule. Mirrors the CHECK constraints on dbo.VmScalingRules.
 
-    A minimum of zero is rejected because a pool with no running host cannot recover:
-    nothing starts a VM until a checkout succeeds, and no checkout can succeed.
+    A minimum of zero is accepted only while start on demand is on: without it, a pool with no
+    running host cannot recover, because nothing starts a VM until a checkout succeeds and no
+    checkout can succeed. zero_minimum_allowed says whether start on demand is on; when it is
+    None the policy is read, and only for a minimum of zero.
     """
-    if rule['minvms'] < 1:
-        raise RuleValidationError("minvms must be at least 1.")
+    if rule['minvms'] < 0:
+        raise RuleValidationError("minvms must be at least 0.")
     if rule['maxvms'] <= rule['minvms']:
         raise RuleValidationError("maxvms must be greater than minvms.")
     for field in ('scaleupratio', 'scaledownratio'):
@@ -3358,6 +3650,10 @@ def validate_rule(rule):
     for field in ('scaleupincrement', 'scaledownincrement'):
         if rule[field] < 1:
             raise RuleValidationError(f"{field} must be at least 1.")
+    if rule['minvms'] == 0:
+        allowed = start_on_demand_enabled() if zero_minimum_allowed is None else zero_minimum_allowed
+        if not allowed:
+            raise RuleValidationError("minvms can be 0 only while start on demand is on.")
 
 def _rule_from_row(row):
     return {
@@ -3777,6 +4073,40 @@ def _phase_from_policy(row):
     })
 
 
+def _optional_bool(value):
+    return None if value is None else bool(value)
+
+
+def avd_host_scripts(policy):
+    """Which broker script the AVD hosts that asked for a checkout in the last seven days run.
+
+    None when the database predates the summary (149). Outdated counts the hosts whose script
+    reports no version: it predates start on demand and gives up instead of waiting for a host.
+    """
+    if 'AvdHostsSeen' not in policy:
+        return None
+    current = version_tuple(AVD_HOST_SCRIPT_VERSION)
+    versions = []
+    for entry in _json_column(policy.get('AvdClientVersionsJson'), list) or []:
+        if isinstance(entry, dict) and entry.get('ClientVersion'):
+            reported = version_tuple(entry['ClientVersion'])
+            versions.append({
+                'ClientVersion': entry['ClientVersion'],
+                'AvdHosts': int(entry.get('AvdHosts') or 0),
+                'Current': reported is not None and current is not None and reported >= current,
+            })
+    return {
+        'Seen': int(policy.get('AvdHostsSeen') or 0),
+        'Outdated': int(policy.get('AvdHostsOutdated') or 0),
+        'OutdatedHostnames': [
+            entry['AvdHost'] for entry in _json_column(policy.get('OutdatedAvdHostsJson'), list) or []
+            if isinstance(entry, dict) and entry.get('AvdHost')
+        ],
+        'Versions': versions,
+        'CurrentVersion': AVD_HOST_SCRIPT_VERSION,
+    }
+
+
 @app.route('/api/scaling/policy', methods=['GET'])
 @token_required(READ_ROLES)
 def get_scaling_policy():
@@ -3805,6 +4135,11 @@ def get_scaling_policy():
             'Schedules': schedules,
             'NextChange': next_phase_change(schedules, policy.get('LocalTime')),
             'LastRun': last_run,
+            # None on a database that predates start on demand (144, 149).
+            'StartOnDemandEnabled': _optional_bool(policy.get('StartOnDemandEnabled')),
+            'MaxPendingStarts': policy.get('MaxPendingStarts'),
+            'ZeroMinimumCount': policy.get('ZeroMinimumCount'),
+            'AvdHostScripts': avd_host_scripts(policy),
         })), 200
 
     except DatabaseUnavailable as e:
@@ -3842,34 +4177,118 @@ def get_time_zones():
         return error_response("Unable to list time zones.", 500)
 
 
+def _policy_update_fields(body):
+    """The policy fields a request sets. Raises RuleValidationError."""
+    fields = {}
+    zone = body.get('timezone')
+    if zone is not None:
+        if not isinstance(zone, str) or not zone.strip() or len(zone) > 64:
+            raise RuleValidationError("Provide the timezone as a name from /api/scaling/timezones.")
+        fields['timezone'] = zone.strip()
+
+    enabled = body.get('startondemandenabled')
+    if enabled is not None:
+        if not isinstance(enabled, bool):
+            raise RuleValidationError("startondemandenabled must be true or false.")
+        fields['enabled'] = enabled
+
+    pending = body.get('maxpendingstarts')
+    if pending is not None:
+        if isinstance(pending, str) and re.fullmatch(r'[0-9]{1,3}', pending.strip()):
+            pending = int(pending.strip())
+        if isinstance(pending, bool) or not isinstance(pending, int) or not 1 <= pending <= 20:
+            raise RuleValidationError("maxpendingstarts must be a whole number from 1 to 20.")
+        fields['maxpendingstarts'] = pending
+
+    if not fields:
+        raise RuleValidationError("Provide timezone, startondemandenabled, maxpendingstarts, or any of them.")
+    return fields
+
+
+def _start_on_demand_message(row):
+    if not row.get('StartOnDemandEnabled'):
+        zero = int(row.get('ZeroMinimumCount') or 0)
+        if zero:
+            places = 'rule or window has' if zero == 1 else 'rules and windows have'
+            return (f"Start on demand is off. {zero} scaling {places} a minimum of 0, so scaling keeps one "
+                    "host running for them.")
+        return "Start on demand is off. A user who finds no ready host is refused."
+    pending = row.get('MaxPendingStarts')
+    return f"Start on demand is on. Up to {pending} host{'s' if pending != 1 else ''} may start at once for waiting users."
+
+
 @app.route('/api/scaling/policy/update', methods=['POST'])
 @token_required(ADMIN_ROLES)
 @audited('scaling.policy_update', target_type='scaling')
 def update_scaling_policy():
-    """Set the time zone every schedule window is read in."""
+    """Set the time zone schedule windows are read in, and start on demand.
+
+    Any of timezone, startondemandenabled and maxpendingstarts; they are applied together or
+    not at all.
+    """
     try:
         g.audit_target_id = 'Policy'
         body = request.get_json(silent=True)
         body = body if isinstance(body, dict) else {}
-        zone = body.get('timezone')
-        if not isinstance(zone, str) or not zone.strip() or len(zone) > 64:
-            return error_response("Provide the timezone as a name from /api/scaling/timezones.", 400)
+        try:
+            fields = _policy_update_fields(body)
+        except RuleValidationError as e:
+            return error_response(e.client_message, 400)
 
         _, updated_by, _ = audit_actor()
+        zone_row = None
+        start_row = None
+        wants_start = 'enabled' in fields or 'maxpendingstarts' in fields
         with db_connection() as conn:
             with conn.cursor(as_dict=True) as cursor:
-                cursor.execute("EXEC SetScalingPolicyTimeZone @TimeZone = %s, @UpdatedBy = %s", (zone.strip(), updated_by))
-                row = cursor.fetchone() or {}
+                if 'timezone' in fields:
+                    cursor.execute("EXEC SetScalingPolicyTimeZone @TimeZone = %s, @UpdatedBy = %s",
+                                   (fields['timezone'], updated_by))
+                    zone_row = cursor.fetchone() or {}
+                    if zone_row.get('Result') == 'InvalidTimeZone':
+                        # Returning before the commit applies nothing else in the request either.
+                        return error_response(
+                            f"'{fields['timezone']}' is not a time zone SQL Server knows. Choose one from the list.", 400)
+                if wants_start:
+                    try:
+                        cursor.execute(
+                            "EXEC SetScalingPolicyStartOnDemand @Enabled = %s, @MaxPendingStarts = %s, @UpdatedBy = %s",
+                            (fields.get('enabled'), fields.get('maxpendingstarts'), updated_by))
+                    except Exception as e:
+                        if is_missing_procedure_error(e):
+                            logger.warning("SetScalingPolicyStartOnDemand is not deployed yet; start on demand cannot be changed.")
+                            return error_response("Start on demand is not available until the database is upgraded.", 404)
+                        raise
+                    start_row = cursor.fetchone() or {}
+                    if start_row.get('Result') == 'Invalid':
+                        return error_response(str(start_row.get('Message') or 'The start on demand settings are not valid.'), 400)
             conn.commit()
 
-        result = row.get('Result')
-        if result == 'InvalidTimeZone':
-            return error_response(f"'{zone.strip()}' is not a time zone SQL Server knows. Choose one from the list.", 400)
+        results = [row.get('Result') for row in (zone_row, start_row) if row is not None]
+        result = 'Updated' if 'Updated' in results else 'Unchanged'
+        detail = {'result': result}
+        response = {'Result': result}
+        messages = []
+        if zone_row is not None:
+            zone = zone_row.get('TimeZone')
+            detail.update({'from': zone_row.get('PreviousTimeZone'), 'to': zone})
+            response['TimeZone'] = zone
+            messages.append(f"Schedules are now read in {zone}." if zone_row.get('Result') == 'Updated'
+                            else f"Schedules were already read in {zone}.")
+        if start_row is not None:
+            enabled = _optional_bool(start_row.get('StartOnDemandEnabled'))
+            detail['startOnDemand'] = {'from': _optional_bool(start_row.get('PreviousStartOnDemandEnabled')), 'to': enabled}
+            detail['maxPendingStarts'] = {'from': start_row.get('PreviousMaxPendingStarts'), 'to': start_row.get('MaxPendingStarts')}
+            response.update({
+                'StartOnDemandEnabled': enabled,
+                'MaxPendingStarts': start_row.get('MaxPendingStarts'),
+                'ZeroMinimumCount': start_row.get('ZeroMinimumCount'),
+            })
+            messages.append(_start_on_demand_message(start_row))
 
-        g.audit_detail = {'from': row.get('PreviousTimeZone'), 'to': row.get('TimeZone'), 'result': result}
-        return jsonify({'TimeZone': row.get('TimeZone'), 'Result': result,
-                        'message': f"Schedules are now read in {row.get('TimeZone')}." if result == 'Updated'
-                        else f"Schedules were already read in {row.get('TimeZone')}."}), 200
+        g.audit_detail = detail
+        response['message'] = ' '.join(messages)
+        return jsonify(serialize_for_json(response)), 200
 
     except DatabaseUnavailable as e:
         logger.error("Database connection failed while updating the scaling policy.")
@@ -4100,8 +4519,11 @@ def preview_scaling():
                 'Serviceable': row.get('Serviceable'),
                 'InUse': row.get('InUse'),
                 'Draining': row.get('Draining'),
+                # Users waiting for a host to start (4.1); counted as demand.
+                'Waiting': row.get('Waiting'),
                 'Utilization': float(utilization) if utilization is not None else None,
             },
+            'StartOnDemandEnabled': _optional_bool(row.get('StartOnDemandEnabled')),
             'TimeZone': row.get('TimeZone'),
             'LocalTime': row.get('LocalTime'),
             'AtUtc': row.get('AtUtc'),
@@ -4412,7 +4834,7 @@ HEARTBEAT_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
 HEARTBEAT_SCRIPTS = (
     'release-session.sh', 'logind-session-watcher.sh', 'xrdp-who-xorg.sh',
     'create-user.sh', 'manage-lease.sh', 'apply-host-settings.sh', 'session-control.sh',
-    'patch-host.sh', 'xrdp-startwm.sh',
+    'patch-host.sh', 'xrdp-startwm.sh', 'install-host-config.sh',
 )
 HEARTBEAT_DESKTOPS = ('gnome', 'xfce', 'mate', 'kde', 'other', 'none', 'unknown')
 HEARTBEAT_SESSION_STATES = ('active', 'disconnected', 'unknown')
@@ -4837,6 +5259,9 @@ ATTENTION_SEVERITY_ORDER = ('critical', 'warning', 'info')
 ATTENTION_MAX_HOSTNAMES = 10
 CHECKOUT_STAT_COUNTS = (
     'Total', 'Assigned', 'Reused', 'NoneAvailable', 'ProvisionFailed', 'Errors', 'DeniedLastHour', 'HostStarts',
+    # Start on demand (154): Starting answers, the users who waited, those a host was then
+    # given to, and those waiting now. Starting answers are not in Total.
+    'Starting', 'Waits', 'WaitsServed', 'WaitingNow',
 )
 
 
@@ -4875,6 +5300,7 @@ def utilization_point(row):
         'Checkouts': int(row.get('Checkouts') or 0),
         'Denied': int(row.get('Denied') or 0),
         'Failed': int(row.get('Failed') or 0),
+        'Waited': int(row.get('Waited') or 0),
     }
 
 
@@ -4885,6 +5311,8 @@ def checkout_stats(row):
         'P95Ms': _optional_int(row.get('P95Ms')),
         'StartP50Seconds': _optional_int(row.get('StartP50Seconds')),
         'StartP95Seconds': _optional_int(row.get('StartP95Seconds')),
+        'WaitP50Seconds': _optional_int(row.get('WaitP50Seconds')),
+        'WaitP95Seconds': _optional_int(row.get('WaitP95Seconds')),
         'LastDeniedUtc': row.get('LastDeniedUtc'),
         'DeniedPercent': round(stats['NoneAvailable'] * 100.0 / stats['Total'], 1) if stats['Total'] else None,
     })

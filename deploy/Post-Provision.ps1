@@ -158,3 +158,17 @@ if ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhite
     -DatabaseName $DatabaseName `
     -SqlAdminLogin $SqlAdminLogin `
     -SqlAdminPassword $SqlAdminPassword
+
+# The deployment cannot install the Azure Monitor agent, because Azure refuses extensions on VMs
+# that scaling has powered off, so the hosts are connected to the host monitoring here. The rest
+# of the deployment is in place by now, so a host that cannot be set up is a warning, which names
+# the hosts to run the script again for.
+try {
+    & "$PSScriptRoot/Enable-HostMonitoring.ps1" `
+        -ResourceGroupName $ResourceGroupName `
+        -SubscriptionId $SubscriptionId `
+        -EnvironmentName $EnvironmentName
+}
+catch {
+    Write-Warning "The deployment is in place, but the host monitoring is not fully set up. $($_.Exception.Message)"
+}

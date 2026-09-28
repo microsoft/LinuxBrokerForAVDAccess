@@ -103,7 +103,7 @@ def clean_database(conn):
         "DELETE FROM dbo.VmScalingActivityLog",
         "DELETE FROM dbo.VmScalingRules",
         "DELETE FROM dbo.ScalingSchedules",
-        "UPDATE dbo.ScalingPolicy SET TimeZone=N'UTC', UpdatedBy=NULL",
+        "UPDATE dbo.ScalingPolicy SET TimeZone=N'UTC', UpdatedBy=NULL, StartOnDemandEnabled=1, MaxPendingStarts=2",
         "UPDATE dbo.LinuxHostSettings SET GracePeriodSeconds=1200, ReconcileIntervalSeconds=60, WatcherDebounceSeconds=10, WatcherSettleSeconds=2, IdleTimeoutSeconds=0, IdleWarningSeconds=120, ScreenLockEnabled=0, DisableLockScreen=1, ScreenIdleDelaySeconds=0, ScreenLockDelaySeconds=0, ScreenLockSettingsLocked=1, PreserveSessionsOnDisconnect=0, UpdatedBy=NULL WHERE SettingsScope='Global'",
         "INSERT INTO dbo.VmScalingRules (MinVMs, MaxVMs, ScaleUpRatio, ScaleUpIncrement, ScaleDownRatio, ScaleDownIncrement, StopMode) VALUES (2, 10, 70.00, 2, 30.00, 1, NULL)",
     ]:

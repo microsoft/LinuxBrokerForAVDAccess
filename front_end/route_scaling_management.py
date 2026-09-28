@@ -92,10 +92,28 @@ def register_route_scaling_management(app):
     @login_required
     @broker_endpoint("Unable to update the scaling policy. Please try again later.")
     def ui_update_scaling_policy():
-        zone = json_body().get('timezone')
-        if not isinstance(zone, str) or not zone.strip():
-            raise BadRequest("Choose a time zone.")
-        return jsonify(api_post('/scaling/policy/update', {'timezone': zone.strip()[:64]}))
+        # Any of the time zone and the start on demand settings; the broker validates them and
+        # applies them together.
+        body = json_body()
+        payload = {}
+        if 'timezone' in body:
+            zone = body.get('timezone')
+            if not isinstance(zone, str) or not zone.strip():
+                raise BadRequest("Choose a time zone.")
+            payload['timezone'] = zone.strip()[:64]
+        if 'startondemandenabled' in body:
+            enabled = body.get('startondemandenabled')
+            if not isinstance(enabled, bool):
+                raise BadRequest("Choose whether start on demand is on.")
+            payload['startondemandenabled'] = enabled
+        if 'maxpendingstarts' in body:
+            pending = body.get('maxpendingstarts')
+            if isinstance(pending, bool) or not isinstance(pending, (int, str)) or (isinstance(pending, str) and len(pending) > 8):
+                raise BadRequest("Enter how many hosts may start at once, from 1 to 20.")
+            payload['maxpendingstarts'] = pending
+        if not payload:
+            raise BadRequest("Choose a time zone or the start on demand settings.")
+        return jsonify(api_post('/scaling/policy/update', payload))
 
     @app.route(f'{API_PREFIX}/scaling/timezones')
     @login_required

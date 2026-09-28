@@ -23,6 +23,7 @@ import type {
   MaintenanceRunsPage,
   MessageResult,
   Paged,
+  PolicyUpdateResult,
   PowerActionResult,
   PowerSyncResult,
   ProfileResetResult,
@@ -34,6 +35,7 @@ import type {
   ScheduleInput,
   SessionsPage,
   SignOutResult,
+  StartOnDemandInput,
   TimeZoneOption,
   UserSearchResult,
   UtilizationHours,
@@ -490,6 +492,17 @@ export function useScalingPolicy() {
   });
 }
 
+/**
+ * Whether a rule may keep a minimum of 0 VMs, which needs start on demand. Undefined until the
+ * policy has loaded, so a form does not flag a 0 it cannot yet judge.
+ */
+export function useZeroMinimumAllowed(): boolean | undefined {
+  const { data, isError } = useScalingPolicy();
+  if (isError) return false;
+  if (!data) return undefined;
+  return data.Available !== false && data.StartOnDemandEnabled === true;
+}
+
 /** What the next scaling run would do now. Refreshed every minute while shown. */
 export function useScalingPreview() {
   return useQuery({
@@ -518,7 +531,16 @@ export function useTimeZones() {
 export function useSetPolicyTimeZone() {
   const invalidate = useRuleInvalidation();
   return useMutation({
-    mutationFn: (timezone: string) => apiPost<{ message: string; TimeZone: string }>('/scaling/policy', { timezone }),
+    mutationFn: (timezone: string) => apiPost<PolicyUpdateResult>('/scaling/policy', { timezone }),
+    onSuccess: invalidate,
+  });
+}
+
+/** Turn start on demand on or off, and set how many hosts may start at once for waiting users. */
+export function useSetStartOnDemand() {
+  const invalidate = useRuleInvalidation();
+  return useMutation({
+    mutationFn: (input: StartOnDemandInput) => apiPost<PolicyUpdateResult>('/scaling/policy', input),
     onSuccess: invalidate,
   });
 }

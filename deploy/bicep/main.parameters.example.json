@@ -11,6 +11,18 @@
     "appServicePlanSku": {
       "value": "P2mv3"
     },
+    "appServicePlanCapacity": {
+      "value": 1
+    },
+    "portalSessionStore": {
+      "value": "redis"
+    },
+    "portalRedisSku": {
+      "value": ""
+    },
+    "portalRedisLocation": {
+      "value": ""
+    },
     "appName": {
       "value": "linuxbroker"
     },
@@ -140,11 +152,80 @@
     "avdMaxSessionLimit": {
       "value": 5
     },
+    "avdLinuxDesktopFullScreen": {
+      "value": true
+    },
+    "avdLinuxDesktopMultiMonitor": {
+      "value": true
+    },
+    "avdScalingPlanEnabled": {
+      "value": true
+    },
+    "avdStartVmOnConnect": {
+      "value": true
+    },
+    "avdScalingPlanTimeZone": {
+      "value": "UTC"
+    },
+    "avdScalingPlanRampUpStart": {
+      "value": "07:00"
+    },
+    "avdScalingPlanPeakStart": {
+      "value": "09:00"
+    },
+    "avdScalingPlanRampDownStart": {
+      "value": "18:00"
+    },
+    "avdScalingPlanOffPeakStart": {
+      "value": "20:00"
+    },
+    "avdScalingPlanRampUpMinimumHostsPct": {
+      "value": 20
+    },
+    "avdScalingPlanRampUpCapacityThresholdPct": {
+      "value": 60
+    },
+    "avdScalingPlanRampDownMinimumHostsPct": {
+      "value": 10
+    },
+    "avdScalingPlanRampDownCapacityThresholdPct": {
+      "value": 90
+    },
+    "avdScalingPlanWeekendMinimumHostsPct": {
+      "value": 0
+    },
+    "avdScalingExclusions": {
+      "value": {}
+    },
+    "hostNamesNotRunning": {
+      "value": []
+    },
+    "avdServicePrincipalObjectId": {
+      "value": "<avd-service-principal-object-id>"
+    },
+    "assignAvdAutoscaleRole": {
+      "value": true
+    },
     "avdVmNamePrefix": {
       "value": "avdhost"
     },
     "avdVmSize": {
       "value": "Standard_D8s_v5"
+    },
+    "deployHostMonitoring": {
+      "value": true
+    },
+    "alertEmailAddresses": {
+      "value": "<alert-email-addresses>"
+    },
+    "alertCheckoutRefusalThreshold": {
+      "value": 1
+    },
+    "alertApiErrorThreshold": {
+      "value": 5
+    },
+    "alertNfsLatencyThresholdMs": {
+      "value": 50
     }
   }
 }

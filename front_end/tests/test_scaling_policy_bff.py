@@ -68,6 +68,33 @@ def test_the_time_zone_is_set(signed_in_client, broker_api):
     assert broker_api.posts[-1]["json"] == {"timezone": "UTC"}
 
 
+def test_start_on_demand_is_forwarded_with_or_without_the_time_zone(signed_in_client, broker_api):
+    broker_api.post_replies["/scaling/policy/update"] = (200, {"Result": "Updated", "StartOnDemandEnabled": False})
+
+    response = post(signed_in_client, f"{API}/scaling/policy",
+                    {"startondemandenabled": False, "maxpendingstarts": 4, "junk": True})
+
+    assert response.status_code == 200 and response.get_json()["StartOnDemandEnabled"] is False
+    assert broker_api.posts[-1]["json"] == {"startondemandenabled": False, "maxpendingstarts": 4}
+    post(signed_in_client, f"{API}/scaling/policy", {"timezone": " UTC ", "maxpendingstarts": "3"})
+    assert broker_api.posts[-1]["json"] == {"timezone": "UTC", "maxpendingstarts": "3"}
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"junk": True}, {"startondemandenabled": "yes"}, {"maxpendingstarts": True},
+    {"maxpendingstarts": 2.5}, {"maxpendingstarts": "1" * 9}, {"timezone": "UTC", "startondemandenabled": 1},
+])
+def test_an_unusable_policy_update_never_reaches_the_broker(signed_in_client, broker_api, payload):
+    assert post(signed_in_client, f"{API}/scaling/policy", payload).status_code == 400
+    assert broker_api.posts == []
+
+
+def test_the_brokers_refusal_of_the_pending_limit_is_kept(signed_in_client, broker_api):
+    broker_api.post_replies["/scaling/policy/update"] = (400, {"error": "maxpendingstarts must be a whole number from 1 to 20."})
+    response = post(signed_in_client, f"{API}/scaling/policy", {"maxpendingstarts": 40})
+    assert response.status_code == 400 and "1 to 20" in response.get_json()["error"]
+
+
 def test_the_preview_forwards_a_time_and_proposed_values(signed_in_client, broker_api):
     broker_api.get_replies["/scaling/preview"] = (200, {"Action": "None", "Summary": "No change."})
     signed_in_client.get(f"{API}/scaling/preview?at=2026-09-21T09:00:00Z")

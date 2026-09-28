@@ -822,8 +822,8 @@ there before Phase 3.
 
 | Item | Why | Direction |
 | --- | --- | --- |
-| Checks with `mstsc` | The test client couldn't present several monitors or play sound, and full screen and multi-monitor depend on the user's `Default.rdp`, because the launcher runs `mstsc /v:<ip>` | Through AVD, on an Ubuntu and a RHEL host: resize and maximize the window, use full screen and two monitors, and play sound on Ubuntu GNOME |
-| Resizing on Ubuntu | A live resize dropped FreeRDP 3.31 on xrdp 0.9.24 (neutrinolabs/xrdp#3877), and with **Keep sessions alive** off the agent then ended the session. RHEL 9's xrdp 0.10.6 resized fine. | If `mstsc` drops too, have the launcher write an `.rdp` file with `dynamic resolution:i:0` (4.8), or ship a fixed xrdp |
+| Checks with `mstsc` | The test client couldn't present several monitors or play sound. The launcher now opens the desktop full screen across every monitor (4.8), which nobody has checked through AVD yet, including whether a RemoteApp session gives the inner `mstsc` more than one monitor | Through AVD, on an Ubuntu and a RHEL host: resize and maximize the window, use full screen and two monitors, and play sound on Ubuntu GNOME |
+| Resizing on Ubuntu | A live resize dropped FreeRDP 3.31 on xrdp 0.9.24 (neutrinolabs/xrdp#3877), and with **Keep sessions alive** off the agent then ended the session. RHEL 9's xrdp 0.10.6 resized fine. | If `mstsc` drops too, ship a fixed xrdp, or evaluate turning dynamic resolution off in the user's `Default.rdp`, which `mstsc /v:` reads without the warning that a written `.rdp` file now brings (4.8) |
 | RDP audio | RHEL, Rocky and AlmaLinux package no xrdp audio module. On Ubuntu, Xfce runs PulseAudio, which has no xrdp module in the archive, and MATE starts no sound server, so only GNOME, with PipeWire and `pipewire-module-xrdp`, can play sound. | Build or ship `pipewire-module-xrdp` for the RHEL family, and run PipeWire in Xfce and MATE sessions |
 | Idle timeout on the RHEL family | RHEL, Rocky and AlmaLinux don't package `xprintidle`, even in EPEL, so those hosts neither warn nor disconnect idle sessions | Read the X idle time another way, for example with `python3` calling `XScreenSaverQueryInfo` in `libXss` through `ctypes` |
 | Host reboot during a lease (*pre-existing*) | The lease file survives the reboot, but the home isn't mounted again and the agent has no record of the user, so the host stays checked out until someone returns it, and a reconnect lands in an empty local home | Reconcile leases at boot: mount the home again, or release the lease |
@@ -842,9 +842,64 @@ there before Phase 3.
 
 ## Phase 4: strategic scale
 
+**Status: In progress.** The foundations, items 4.1 and 4.5–4.9, shipped together, with host
+agent 1.3.0, and the home directory share now mounts on `/nfs_profiles`. Each has a **Shipped**
+note on where it differs from the design below it, and a **Validated** note on what the Phase 4
+validation confirmed in a public-cloud test environment with two RHEL 9 hosts and a Windows
+session host, which had no interactive AVD client. 4.3 and 4.4 come next, together, then 4.2 and
+4.10.
+
 ### 4.1 Start a host on demand at checkout
 
-**Status: Planned** · depends on Phase 1 (readiness and scaling fixes)
+**Status: Done** · depends on Phase 1 (readiness and scaling fixes)
+
+**Shipped.** A checkout that finds no ready host starts one and answers `202`, the AVD script
+waits for it, and a rule or window may keep a minimum of 0 hosts. Where it differs from the
+design below:
+
+- `ReserveVmForStart` runs under the scaling application lock, so it never races a scaling
+  run. It starts at most one host per waiting user, and at most `MaxPendingStarts` at once (2 by
+  default, 1–20), never past the active phase's `MaxVMs`. A user who arrives while enough hosts
+  are starting waits for one of them. The API commits before it asks Azure, and records the host
+  as off again if Azure refuses.
+- `retryAfterSeconds` isn't fixed at 60: it's the median start-to-reachable time over the last
+  week, less how long the oldest starting host has taken, kept between 30 and 120 seconds, and
+  the `Retry-After` header carries it too. While a user waits, each request probes the starting
+  hosts on port 22, so a host is handed out without waiting for the task's probe, which runs
+  every two minutes.
+- Start on demand is on by default. The **Start on demand** card on the Scaling page turns it
+  off and sets the pending-start limit. A minimum of 0 can be saved only while it's on, and if
+  it's turned off later, scaling reads 0 as 1.
+- The AVD script (2.0.0) waits in a modeless window with **Cancel**, up to `-MaxWaitSeconds`
+  (600 by default). It asks again after `Retry-After`, or 30, 30, then 60 seconds when the
+  broker gives none, gives up after three transient failures in a row, and renews a refused
+  token once.
+  It sends `clientVersion` with each checkout, and the Scaling page names the AVD hosts whose
+  latest checkout reported none, because their script can't wait.
+- `Update-AvdHostBrokerScript.ps1` replaces the script on existing AVD hosts through Run
+  Command, and `Migrate-ExistingEnvironment.ps1` runs it after the Linux host migration.
+- Checkout events gain a `Starting` outcome. Scaling counts waiting users as demand and keeps a
+  host for each of them when scaling down, and the dashboard reports waits, how many were
+  served, and their median and 95th percentile.
+
+**Validated** with the minimum at 0 and both hosts stopped:
+
+- The first checkout from the 2.0.0 script got `202` and started one host. The API probed the
+  host on the script's next requests, and the script had it 67 seconds after the first request.
+  The dashboard showed the wait, with a median of 65 seconds, and the audit entry carried the
+  script's version.
+- With `MaxPendingStarts` at 1, a second waiting user got `202` and no second start; at 2, a
+  second host started. At `MaxVMs`, a checkout got `409`. The `Retry-After` header matched the
+  body each time.
+- A minimum of 0 was refused while start on demand was off. Once the hosts were returned, scaling
+  stopped both again. The broker listed the two test clients, which sent no version, among the
+  session hosts whose script can't wait.
+- One user on the only running host fills the pool, so the next scaling run started
+  `ScaleUpIncrement` more hosts, as it does for any full pool. `README.md` and `DEPLOYMENT.md` now
+  say so.
+
+**Open.** From a real AVD session: **Cancel** in the waiting window, and what a script older than
+2.0.0 shows while a host starts for its user.
 
 **Why.** When the pool is exhausted, the user sees "No Linux host is available right now.
 Try again in a few minutes." (`Connect-LinuxBroker.ps1`). The script retries three times
@@ -936,9 +991,50 @@ different image.
 
 ### 4.5 AVD scaling plan for the pass-through host pool
 
-**Status: Planned** · no dependencies
+**Status: Done** · no dependencies
 
-The Windows AVD hosts only run `mstsc`, but they're deployed without any autoscale
+**Shipped.** The deployment creates a scaling plan for the AVD host pool, turns on Start VM on
+Connect, and gives the Azure Virtual Desktop service principal the role both need. Where it
+differs from the design below:
+
+- **The role is on the subscription, not the host resource group.** Autoscale works only with
+  **Desktop Virtualization Power On Off Contributor** on the whole subscription, so the deployment
+  assigns it there. That needs Owner or User Access Administrator, and lets Azure Virtual Desktop
+  start and stop any session host in the subscription. `preprovision` finds the service principal
+  by its app ID only, never by its display name, and checks whether it holds the role already,
+  directly, through a group or from a management group, and whether the deploying account can
+  assign it. When the role is there it assigns nothing, and when it can't be assigned the plan is
+  deployed assigned to no host pool and `preprovision` prints the command for an Owner, instead
+  of the deployment failing. `assignAvdAutoscaleRole=false` leaves the role to an administrator.
+- Microsoft documents one app ID for Azure Virtual Desktop, `9cdead84-a844-4324-93f2-b2e6bb768d07`.
+  `avdServicePrincipalAppId` still overrides it, and `avdServicePrincipalObjectId` skips the lookup.
+- **Start VM on Connect,** so the weekend minimum can be 0. The first user after a quiet spell
+  waits while it starts a session host, and can then wait again for a Linux host: two starts.
+- **Weekday and weekend schedules** with the same times, 07:00, 09:00, 18:00 and 20:00 in UTC by
+  default. Ramp-up and peak spread new sessions breadth-first, and ramp-down and off-peak pack them
+  depth-first. Nobody is signed out: a session host stops only once it has no sessions,
+  disconnected ones included.
+- **Stopped hosts no longer block a deployment.** Azure refuses to change a VM extension on a VM
+  that isn't running, and autoscale, like the broker's own scaling and start on demand, leaves
+  hosts deallocated. `preprovision` lists the Linux hosts and session hosts that aren't running,
+  and the deployment leaves out their extensions. A deployment also replaces a VM's tags, so it
+  writes back the `excludeFromScaling` tag that keeps autoscale away from a session host.
+
+**Validated.** `azd provision` created the plan in `UTC`, with both schedules and
+`excludeFromScaling` as its exclusion tag, assigned it to the host pool and turned on Start VM on
+Connect.
+`preprovision` found that the Azure Virtual Desktop service principal already held the role on the
+subscription, from an earlier deployment, and assigned nothing. The deployment left out the
+extensions of the session host that was stopped, and kept the `excludeFromScaling` tag the
+validation had given it.
+
+**Open.** Check that the plan can be assigned right after the role, in a subscription where the
+service principal doesn't hold it yet, and that Start VM on Connect starts a session host for a
+real client. `Update-AvdHostBrokerScript.ps1` skips session hosts that
+autoscale has stopped, so updating one means tagging, starting and updating it by hand; the
+script could start them itself, or session hosts could update the script when they boot.
+
+**Design.** The Windows AVD hosts only run `mstsc`, but they're deployed without any autoscale
 (`deploy/bicep/modules/AVD/main.bicep` has no `scalingPlans` resource). Add a
 `Microsoft.DesktopVirtualization/scalingPlans` resource for the pooled host pool, with
 ramp-up, peak, ramp-down and off-peak parameters and a time zone. Assign **Desktop
@@ -947,7 +1043,52 @@ the host resource group; its app ID differs in sovereign clouds, so parameterize
 
 ### 4.6 NFS home performance
 
-**Status: Planned** · informed by 3.4
+**Status: Done** · informed by 3.4
+
+**Shipped.** A new host script, `install-host-config.sh`, which the bootstraps and the host
+migration install and run as root, keeps users' caches off the share, tunes the NFS read-ahead and
+rotates the broker's logs, and `deploy/DEPLOYMENT.md` has a sizing guide for the share. Where it
+differs from the design below:
+
+- **The caches are in `/var/cache/linuxbroker/users/<user>`, not `/var/tmp/xdg-cache/$USER`.** Only
+  root can create entries in that directory, so no user can create or link another user's cache
+  ahead of them, as they could in world-writable `/var/tmp`. `create-user.sh` creates the cache at
+  checkout, owned by the user with mode 700, and replaces anything else it finds there without
+  following links. `manage-lease.sh` deletes it when the broker returns the host, and
+  `systemd-tmpfiles` empties the directory at every boot. The session launcher sets
+  `XDG_CACHE_HOME` only when the directory is the user's own, and
+  `/etc/profile.d/linuxbroker-cache.sh` does the same in login shells.
+- **Browsers aren't configured one by one.** Firefox from the distribution's packages and
+  Chromium-based browsers already follow `XDG_CACHE_HOME`. The Firefox snap on Ubuntu doesn't,
+  because a snap sets its own, so its cache stays on the share.
+- **The read-ahead is Microsoft's 15 MiB,** from Microsoft's udev rule in
+  `/etc/udev/rules.d/99-nfs.rules`, and the script applies it at once to NFS mounts that already
+  exist. The rule is Microsoft's but for one character: systemd 255 reports Microsoft's `$4` as an
+  invalid substitution each time udev loads its rules, while `$$4` passes `udevadm verify` and
+  still gives awk `$4`. Like Microsoft's, it applies to every NFS mount on the host.
+- **The Bicep default stays at 100 GiB.** Its 3,100 baseline and 10,000 burst IOPS carry a small
+  pool, and the guide says how to see throttling and grow the share. The I/O of a sign-in hasn't
+  been measured, so the guide gives no figure per user.
+- **Log rotation came with it,** though planned for 4.7: `/etc/logrotate.d/linuxbroker` rotates
+  five broker logs in `/var/log` weekly, or at 50 MB, and keeps four. `linuxbroker-patch.log`
+  trims itself.
+- **The share mounts on `/nfs_profiles`,** renamed from `/awipsprofiles`, which the script removes
+  when it is empty and nothing is mounted on it.
+- The alerts on throttling and latency are part of 4.7.
+
+**Validated** on both hosts after the host migration. The share's read-ahead was 15,360 KiB,
+`/awipsprofiles` was gone, and `/nfs_profiles` was an empty directory with nothing mounted on it
+between checkouts. A checkout created the user's cache with mode 700 and the user as its owner, a
+login shell pointed `XDG_CACHE_HOME` at it, and the return removed it with the account. The share's
+`Transactions` metric splits by `ResponseType`, which the throttling alert filters on, and its
+end-to-end latency averaged about 3 ms, and 31 ms at most, over the day of the validation.
+
+**Open.** Measure a sign-in's I/O on the share and add figures per user to the sizing guide.
+Offer the provisioned v2 model, which Microsoft now recommends for new shares and which provisions
+IOPS apart from capacity; a v1 storage account can't be converted, so an existing environment
+would need a new share and a copy of the profiles. SELinux labels the caches `var_t`, which does no
+harm while the broker's users are unconfined, as they are by default on RHEL; a host that confines
+them would need a file context for the directory.
 
 **Why.** Every user's home, including caches, is on a Premium Azure Files NFS share that
 defaults to 100 GiB (`deploy/bicep/modules/core/nfs-storage.bicep`). Premium performance
@@ -972,7 +1113,78 @@ Tracker that kept failing on an index written by another distribution's Tracker 
 
 ### 4.7 Host log shipping and observability
 
-**Status: Planned** · pairs with 2.2
+**Status: Done** · pairs with 2.2
+
+**Shipped.** A new Bicep module, `modules/core/host-monitoring.bicep`, adds a data collection rule
+for the Linux hosts and one for the AVD session hosts, the **Linux Broker fleet** workbook and the
+alerts, and `deploy/Enable-HostMonitoring.ps1`, which `postprovision` runs, connects the hosts to
+the rules. `deployHostMonitoring` leaves all of it out, and an `AzureCustom` cloud has to opt in.
+Where it differs from the design below:
+
+- **A script installs the agent, not the deployment.** Azure refuses to add an extension to a VM
+  that isn't running, and scaling, start on demand and AVD autoscale all stop hosts, so an agent
+  extension in Bicep would fail `azd provision` whenever a host is off. The script associates each
+  VM tagged `broker-role=linux-host` or `broker-role=avd-host` with its rule, which works on a
+  stopped VM, and installs the Azure Monitor agent, with automatic upgrades, on the running ones.
+  It names each host that isn't running, to be connected with `-HostNames` once it is started, and
+  `postprovision` reports its failure as a warning. The agent authenticates with each VM's
+  system-assigned identity and needs no data collection endpoint.
+- **More logs.** The Linux rule also collects `linuxbroker-session-control.log` and
+  `linuxbroker-patch.log`, from 2.3 and 2.9. Each line of the broker's logs starts with a
+  `YYYY-MM-DD HH:MM:SS` timestamp, which starts a record, so a message of several lines stays one
+  record; `createuser.log` had no timestamps and now has them. xrdp starts its lines in a format the
+  agent doesn't recognize, so each line of `xrdp.log` and `xrdp-sesman.log` is a record of its own.
+  Syslog comes from `auth` and `authpriv` at `info` and up, from `kern` and `user` at `notice` and
+  up, because the kernel reports an NFS server that stops answering at `notice`, and from every
+  other facility at `warning` and up. The AVD rule collects the events of `Connect-LinuxBroker.ps1`
+  and the Remote Desktop client's critical events, errors and warnings.
+- **The `syslog` group can read the release agent's logs.** They name the users signed in to the
+  host, so only root could read them. At each run, the release agent and its watcher now give them
+  mode 640 and the `syslog` group where the host has one, and keep them at 600 where it doesn't.
+- **A fleet snapshot from the database.** The heartbeats from 2.2 go to the broker's database, not
+  to Log Analytics, so SQL script `157` adds `GetFleetSnapshot`, and at the end of each scaling run,
+  every five minutes, the API logs its figures as a `fleet snapshot` trace: ready, powered-on,
+  in-use and booting hosts, waiting users, stale heartbeats, unreachable shares, missing xrdp, and
+  the scaling minimum and maximum in effect, among others. The workbook's fleet charts and three of
+  the alerts read it. An API ahead of the database logs once per process that the procedure is
+  missing.
+- **The alerts.** "No ready hosts" fires only while the scaling minimum is above 0 or users are
+  waiting, so a pool that 4.1 scaled to zero raises nothing. "A host with no heartbeat" became
+  "Unhealthy hosts", which also covers a host that reports the share unreachable or no xrdp. Both
+  need every snapshot in the 15-minute window to show the problem, so a host that is briefly busy
+  or starting raises nothing. "No fleet snapshot" is new, and fires when the scaling runs stop or
+  the API can't read the snapshot. Refused checkouts and API errors count `409` and `5xx` responses
+  against thresholds that are parameters. The throttling and latency alerts watch only a share the
+  deployment creates.
+- **Email only.** One action group notifies the addresses in `alertEmailAddresses`, and a Teams
+  channel through its email address. Without addresses, the alerts still appear in Azure Monitor.
+- **Log rotation shipped with 4.6.**
+
+**Validated** on the two RHEL 9 hosts and the Windows session host:
+
+- `Enable-HostMonitoring.ps1` installed agent 1.45 on the Linux hosts, with automatic upgrades,
+  and associated all three VMs with their rules, the stopped session host included. Once that host
+  was started, `-HostNames` installed the Windows agent on it in under a minute.
+- The agent reads the text logs as root, so their modes don't matter. Installing it created the
+  `syslog` user and group on RHEL 9, which the hosts didn't have before.
+- Every broker log that had new lines arrived in `LinuxBrokerHost_CL`, `createuser.log` with its
+  new timestamps, and so did `xrdp.log`. The agent sent only the lines written after it started,
+  not the files' history. xrdp 0.10 starts its lines with `[2026-09-27T06:17:15.790+0000]` rather
+  than 0.9's format, and each line arrived as a record of its own. `authpriv` messages arrived in
+  `Syslog`, and test events under the script's `LinuxBrokerScript` source, an information event and
+  a warning, in `Event`.
+- Every workbook query ran without error over 24 hours.
+- "Checkouts refused" fired four and a half minutes after a refused checkout. With both hosts
+  checked out and a minimum of 2, "no ready hosts" fired 19 minutes later, once its window held
+  only snapshots with no ready host. With xrdp stopped on one host, "unhealthy hosts" fired
+  14 minutes later. The share's `Transactions` metric has the `ResponseType` dimension that the
+  throttling alert filters on.
+
+**Open.** `linuxbroker-patch.log` and `xrdp-sesman.log` got no lines during the validation, so
+check that the agent picks up the patch log after it trims itself. "No fleet snapshot" and
+"API errors" weren't fired.
+
+**Design.**
 
 - Deploy the Azure Monitor Agent to Linux hosts, plus a Data Collection Rule for
   `/var/log/release-session.log`, `/var/log/release-session-watcher.log`,
@@ -985,9 +1197,49 @@ Tracker that kept failing on an index written by another distribution's Tracker 
 
 ### 4.8 Tuning the double RDP hop
 
-**Status: Planned**
+**Status: Done, except the checks through AVD and the CPU measurements** · both need an
+interactive AVD client, which the Phase 4 validation didn't have
 
-The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
+**Shipped.** `Connect-LinuxBroker.ps1` opens the Linux desktop full screen across every monitor of
+the user's AVD session, with `mstsc /v:<address> /f /multimon`. Where it differs from the design
+below:
+
+- **Switches, not an `.rdp` file.** Since the April 2026 update (CVE-2026-26151), Remote Desktop
+  Connection warns about every `.rdp` file that no trusted publisher signed, and turns off every
+  redirection the file asks for, the clipboard included, until the user turns each one back on.
+  Connections that don't start from a file are unaffected, so the launcher keeps `mstsc /v:`. The
+  properties that have no mstsc switch (`session bpp`, `networkautodetect`, `bandwidthautodetect`,
+  `connection type`, wallpaper and font smoothing) stay as the user's own Remote Desktop
+  Connection settings have them. Signed connection
+  files are in the hardening backlog. Until they exist, the session hosts must stay out of
+  Microsoft's high-security RDP file configuration, which blocks `mstsc /v:` too, and
+  `DEPLOYMENT.md` says so.
+- **Both on by default, and each can be turned off.** `-FullScreen Off` opens the desktop in a
+  window on one monitor, and `-MultiMonitor Off` keeps it full screen on one. The deployment sets
+  them from `avdLinuxDesktopFullScreen` and `avdLinuxDesktopMultiMonitor` and passes only `Off`,
+  so the default RemoteApp command line is unchanged, and scripts older than 2.0.0, which refuse
+  the new parameters, keep working with it.
+- The script refuses an address from the broker that isn't a host name or an IP address, before it
+  changes anything, because mstsc reads anything else on its command line as another switch or a
+  connection file.
+- **No H.264 on the Linux hosts.** What each distribution's xrdp offers:
+
+  | Distribution | xrdp | Graphics pipeline |
+  | --- | --- | --- |
+  | Ubuntu 24.04 | 0.9.24 | None: it arrived in 0.10 |
+  | RHEL 9, Rocky Linux 9, AlmaLinux 9 | 0.10.6.1 from EPEL | RFX. The package brings the `noopenh264` stub, which xrdp detects and doesn't use |
+  | RHEL 8 | 0.10.6.1 from EPEL | RFX. The package is built without openh264 |
+
+  Without a GPU, H.264 in xrdp was more sluggish and blurrier than RFX
+  (neutrinolabs/xrdp#3489), so the hosts keep RFX. xrdp's default `gfx.toml` lists H.264 first,
+  so a host where Cisco's openh264 replaced the stub would switch to H.264. It belongs with GPU
+  encoding on GPU hosts.
+
+**Open.** Through AVD, check full screen and two monitors, including whether a RemoteApp session
+gives the inner `mstsc` more than one monitor, and measure CPU on both hops with GNOME and with
+Xfce, which feeds 3.2 and 4.3. Both belong with the 3.8 `mstsc` checks.
+
+**Design.** The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
 - xrdp ≥ 0.10.2 supports **H.264** in the graphics pipeline. Check the version on each
   distribution (`xrdp --version`) and enable GFX/H.264 in `xrdp.ini` where available.
 - Have `Connect-LinuxBroker.ps1` write an `.rdp` file instead of `mstsc /v:`, to set
@@ -997,7 +1249,76 @@ The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
 
 ### 4.9 Scaling out the portal and API
 
-**Status: Planned**
+**Status: Done, except the checks in Azure Government** · they need a Government environment
+
+**Shipped.** The portal keeps its sessions in a Redis cache that every instance shares, the API
+reuses its database connections, and `appServicePlanCapacity` sets how many instances the App
+Service plan runs, 1 by default. Where it differs from the design below:
+
+- **A shared session store, with affinity only as the fallback.** `portalSessionStore` defaults to
+  `redis`. The deployment creates a cache with access keys off, reached only through a private
+  endpoint, gives the portal's managed identity access to it, integrates the portal with the app
+  subnet, and turns ARR affinity off for the portal. It turns affinity off for the API too. With
+  `filesystem`, and on an `AzureCustom` cloud, the portal keeps sessions on disk with affinity on.
+- **Redis differs by cloud.** The public cloud gets Azure Managed Redis `Balanced_B0`, with its
+  high availability on, because new customers can't create Azure Cache for Redis there since
+  1 April 2026. Azure Government gets Azure Cache for Redis, because Azure Managed Redis isn't
+  offered there; move it when it is, and before Azure Cache for Redis retires on 30 September 2028.
+  The Government default is `Standard_C1`, not `Standard_C0`, which shares a CPU core and which
+  Microsoft recommends only for dev/test. `portalRedisSku` picks another size, and
+  `portalRedisLocation` another region, for where the deployment's region doesn't offer the cache
+  or has no room for it. The private endpoint stays in the virtual network, so the portal still
+  reaches a cache in another region privately.
+- **Token resource in Azure Government.** The portal asks for tokens for `https://redis.azure.com`
+  by default. In Azure Government the deployment asks for Azure Cache for Redis's application ID,
+  `acca5fbb-b7e4-4009-81f1-37e38fd66d78`, instead, since Microsoft's documentation accepts both in
+  the public cloud and names no Government URI.
+- **The cookie and the lifetime.** The session cookie is now `Secure` and `SameSite=Lax` as well as
+  `HttpOnly`. A session ends 12 hours after the operator's last request, when the cache deletes it.
+  `SESSION_LIFETIME_HOURS` changes that, but `azd provision` replaces the portal's app settings, so
+  it has to be set again after each provision. Only the sign-in routes and `/api/ui` load the
+  session, so the page shell and `/health` keep working while the cache is down, and the portal
+  answers `503` with `Retry-After` instead of failing to load.
+- **A pool without Entra SQL authentication.** Each API worker process keeps the connections it has
+  finished with and reuses the newest first. It closes a connection idle for 120 seconds, rather
+  than 300, because App Service forgets an outbound connection after four minutes without traffic,
+  or open for 30 minutes. A connection is rolled back when it returns and closed if that fails. Its
+  next transaction begins
+  when it is handed out again, not when it returned: the SQL integration tests showed that SQL
+  Server stamps a change to a system-versioned table with its transaction's start time and refuses
+  one older than the row's current version (error 13535), which a transaction left open in the
+  pool would be. `DB_POOL_ENABLED` turns it off. Entra authentication and the mssql-python driver
+  stay in the hardening backlog.
+- **Capacity warnings.** Each instance's API can run 12 database requests at once, so `preprovision`
+  warns when the Basic database tier, at most 30, is too small for the capacity, and when sign-ins
+  on several instances would rely on affinity.
+- **The task function stays on the plan.** Its timers already run on one instance at a time,
+  through a lease in its storage account, and each run is a few calls to the API. A plan of its
+  own, or Flex Consumption, would add cost and a second virtual network integration for no gain.
+- The two stray `flask_session/` files are no longer tracked.
+
+**Validated** in the public cloud:
+
+- **No room in eastus2.** Azure refused every size of Azure Managed Redis there with
+  `InsufficientCapacity`, and left a failed cache that failed the deployment and can't be resized.
+  Nearby regions accepted `Balanced_B0`, so `portalRedisLocation` was added, and the validation's
+  cache is in eastus, behind a private endpoint in eastus2.
+- The cache came up with high availability, TLS 1.2, public access off and access keys off. The
+  portal's first request, about five minutes after the deployment gave its identity access, signed
+  in to it as the managed identity.
+- With the plan at two instances, 40 requests that carried one session cookie were answered by both
+  instances, and every one saw the same session. The cookie is `Secure`, `HttpOnly` and
+  `SameSite=Lax`, and lasts 12 hours.
+- With the portal pointed at a port the cache doesn't serve, `/api/ui` answered `503` with
+  `Retry-After: 30` in about six seconds, while the page shell and `/health` kept answering, and it
+  answered normally within 36 seconds of the port being put back.
+
+**Open.** In Azure Government, check the token resource and that the Azure Cache for Redis API
+versions are available. Sign in with a browser on one instance and carry on on another, with the
+capacity at 2; the validation shared one session between the instances through the portal's API,
+without a browser sign-in.
+
+**Design.**
 
 - The BFF uses filesystem sessions (`front_end/app.py`), which rely on ARR affinity when
   scaled out. Move to a shared session store, or keep affinity and document it.
@@ -1007,6 +1328,46 @@ The user's session is RDP inside RDP: AVD outer, `mstsc` to xrdp inner.
 - Split the task function onto its own plan, or use a Flex Consumption plan, if its timers
   compete with the API.
 
+### 4.10 GPU-accelerated OpenGL
+
+**Status: Planned** · depends on 4.4 (host pools); benefits from 4.2 (golden image) and 4.3
+
+**Why.** The hosts have no GPU, so OpenGL in an xrdp session renders in software, with Mesa's
+llvmpipe, on the same CPU as everything else on the host. That serves office work and browsers,
+but 3D visualization, CAD and other OpenGL applications draw slowly, and on a multi-session host
+(4.3) one of them slows every session.
+
+**Design.**
+
+- **A pool of GPU hosts.** Host pools (4.4) give GPU VMs their own pool, image and RemoteApp, so
+  only the users who need a GPU get one. The candidates are the sizes Microsoft supports with
+  NVIDIA's GRID drivers for virtual workstations: NVadsA10 v5, which offers from a sixth of an
+  NVIDIA A10 up to whole GPUs, and NCasT4_v3, with NVIDIA T4s. NVv3 retires on 30 September 2026.
+  Check which of them each target region offers, Azure Government's included, and the
+  subscription's GPU quota, before choosing.
+- **Drivers.** Microsoft redistributes the GRID drivers for these sizes with the vGPU license
+  included, so no NVIDIA license server is needed. They support Ubuntu 20.04 to 24.04, RHEL 8.10
+  and RHEL 9.4, 9.6 and 9.7, but not Rocky Linux or AlmaLinux. Microsoft's installation steps need
+  Secure Boot and vTPM off, while the deployment gives Linux hosts Trusted Launch with both on, so
+  a GPU pool needs its own security profile. The driver belongs in the pool's image (4.2). It's
+  built for the running kernel, so rolling maintenance (2.9) must check `nvidia-smi` after a
+  kernel update.
+- **VirtualGL in the session.** xrdp's X server has no GPU, so OpenGL applications run under
+  VirtualGL's `vglrun`, which renders them on the GPU and copies each finished frame into the
+  session. Its EGL back end reaches the GPU without a second X server, but it emulates only part of
+  GLX; an application that needs the rest needs the GLX back end and an X server on the GPU. The
+  session launcher can set VirtualGL up, and a pool setting can name the applications to wrap, so
+  users start them from the menu as usual.
+- **Encoding stays on the CPU at first.** The frames still reach the user as RFX, encoded on the
+  host's CPU (4.8). H.264 encoded on the GPU, through xrdp's graphics pipeline, is later work for
+  once the pool exists.
+- **Measure** frame rate, GPU and CPU use for the applications the pool is for, with and without
+  `vglrun`, on each candidate size, and how many sessions one GPU serves.
+
+**Open questions.** Which sizes to offer, and in which regions. Whether Secure Boot can stay on.
+How many sessions share one GPU partition. How Wayland-only distributions (3.5) change the
+approach.
+
 ---
 
 ## Security hardening backlog
@@ -1015,16 +1376,18 @@ A separate track, prioritized independently of the phases.
 
 | Item | Why | Direction |
 | --- | --- | --- |
-| API connects to SQL as the **server admin** | `DB_USERNAME` is the SQL admin login (`deploy/bicep/main.resources.bicep`) | A contained database user with EXECUTE on the broker procedures only, or Entra managed-identity authentication (pyodbc with an access token) |
+| API connects to SQL as the **server admin** | `DB_USERNAME` is the SQL admin login (`deploy/bicep/main.resources.bicep`) | A contained database user with EXECUTE on the broker procedures only, or Entra managed-identity authentication, with the mssql-python driver or pyodbc and an access token |
 | `avdadmin` sudo allowlist is root-equivalent | `usermod`, `userdel`, `groupadd` and `chpasswd` with arbitrary arguments (`Configure-*-Host.sh`) | Once every host runs `create-user.sh --password-stdin` (Phase 1), drop `chpasswd`, `groupadd` and `usermod`. Move `userdel` into `manage-lease.sh`. The allowlist then holds only validated scripts. |
 | SSH host keys not verified | `StrictHostKeyChecking=no` in `run_remote_command` | Record host keys at provisioning (Key Vault or SQL) and pin them, or use an SSH CA |
 | RDP server identity not verified | `AuthenticationLevelOverride=0` in `Connect-LinuxBroker.ps1`; xrdp self-signed certificates | Issue xrdp certificates from Key Vault or enterprise PKI, and restore server authentication |
+| Launch without a signed connection file | `Connect-LinuxBroker.ps1` starts `mstsc /v:` (4.8), so the AVD session hosts can't take Microsoft's high-security RDP file configuration, which allows only files signed by a trusted publisher, and the connection properties that have no `mstsc` switch stay at their defaults | Have the API sign each checkout's `.rdp` file with a Key Vault certificate that the session hosts trust through the trusted-publisher thumbprint policy. Signing on the session host would expose the key to its users. Pair it with the xrdp certificates above. |
+| Every user of a session host can change the launch script | `Configure-AVD-Host.ps1` creates `C:\Temp` with the permissions it inherits from `C:\`, which give Authenticated Users Modify, as the Phase 4 validation found, and `Update-AvdHostBrokerScript.ps1` writes `Connect-LinuxBroker.ps1` there too, so one user of a pooled session host can change the script that the others' **Linux Desktop** runs | Install the script in a folder that only administrators can write, such as `C:\Program Files\LinuxBroker`, from both scripts, and move the RemoteApp's command line there once every session host has it |
 | Username collisions | `re.sub(r'[^a-zA-Z0-9_]', '', username)` maps `john.smith` and `johnsmith` to the same Linux account and NFS home | Derive usernames from a stable identifier (UPN plus collision check, or object ID) and keep the mapping in `VmUsers` |
 | Shared SSH private key for the whole fleet | One Key Vault secret (`KEY_NAME`) | Per-host keys or short-lived SSH certificates |
 | NFS `AUTH_SYS` trust | `sec=sys`, `NoRootSquash` (`nfs-storage.bicep`, `create-user.sh`); root on any host in the subnet can read every home | Restrict private endpoint access to the Linux host subnet with an NSG. Consider Azure NetApp Files with Kerberos (krb5p) for strong isolation. |
 | Hosts download scripts from `main` at provisioning | `scriptSourceRoot` defaults to the `main` branch | Pin to a release tag or commit and verify checksums, or bake scripts into the image (4.2) |
 | Checkout abuse | The AvdHost role can check out any username | Rate-limit per AVD host. Optionally verify that the username belongs to the user signed in to that AVD session. |
-| Committed test artifacts | `flask_session/` files are tracked, although they're in `.gitignore` | `git rm` them |
+| Portal sign-in has no `state`, nonce or PKCE | `/login` builds the sign-in URL with `get_authorization_request_url` alone, and `/getAToken` redeems any `code` it receives (`front_end/route_authentication.py`), so another site can finish a sign-in in an operator's browser with an authorization code of its own (login CSRF) | Start the sign-in with MSAL's `initiate_auth_code_flow` and keep the flow in the session, which every instance now shares (4.9), then redeem it with `acquire_token_by_auth_code_flow`, which checks `state` and the nonce and sends the PKCE verifier |
 
 ---
 
@@ -1064,6 +1427,19 @@ A separate track, prioritized independently of the phases.
 | 2026-09 | Ubuntu desktop hosts keep systemd-networkd as the network renderer, at the cost of GNOME's network indicator, so a package install can't take a host off the network. |
 | 2026-09 | Idle time never counts from before the user's current connection, so a resumed session isn't disconnected for the time it spent disconnected. |
 | 2026-09 | Ubuntu 26.04 and RHEL 10 wait for 3.5 or 3.8. Rocky Linux 9 is offered through its Marketplace image, and `alma-9` is recommended where Marketplace purchases are blocked. |
+| 2026-09 | Phase 4 ships in stages. The first PR covers the foundations: 4.1 start on demand, 4.5 the AVD scaling plan, 4.6 NFS home performance, 4.7 host log shipping, 4.8 the double RDP hop and 4.9 portal and API scale-out, with one host agent rollout (1.3.0). 4.3 and 4.4 follow in one PR, then 4.2. |
+| 2026-09 | Start on demand is **on by default**. It starts at most one host for each waiting user, and at most `MaxPendingStarts` (2 by default) at once, never past `MaxVMs`. `MinVMs` may be 0 only while it is on, and if it is turned off later, scaling reads 0 as 1. This replaces the `MinVMs ≥ 1` rule. |
+| 2026-09 | While a user waits, each checkout request probes the starting hosts on port 22 and records those that answer as reachable, rather than waiting for the task's probe. Readiness still comes from a TCP probe, never from the heartbeat. |
+| 2026-09 | The AVD script reports its version with each checkout, kept with the checkout event, and the **Start on demand** card names the session hosts whose latest checkout reported none, because their script can't wait. That's the check before setting a minimum of 0. |
+| 2026-09 | The AVD autoscale role is assigned on the **subscription**, because autoscale needs it there, not on the host resource group. `preprovision` finds the Azure Virtual Desktop service principal by app ID only, assigns nothing when the role is already held, and prints the command for an Owner instead of failing when it can't assign it. |
+| 2026-09 | A script installs the Azure Monitor agent, not the deployment, because Azure refuses extension changes on a stopped VM and scaling, start on demand and autoscale all stop VMs. For the same reason, a deployment leaves out the extensions of the hosts that aren't running. |
+| 2026-09 | The home directory share mounts on `/nfs_profiles` while `create-user.sh` creates a home, and users' caches stay on the host's disk in `/var/cache/linuxbroker/users/<user>`, whose parent only root can write, rather than in world-writable `/var/tmp`. |
+| 2026-09 | The launcher keeps `mstsc /v:` and adds `/f` and `/multimon`, both on by default, rather than writing an `.rdp` file, because since the April 2026 update every unsigned `.rdp` file opens with its redirections off. Signed connection files are in the hardening backlog. The Linux hosts keep RFX, and H.264 waits for GPU hosts (4.10). |
+| 2026-09 | The portal's sessions move to **Redis**, with access keys off and the portal's managed identity: Azure Managed Redis in the public cloud, where new customers can't create Azure Cache for Redis since April 2026, and Azure Cache for Redis `Standard_C1` in Azure Government, which doesn't offer Azure Managed Redis. `portalSessionStore=filesystem` keeps sessions on disk, with ARR affinity. |
+| 2026-09 | The API pools its `pymssql` connections in each worker process, and the task function stays on the shared App Service plan. Entra SQL authentication and the mssql-python driver stay in the hardening backlog. |
+| 2026-09 | GPU-accelerated OpenGL (4.10) goes to a pool of GPU hosts once host pools (4.4) exist, rather than to every host. |
+| 2026-09 | The portal's session cache may be in another region than the rest of the deployment (`portalRedisLocation`), behind a private endpoint in the deployment's virtual network, because Azure had no room for Azure Managed Redis in eastus2 during the Phase 4 validation. The default stays the deployment's region. |
+| 2026-09 | A pool that start on demand wakes from zero scales up like any full pool: its first user fills it, so the next scaling run starts `ScaleUpIncrement` more hosts, ready for the users after them. This is documented rather than special-cased. |
 
 ## Glossary
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { ScalingPreviewCard } from '../../components/scaling/ScalingPreviewCard';
+import { StartOnDemandCard } from '../../components/scaling/StartOnDemandCard';
 import { WeekTimeline } from '../../components/scaling/WeekTimeline';
 import { Badge } from '../../components/ui/Badge';
 import { Button, ButtonLink } from '../../components/ui/Button';
@@ -239,6 +240,13 @@ export function ScalingPolicy() {
                 use, down by {phase.ScaleDownIncrement} at {phase.ScaleDownRatio}%. {stopModeLabel(phase.StopMode)} when
                 scaling down.
               </p>
+              {phase.MinVMs === 0 ? (
+                <p className="mt-2 mb-0 text-sm">
+                  {policy.StartOnDemandEnabled
+                    ? 'With a minimum of 0, idle hosts stop. The next user waits a minute or two while start on demand starts one.'
+                    : 'A minimum of 0 needs start on demand, which is off, so the scaler keeps at least 1 host on.'}
+                </p>
+              ) : null}
               {policy.NextChange ? (
                 <p className="mt-3 mb-0 text-sm">
                   <span className="font-medium">{policy.NextChange.PhaseName}</span> takes over on{' '}
@@ -282,6 +290,8 @@ export function ScalingPolicy() {
         </div>
         <WeekTimeline windows={windows} nowMinute={weekMinuteOf(policy.LocalTime)} timeZone={policy.TimeZone} />
       </GlassCard>
+
+      <StartOnDemandCard policy={policy} admin={can.admin} />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <GlassCard className="p-5">

@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "9307409657661009644"
+      "templateHash": "18348097897885014198"
     }
   },
   "parameters": {
@@ -257,6 +257,40 @@
         "description": "App Service plan SKU name."
       }
     },
+    "appServicePlanCapacity": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "maxValue": 30,
+      "metadata": {
+        "description": "Instances of the App Service plan. The portal, the API and the task function run on every instance, so each instance adds API connections to the database: check the database tier allows them."
+      }
+    },
+    "portalSessionStore": {
+      "type": "string",
+      "defaultValue": "redis",
+      "allowedValues": [
+        "redis",
+        "filesystem"
+      ],
+      "metadata": {
+        "description": "Where the portal keeps sign-in sessions. redis keeps them in a cache every portal instance shares, reached over a private endpoint: Azure Managed Redis in the public cloud, Azure Cache for Redis in Azure Government. filesystem keeps them on each instance, which works on one instance, or on more with ARR affinity. AzureCustom always uses filesystem."
+      }
+    },
+    "portalRedisSku": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Size of the portal session cache. Leave empty for the default: Balanced_B0 for Azure Managed Redis, Standard_C1 for Azure Cache for Redis."
+      }
+    },
+    "portalRedisLocation": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Region of the portal session cache, such as eastus. Leave empty, the default, for the deployment's region. Set it where that region does not offer the cache or has no capacity for it: the portal reaches a cache in another region through the same private endpoint in the virtual network."
+      }
+    },
     "deployLinuxHosts": {
       "type": "bool",
       "defaultValue": false,
@@ -364,6 +398,142 @@
         "description": "Maximum number of sessions per AVD session host."
       }
     },
+    "avdLinuxDesktopFullScreen": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Opens the Linux desktop full screen. False opens it in a window on one monitor. Turn it off only once every AVD session host runs Connect-LinuxBroker.ps1 2.0.0 or later (deploy/Update-AvdHostBrokerScript.ps1): older scripts refuse the argument and the Linux Desktop app fails to open."
+      }
+    },
+    "avdLinuxDesktopMultiMonitor": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Spreads a full-screen Linux desktop across every monitor. False keeps it on one monitor. Turn it off only once every AVD session host runs Connect-LinuxBroker.ps1 2.0.0 or later."
+      }
+    },
+    "avdScalingPlanEnabled": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Starts and stops the AVD session hosts on a schedule through an Azure Virtual Desktop scaling plan. The plan is always deployed with the session hosts; false leaves it assigned to no host pool, so the hosts stay as they are and you can assign a plan of your own instead. Azure refuses to assign the plan unless the Azure Virtual Desktop service principal holds Desktop Virtualization Power On Off Contributor on the subscription."
+      }
+    },
+    "avdStartVmOnConnect": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Starts a deallocated AVD session host when a user opens the Linux Desktop app and no running session host can take the session. Needs the same role as the scaling plan."
+      }
+    },
+    "avdScalingPlanTimeZone": {
+      "type": "string",
+      "defaultValue": "UTC",
+      "metadata": {
+        "description": "Windows time zone ID the scaling plan's times are in, such as UTC or Eastern Standard Time. It is separate from the broker's own scaling time zone, which the portal sets."
+      }
+    },
+    "avdScalingPlanRampUpStart": {
+      "type": "string",
+      "defaultValue": "07:00",
+      "metadata": {
+        "description": "Start of ramp-up, as HH:mm in avdScalingPlanTimeZone. The weekday and weekend schedules use the same times."
+      }
+    },
+    "avdScalingPlanPeakStart": {
+      "type": "string",
+      "defaultValue": "09:00",
+      "metadata": {
+        "description": "Start of peak hours, as HH:mm. Must come after ramp-up."
+      }
+    },
+    "avdScalingPlanRampDownStart": {
+      "type": "string",
+      "defaultValue": "18:00",
+      "metadata": {
+        "description": "Start of ramp-down, as HH:mm. Must come after peak."
+      }
+    },
+    "avdScalingPlanOffPeakStart": {
+      "type": "string",
+      "defaultValue": "20:00",
+      "metadata": {
+        "description": "Start of off-peak hours, as HH:mm. Must come after ramp-down."
+      }
+    },
+    "avdScalingPlanRampUpMinimumHostsPct": {
+      "type": "int",
+      "defaultValue": 20,
+      "minValue": 0,
+      "maxValue": 100,
+      "metadata": {
+        "description": "Share of the AVD session hosts kept running from ramp-up until ramp-down on weekdays, rounded up to whole hosts."
+      }
+    },
+    "avdScalingPlanRampUpCapacityThresholdPct": {
+      "type": "int",
+      "defaultValue": 60,
+      "minValue": 1,
+      "maxValue": 100,
+      "metadata": {
+        "description": "Share of the running session hosts' capacity in use that makes autoscale start another one during ramp-up and peak hours."
+      }
+    },
+    "avdScalingPlanRampDownMinimumHostsPct": {
+      "type": "int",
+      "defaultValue": 10,
+      "minValue": 0,
+      "maxValue": 100,
+      "metadata": {
+        "description": "Share of the AVD session hosts kept running from ramp-down until the next ramp-up on weekdays, rounded up to whole hosts."
+      }
+    },
+    "avdScalingPlanRampDownCapacityThresholdPct": {
+      "type": "int",
+      "defaultValue": 90,
+      "minValue": 1,
+      "maxValue": 100,
+      "metadata": {
+        "description": "Share of the running session hosts' capacity in use that makes autoscale start another one during ramp-down and off-peak hours."
+      }
+    },
+    "avdScalingPlanWeekendMinimumHostsPct": {
+      "type": "int",
+      "defaultValue": 0,
+      "minValue": 0,
+      "maxValue": 100,
+      "metadata": {
+        "description": "Share of the AVD session hosts kept running on Saturday and Sunday. 0 lets them all stop, and Start VM on Connect starts one for the first user."
+      }
+    },
+    "avdScalingExclusions": {
+      "type": "object",
+      "defaultValue": {},
+      "metadata": {
+        "description": "Generated by the preprovision hook: lowercase AVD session host names mapped to the value of the excludeFromScaling tag each carries, so the deployment writes the tag back."
+      }
+    },
+    "hostNamesNotRunning": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Generated by the preprovision hook: the Linux hosts and AVD session hosts that are not running, whose VM extensions this deployment leaves out because Azure refuses to change an extension on a VM that is not running."
+      }
+    },
+    "avdServicePrincipalObjectId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Object ID of the Azure Virtual Desktop service principal (app ID 9cdead84-a844-4324-93f2-b2e6bb768d07) in this tenant. The preprovision hook finds it. Without it, the role below is not assigned."
+      }
+    },
+    "assignAvdAutoscaleRole": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Assigns Desktop Virtualization Power On Off Contributor on the subscription to the Azure Virtual Desktop service principal, for the scaling plan and Start VM on Connect. The preprovision hook passes false when the role is already assigned, or when the signed-in account cannot assign roles on the subscription."
+      }
+    },
     "avdVmNamePrefix": {
       "type": "string",
       "defaultValue": "avdhost",
@@ -388,10 +558,50 @@
       "metadata": {
         "description": "AVD session host VM size."
       }
+    },
+    "deployHostMonitoring": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the host monitoring: log collection from the Linux hosts and AVD session hosts, the fleet workbook, and the alerts. Set to false in a cloud that lacks data collection rules, workbooks or log search alerts. Enable-HostMonitoring.ps1 installs the Azure Monitor agent after provisioning."
+      }
+    },
+    "alertEmailAddresses": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Email addresses that receive the alerts, separated by commas or semicolons. For a Teams channel, use the channel's email address. Leave empty to deploy the alerts without notifications."
+      }
+    },
+    "alertCheckoutRefusalThreshold": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "metadata": {
+        "description": "Refused checkouts (HTTP 409) in 15 minutes that raise an alert."
+      }
+    },
+    "alertApiErrorThreshold": {
+      "type": "int",
+      "defaultValue": 5,
+      "minValue": 1,
+      "metadata": {
+        "description": "API responses with a 5xx status in 15 minutes that raise an alert."
+      }
+    },
+    "alertNfsLatencyThresholdMs": {
+      "type": "int",
+      "defaultValue": 50,
+      "minValue": 1,
+      "metadata": {
+        "description": "Average end-to-end latency of the provisioned NFS share over 15 minutes, in milliseconds, that raises an alert."
+      }
     }
   },
   "variables": {
-    "effectiveResourceGroupName": "[if(empty(parameters('resourceGroupName')), format('rg-{0}-{1}', parameters('appName'), parameters('environmentName')), parameters('resourceGroupName'))]"
+    "effectiveResourceGroupName": "[if(empty(parameters('resourceGroupName')), format('rg-{0}-{1}', parameters('appName'), parameters('environmentName')), parameters('resourceGroupName'))]",
+    "deployAvdSessionHosts": "[and(and(parameters('deployAvdHosts'), greater(parameters('avdSessionHostCount'), 0)), not(empty(parameters('avdHostPoolName'))))]",
+    "avdPowerOnOffContributorRoleGuid": "40c5ff49-9181-41f8-ae61-143b0e78555e"
   },
   "resources": [
     {
@@ -400,6 +610,18 @@
       "name": "[variables('effectiveResourceGroupName')]",
       "location": "[parameters('location')]",
       "tags": "[parameters('tags')]"
+    },
+    {
+      "condition": "[and(and(and(variables('deployAvdSessionHosts'), or(parameters('avdScalingPlanEnabled'), parameters('avdStartVmOnConnect'))), parameters('assignAvdAutoscaleRole')), not(empty(parameters('avdServicePrincipalObjectId'))))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(subscription().id, parameters('avdServicePrincipalObjectId'), variables('avdPowerOnOffContributorRoleGuid'))]",
+      "properties": {
+        "principalId": "[parameters('avdServicePrincipalObjectId')]",
+        "principalType": "ServicePrincipal",
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('avdPowerOnOffContributorRoleGuid'))]",
+        "description": "Lets Azure Virtual Desktop start and stop the Linux Broker AVD session hosts, for the scaling plan and Start VM on Connect."
+      }
     },
     {
       "type": "Microsoft.Resources/deployments",
@@ -514,6 +736,18 @@
           "appServicePlanSku": {
             "value": "[parameters('appServicePlanSku')]"
           },
+          "appServicePlanCapacity": {
+            "value": "[parameters('appServicePlanCapacity')]"
+          },
+          "portalSessionStore": {
+            "value": "[parameters('portalSessionStore')]"
+          },
+          "portalRedisSku": {
+            "value": "[parameters('portalRedisSku')]"
+          },
+          "portalRedisLocation": {
+            "value": "[parameters('portalRedisLocation')]"
+          },
           "deployLinuxHosts": {
             "value": "[parameters('deployLinuxHosts')]"
           },
@@ -553,11 +787,41 @@
           "avdMaxSessionLimit": {
             "value": "[parameters('avdMaxSessionLimit')]"
           },
+          "avdLinuxDesktopFullScreen": {
+            "value": "[parameters('avdLinuxDesktopFullScreen')]"
+          },
+          "avdLinuxDesktopMultiMonitor": {
+            "value": "[parameters('avdLinuxDesktopMultiMonitor')]"
+          },
+          "avdStartVmOnConnect": {
+            "value": "[parameters('avdStartVmOnConnect')]"
+          },
+          "avdScalingExclusions": {
+            "value": "[parameters('avdScalingExclusions')]"
+          },
+          "hostNamesNotRunning": {
+            "value": "[parameters('hostNamesNotRunning')]"
+          },
           "avdVmNamePrefix": {
             "value": "[parameters('avdVmNamePrefix')]"
           },
           "avdVmSize": {
             "value": "[parameters('avdVmSize')]"
+          },
+          "deployHostMonitoring": {
+            "value": "[parameters('deployHostMonitoring')]"
+          },
+          "alertEmailAddresses": {
+            "value": "[parameters('alertEmailAddresses')]"
+          },
+          "alertCheckoutRefusalThreshold": {
+            "value": "[parameters('alertCheckoutRefusalThreshold')]"
+          },
+          "alertApiErrorThreshold": {
+            "value": "[parameters('alertApiErrorThreshold')]"
+          },
+          "alertNfsLatencyThresholdMs": {
+            "value": "[parameters('alertNfsLatencyThresholdMs')]"
           }
         },
         "template": {
@@ -567,7 +831,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "7015886803379737196"
+              "templateHash": "11506867499235198244"
             }
           },
           "parameters": {
@@ -738,6 +1002,40 @@
               "type": "string",
               "defaultValue": "P2mv3"
             },
+            "appServicePlanCapacity": {
+              "type": "int",
+              "defaultValue": 1,
+              "minValue": 1,
+              "maxValue": 30,
+              "metadata": {
+                "description": "Instances of the App Service plan. The portal, the API and the task function run on every instance."
+              }
+            },
+            "portalSessionStore": {
+              "type": "string",
+              "defaultValue": "redis",
+              "allowedValues": [
+                "redis",
+                "filesystem"
+              ],
+              "metadata": {
+                "description": "Where the portal keeps sign-in sessions: redis, a cache every portal instance shares, or filesystem, each instance's own disk. AzureCustom always uses filesystem."
+              }
+            },
+            "portalRedisSku": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Size of the portal session cache. Leave empty for the default."
+              }
+            },
+            "portalRedisLocation": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Region of the portal session cache. Leave empty for the deployment's region."
+              }
+            },
             "deployLinuxHosts": {
               "type": "bool",
               "defaultValue": false
@@ -812,6 +1110,41 @@
               "type": "int",
               "defaultValue": 5
             },
+            "avdLinuxDesktopFullScreen": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Opens the Linux desktop full screen."
+              }
+            },
+            "avdLinuxDesktopMultiMonitor": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Spreads a full-screen Linux desktop across every monitor."
+              }
+            },
+            "avdStartVmOnConnect": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Starts a deallocated AVD session host when a user connects and no running one can take the session."
+              }
+            },
+            "avdScalingExclusions": {
+              "type": "object",
+              "defaultValue": {},
+              "metadata": {
+                "description": "Lowercase AVD session host names mapped to their excludeFromScaling tag values, which the deployment writes back."
+              }
+            },
+            "hostNamesNotRunning": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Linux hosts and AVD session hosts whose VM extensions are left out because the VMs are not running."
+              }
+            },
             "avdVmNamePrefix": {
               "type": "string",
               "defaultValue": "avdhost"
@@ -830,6 +1163,35 @@
                 "Standard_F16s_v2",
                 "Standard_D16as_v4"
               ]
+            },
+            "deployHostMonitoring": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Deploy host log collection, the fleet workbook and the alerts."
+              }
+            },
+            "alertEmailAddresses": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Email addresses that receive the alerts, separated by commas or semicolons."
+              }
+            },
+            "alertCheckoutRefusalThreshold": {
+              "type": "int",
+              "defaultValue": 1,
+              "minValue": 1
+            },
+            "alertApiErrorThreshold": {
+              "type": "int",
+              "defaultValue": 5,
+              "minValue": 1
+            },
+            "alertNfsLatencyThresholdMs": {
+              "type": "int",
+              "defaultValue": 50,
+              "minValue": 1
             }
           },
           "variables": {
@@ -868,24 +1230,35 @@
             "nfsStorageAccountName": "[take(format('nfs{0}{1}', variables('sanitizedApp'), variables('suffix')), 24)]",
             "nfsShareName": "home",
             "effectiveNfsShare": "[if(variables('provisionNfsShare'), format('{0}.file.{1}:/{2}/{3}', variables('nfsStorageAccountName'), environment().suffixes.storage, variables('nfsStorageAccountName'), variables('nfsShareName')), parameters('nfsShare'))]",
+            "portalRedisName": "[format('redis-{0}-{1}', take(format('{0}{1}', variables('sanitizedApp'), variables('sanitizedEnv')), 40), variables('suffix'))]",
             "cloudProfiles": {
               "AzurePublic": {
                 "graphEndpoint": "https://graph.microsoft.com",
                 "stsIssuerHost": "https://sts.windows.net",
-                "appServiceDomain": "azurewebsites.net"
+                "appServiceDomain": "azurewebsites.net",
+                "portalRedisKind": "managed",
+                "portalRedisPrivateDnsZoneName": "privatelink.redis.azure.net",
+                "portalRedisEntraResource": ""
               },
               "AzureUSGovernment": {
                 "graphEndpoint": "https://graph.microsoft.us",
                 "stsIssuerHost": "https://sts.windows.net",
-                "appServiceDomain": "azurewebsites.us"
+                "appServiceDomain": "azurewebsites.us",
+                "portalRedisKind": "cache",
+                "portalRedisPrivateDnsZoneName": "privatelink.redis.cache.usgovcloudapi.net",
+                "portalRedisEntraResource": "acca5fbb-b7e4-4009-81f1-37e38fd66d78"
               },
               "AzureCustom": {
                 "graphEndpoint": "",
                 "stsIssuerHost": "",
-                "appServiceDomain": ""
+                "appServiceDomain": "",
+                "portalRedisKind": "",
+                "portalRedisPrivateDnsZoneName": "",
+                "portalRedisEntraResource": ""
               }
             },
             "cloudProfile": "[variables('cloudProfiles')[parameters('azureCloudName')]]",
+            "usePortalRedis": "[and(equals(parameters('portalSessionStore'), 'redis'), not(empty(variables('cloudProfile').portalRedisKind)))]",
             "resolvedAuthorityHost": "[if(empty(parameters('azureAuthorityHost')), environment().authentication.loginEndpoint, parameters('azureAuthorityHost'))]",
             "resolvedGraphEndpoint": "[if(empty(parameters('graphEndpoint')), variables('cloudProfile').graphEndpoint, parameters('graphEndpoint'))]",
             "resolvedStsIssuerHost": "[if(empty(parameters('stsIssuerHost')), variables('cloudProfile').stsIssuerHost, parameters('stsIssuerHost'))]",
@@ -1551,7 +1924,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "10067415946987550221"
+                      "templateHash": "5500961998070303674"
                     }
                   },
                   "parameters": {
@@ -1616,10 +1989,789 @@
                     "logAnalyticsWorkspaceId": {
                       "type": "string",
                       "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                    },
+                    "logAnalyticsWorkspaceName": {
+                      "type": "string",
+                      "value": "[parameters('logAnalyticsWorkspaceName')]"
                     }
                   }
                 }
               }
+            },
+            {
+              "condition": "[parameters('deployHostMonitoring')]",
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
+              "name": "hostMonitoring",
+              "properties": {
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "location": {
+                    "value": "[parameters('location')]"
+                  },
+                  "tags": {
+                    "value": "[parameters('tags')]"
+                  },
+                  "namePrefix": {
+                    "value": "[format('{0}-{1}', parameters('appName'), parameters('environmentName'))]"
+                  },
+                  "logAnalyticsWorkspaceName": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2025-04-01').outputs.logAnalyticsWorkspaceName.value]"
+                  },
+                  "apiAppName": {
+                    "value": "[variables('apiAppName')]"
+                  },
+                  "nfsStorageAccountName": "[if(variables('provisionNfsShare'), createObject('value', variables('nfsStorageAccountName')), createObject('value', ''))]",
+                  "alertEmailAddresses": {
+                    "value": "[parameters('alertEmailAddresses')]"
+                  },
+                  "alertCheckoutRefusalThreshold": {
+                    "value": "[parameters('alertCheckoutRefusalThreshold')]"
+                  },
+                  "alertApiErrorThreshold": {
+                    "value": "[parameters('alertApiErrorThreshold')]"
+                  },
+                  "alertNfsLatencyThresholdMs": {
+                    "value": "[parameters('alertNfsLatencyThresholdMs')]"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "4193567527631524882"
+                    }
+                  },
+                  "parameters": {
+                    "location": {
+                      "type": "string",
+                      "defaultValue": "[resourceGroup().location]",
+                      "metadata": {
+                        "description": "Location of the data collection rules, the workbook and the log alerts."
+                      }
+                    },
+                    "tags": {
+                      "type": "object",
+                      "defaultValue": {}
+                    },
+                    "namePrefix": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Prefix of the resource names, <appName>-<environmentName>."
+                      }
+                    },
+                    "logAnalyticsWorkspaceName": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Log Analytics workspace that Application Insights writes to. The host logs go there too."
+                      }
+                    },
+                    "apiAppName": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Name of the broker API web app, which is the cloud role name of its telemetry."
+                      }
+                    },
+                    "nfsStorageAccountName": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Storage account of the NFS share the deployment provisions, or empty when it provisions none."
+                      }
+                    },
+                    "alertEmailAddresses": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Email addresses that receive the alerts, separated by commas or semicolons. Leave empty to deploy the alerts without notifications."
+                      }
+                    },
+                    "alertCheckoutRefusalThreshold": {
+                      "type": "int",
+                      "defaultValue": 1,
+                      "minValue": 1,
+                      "metadata": {
+                        "description": "Refused checkouts (HTTP 409) in 15 minutes that raise an alert."
+                      }
+                    },
+                    "alertApiErrorThreshold": {
+                      "type": "int",
+                      "defaultValue": 5,
+                      "minValue": 1,
+                      "metadata": {
+                        "description": "API responses with a 5xx status in 15 minutes that raise an alert."
+                      }
+                    },
+                    "alertNfsLatencyThresholdMs": {
+                      "type": "int",
+                      "defaultValue": 50,
+                      "minValue": 1,
+                      "metadata": {
+                        "description": "Average end-to-end latency of the NFS share over 15 minutes, in milliseconds, that raises an alert."
+                      }
+                    }
+                  },
+                  "variables": {
+                    "hostLogTableName": "LinuxBrokerHost_CL",
+                    "hostLogStreamName": "[format('Custom-{0}', variables('hostLogTableName'))]",
+                    "linuxHostLogFiles": [
+                      "/var/log/release-session.log",
+                      "/var/log/release-session-watcher.log",
+                      "/var/log/linuxbroker-host-settings.log",
+                      "/var/log/createuser.log",
+                      "/var/log/linuxbroker-session-control.log",
+                      "/var/log/linuxbroker-patch.log",
+                      "/var/log/xrdp.log",
+                      "/var/log/xrdp-sesman.log"
+                    ],
+                    "alertEmailList": "[filter(map(split(replace(parameters('alertEmailAddresses'), ';', ','), ','), lambda('address', trim(lambdaVariables('address')))), lambda('address', not(empty(lambdaVariables('address')))))]",
+                    "alertActionGroupIds": "[if(empty(variables('alertEmailList')), createArray(), createArray(resourceId('Microsoft.Insights/actionGroups', format('ag-{0}', parameters('namePrefix')))))]",
+                    "monitorNfsShare": "[not(empty(parameters('nfsStorageAccountName')))]",
+                    "nfsFileServiceId": "[resourceId('Microsoft.Storage/storageAccounts/fileServices', if(variables('monitorNfsShare'), parameters('nfsStorageAccountName'), 'none'), 'default')]",
+                    "fleetSnapshots": [
+                      "AppTraces",
+                      "[format('| where AppRoleName == \"{0}\" and Message == \"fleet snapshot\"', parameters('apiAppName'))]"
+                    ],
+                    "apiRequests": [
+                      "AppRequests",
+                      "[format('| where AppRoleName == \"{0}\"', parameters('apiAppName'))]"
+                    ],
+                    "requestPath": "| extend Path = coalesce(tostring(parse_url(Url).Path), tostring(split(Name, \" \")[-1]))",
+                    "workbookBin": "bin(TimeGenerated, max_of(5m, {TimeRange:grain}))",
+                    "hostLogLevel": "| extend Level = case(RawData has_cs \"ERROR\", \"Error\", RawData has_cs \"WARNING\" or RawData has_cs \"WARN\", \"Warning\", RawData has_any (\"failed\", \"cannot\", \"unable\") or RawData has \"could not\", \"Error\", \"\")",
+                    "latestSnapshotQuery": "[join(concat(variables('fleetSnapshots'), createArray('| top 1 by TimeGenerated desc', '| project TimeGenerated, Ready = toint(Properties.ReadyHosts), InUse = toint(Properties.InUse), Waiting = toint(Properties.Waiting), Booting = toint(Properties.Booting), PoweredOn = toint(Properties.PoweredOn), Total = toint(Properties.TotalHosts), MinVMs = toint(Properties.EffectiveMinVMs), MaxVMs = toint(Properties.MaxVMs), StaleHeartbeats = toint(Properties.StaleHeartbeats), NfsUnreachable = toint(Properties.NfsUnreachable), XrdpInactive = toint(Properties.XrdpInactive), Draining = toint(Properties.Draining), Maintenance = toint(Properties.Maintenance), StartOnDemand = iff(toint(Properties.StartOnDemandEnabled) == 1, \"On\", \"Off\")')), '\n')]",
+                    "fleetTrendQuery": "[join(concat(variables('fleetSnapshots'), createArray(format('| summarize Ready = min(toint(Properties.ReadyHosts)), InUse = max(toint(Properties.InUse)), Waiting = max(toint(Properties.Waiting)), Booting = max(toint(Properties.Booting)), PoweredOn = max(toint(Properties.PoweredOn)) by {0}', variables('workbookBin')), '| order by TimeGenerated asc')), '\n')]",
+                    "checkoutOutcomeQuery": "[join(concat(variables('apiRequests'), createArray(variables('requestPath'), '| where Path == \"/api/vms/checkout\"', '| extend Outcome = case(ResultCode == \"200\", \"Assigned (200)\", ResultCode == \"202\", \"Starting a host (202)\", ResultCode == \"409\", \"Refused (409)\", toint(ResultCode) >= 500, \"Failed (5xx)\", strcat(\"Other (\", ResultCode, \")\"))', format('| summarize Checkouts = count() by Outcome, {0}', variables('workbookBin')), '| order by TimeGenerated asc')), '\n')]",
+                    "checkoutLatencyQuery": "[join(concat(variables('apiRequests'), createArray('| where ResultCode == \"200\"', variables('requestPath'), '| where Path == \"/api/vms/checkout\"', format('| summarize P50 = percentile(DurationMs, 50), P95 = percentile(DurationMs, 95) by {0}', variables('workbookBin')), '| order by TimeGenerated asc')), '\n')]",
+                    "releaseQuery": "[join(concat(variables('apiRequests'), createArray(variables('requestPath'), '| extend Action = case(Path matches regex @\"^/api/vms/[^/]+/release$\", \"Release\", Path matches regex @\"^/api/vms/[^/]+/return$\", \"Return\", \"\")', '| where isnotempty(Action)', '| extend Series = strcat(Action, iff(toint(ResultCode) < 400, \" succeeded\", strcat(\" failed (\", ResultCode, \")\")))', format('| summarize Requests = count() by Series, {0}', variables('workbookBin')), '| order by TimeGenerated asc')), '\n')]",
+                    "startOnDemandQuery": "[join(createArray('union', '    (AppTraces', format('    | where AppRoleName == \"{0}\" and tostring(Properties.audit_action) == \"vm.start_on_demand\"', parameters('apiAppName')), '    | extend Series = iff(tostring(Properties.audit_outcome) == \"success\", \"Hosts started\", \"Starts that failed\")),', '    (AppRequests', format('    | where AppRoleName == \"{0}\" and ResultCode == \"202\"', parameters('apiAppName')), format('    {0}', variables('requestPath')), '    | where Path == \"/api/vms/checkout\"', '    | extend Series = \"Checkouts told to wait (202)\")', format('| summarize Events = count() by Series, {0}', variables('workbookBin')), '| order by TimeGenerated asc'), '\n')]",
+                    "settingsFailureQuery": "[join(createArray('LinuxBrokerHost_CL', '| where FilePath endswith \"linuxbroker-host-settings.log\"', '| where RawData has_cs \"ERROR\" or RawData has_cs \"WARNING\"', '| project TimeGenerated, Computer, Level = iff(RawData has_cs \"ERROR\", \"Error\", \"Warning\"), Message = RawData', '| order by TimeGenerated desc', '| take 200'), '\n')]",
+                    "hostErrorQuery": "[join(createArray('union isfuzzy=true', '    (LinuxBrokerHost_CL', format('    {0}', variables('hostLogLevel')), '    | where isnotempty(Level)', '    | extend Source = extract(@\"([^/]+)$\", 1, FilePath), Message = RawData),', '    (Syslog', '    | where SeverityLevel in (\"emerg\", \"alert\", \"crit\", \"err\")', '    | extend Level = \"Error\", Source = iff(isempty(ProcessName), strcat(\"syslog \", Facility), strcat(\"syslog \", Facility, \" \", ProcessName)), Message = SyslogMessage)', '| summarize Events = count(), arg_max(TimeGenerated, Message) by Computer, Source, Level', '| project Computer, Source, Level, Events, LastSeen = TimeGenerated, LatestMessage = Message', '| order by Events desc'), '\n')]",
+                    "nfsFailureQuery": "[join(createArray('union isfuzzy=true', '    (LinuxBrokerHost_CL', '    | where FilePath endswith \"createuser.log\" and RawData has \"Failed to mount NFS share\"', '    | extend Source = \"create-user.sh\"),', '    (LinuxBrokerHost_CL', '    | where FilePath endswith \"linuxbroker-session-control.log\" and RawData has \"Could not mount the profile share\"', '    | extend Source = \"session-control.sh\"),', '    (Syslog', '    | where Facility == \"kern\" and SyslogMessage has \"nfs\" and (SyslogMessage has \"not responding\" or SyslogMessage has \"timed out\")', '    | extend Source = \"kernel\", RawData = SyslogMessage)', '| project TimeGenerated, Computer, Source, Message = RawData', '| order by TimeGenerated desc', '| take 500'), '\n')]",
+                    "avdEventQuery": "[join(createArray('Event', '| where Source == \"LinuxBrokerScript\" or EventLog == \"Microsoft-Windows-TerminalServices-RDPClient/Operational\"', '| where EventLevelName in (\"Critical\", \"Error\", \"Warning\")', '| summarize Events = count(), arg_max(TimeGenerated, RenderedDescription) by Computer, Source, Level = EventLevelName', '| project Computer, Source, Level, Events, LastSeen = TimeGenerated, LatestMessage = RenderedDescription', '| order by Events desc'), '\n')]",
+                    "noReadyHostsAlertQuery": "[join(concat(variables('fleetSnapshots'), createArray('| extend Ready = toint(Properties.ReadyHosts), MinVMs = toint(Properties.EffectiveMinVMs), Waiting = toint(Properties.Waiting)', '| summarize Snapshots = count(), Short = countif(Ready == 0 and (MinVMs > 0 or Waiting > 0)), MostWaiting = max(Waiting)', '| where Snapshots > 0 and Short == Snapshots')), '\n')]",
+                    "unhealthyHostsAlertQuery": "[join(concat(variables('fleetSnapshots'), createArray('| extend Stale = toint(Properties.StaleHeartbeats), Nfs = toint(Properties.NfsUnreachable), Xrdp = toint(Properties.XrdpInactive)', '| summarize Snapshots = count(), Lowest = min(Stale + Nfs + Xrdp), StaleHeartbeats = max(Stale), NfsUnreachable = max(Nfs), XrdpInactive = max(Xrdp)', '| where Snapshots > 0 and Lowest > 0')), '\n')]",
+                    "refusedCheckoutAlertQuery": "[join(concat(variables('apiRequests'), createArray('| where ResultCode == \"409\"', variables('requestPath'), '| where Path == \"/api/vms/checkout\"')), '\n')]",
+                    "apiErrorAlertQuery": "[join(concat(variables('apiRequests'), createArray('| where toint(ResultCode) >= 500')), '\n')]",
+                    "logAlerts": [
+                      {
+                        "name": "no-ready-hosts",
+                        "displayName": "[format('Linux Broker: no ready hosts ({0})', parameters('namePrefix'))]",
+                        "description": "For 15 minutes every fleet snapshot showed no ready Linux host while the scaling minimum is above 0 or users are waiting. Check the Linux hosts and the scaling settings.",
+                        "severity": 1,
+                        "query": "[variables('noReadyHostsAlertQuery')]",
+                        "operator": "GreaterThan",
+                        "threshold": 0
+                      },
+                      {
+                        "name": "fleet-snapshot-missing",
+                        "displayName": "[format('Linux Broker: no fleet snapshot ({0})', parameters('namePrefix'))]",
+                        "description": "The scaling run has logged no fleet snapshot for 15 minutes. The task function, the API or the database may be down, or SQL script 157 is not applied yet.",
+                        "severity": 2,
+                        "query": "[join(variables('fleetSnapshots'), '\n')]",
+                        "operator": "LessThan",
+                        "threshold": 1
+                      },
+                      {
+                        "name": "checkouts-refused",
+                        "displayName": "[format('Linux Broker: checkouts refused ({0})', parameters('namePrefix'))]",
+                        "description": "The broker refused checkouts (HTTP 409) in the last 15 minutes, so users could not get a Linux desktop.",
+                        "severity": 2,
+                        "query": "[variables('refusedCheckoutAlertQuery')]",
+                        "operator": "GreaterThanOrEqual",
+                        "threshold": "[parameters('alertCheckoutRefusalThreshold')]"
+                      },
+                      {
+                        "name": "unhealthy-hosts",
+                        "displayName": "[format('Linux Broker: unhealthy hosts ({0})', parameters('namePrefix'))]",
+                        "description": "For 15 minutes every fleet snapshot showed a Linux host with a stale heartbeat, an unreachable home share or no xrdp service. The workbook lists the hosts' errors.",
+                        "severity": 2,
+                        "query": "[variables('unhealthyHostsAlertQuery')]",
+                        "operator": "GreaterThan",
+                        "threshold": 0
+                      },
+                      {
+                        "name": "api-errors",
+                        "displayName": "[format('Linux Broker: API errors ({0})', parameters('namePrefix'))]",
+                        "description": "The broker API answered requests with a 5xx status in the last 15 minutes.",
+                        "severity": 2,
+                        "query": "[variables('apiErrorAlertQuery')]",
+                        "operator": "GreaterThanOrEqual",
+                        "threshold": "[parameters('alertApiErrorThreshold')]"
+                      }
+                    ],
+                    "nfsThrottlingResponseTypes": [
+                      "SuccessWithThrottling",
+                      "SuccessWithShareIopsThrottling",
+                      "SuccessWithShareEgressThrottling",
+                      "SuccessWithShareIngressThrottling",
+                      "SuccessWithMetadataThrottling",
+                      "ClientThrottlingError",
+                      "ClientShareIopsThrottlingError",
+                      "ClientShareEgressThrottlingError",
+                      "ClientShareIngressThrottlingError"
+                    ],
+                    "workbookBaseQuery": {
+                      "version": "KqlItem/1.0",
+                      "size": 0,
+                      "timeContextFromParameter": "TimeRange",
+                      "queryType": 0,
+                      "resourceType": "microsoft.operationalinsights/workspaces",
+                      "crossComponentResources": [
+                        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                      ]
+                    },
+                    "workbookContent": {
+                      "version": "Notebook/1.0",
+                      "items": [
+                        {
+                          "type": 1,
+                          "name": "introduction",
+                          "content": {
+                            "json": "## Linux Broker fleet\nThe scaling run logs a fleet snapshot every five minutes. Host logs arrive once deploy/Enable-HostMonitoring.ps1 has installed the Azure Monitor agent on the hosts."
+                          }
+                        },
+                        {
+                          "type": 9,
+                          "name": "parameters",
+                          "content": {
+                            "version": "KqlParameterItem/1.0",
+                            "style": "pills",
+                            "queryType": 0,
+                            "resourceType": "microsoft.operationalinsights/workspaces",
+                            "parameters": [
+                              {
+                                "id": "5d0c8f3e-2a41-4b8e-9f6d-1c7a3b2e4f10",
+                                "version": "KqlParameterItem/1.0",
+                                "name": "TimeRange",
+                                "label": "Time range",
+                                "type": 4,
+                                "isRequired": true,
+                                "value": {
+                                  "durationMs": 86400000
+                                },
+                                "typeSettings": {
+                                  "allowCustom": true,
+                                  "selectableValues": [
+                                    {
+                                      "durationMs": 3600000
+                                    },
+                                    {
+                                      "durationMs": 14400000
+                                    },
+                                    {
+                                      "durationMs": 43200000
+                                    },
+                                    {
+                                      "durationMs": 86400000
+                                    },
+                                    {
+                                      "durationMs": 259200000
+                                    },
+                                    {
+                                      "durationMs": 604800000
+                                    },
+                                    {
+                                      "durationMs": 2592000000
+                                    }
+                                  ]
+                                }
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": 3,
+                          "name": "latest-snapshot",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Latest fleet snapshot', 'query', variables('latestSnapshotQuery'), 'visualization', 'table', 'noDataMessage', 'No fleet snapshot in this time range. The API logs one every five minutes once SQL script 157 is applied.'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "fleet-trend",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Hosts over time (fewest ready, most in use, waiting, booting and powered on)', 'query', variables('fleetTrendQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "checkout-outcomes",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Checkouts by outcome', 'query', variables('checkoutOutcomeQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "checkout-latency",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Checkout time in milliseconds (50th and 95th percentile)', 'query', variables('checkoutLatencyQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "releases",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Releases and returns', 'query', variables('releaseQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "start-on-demand",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Hosts started on demand', 'query', variables('startOnDemandQuery'), 'visualization', 'timechart'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "settings-failures",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Host settings that could not be applied', 'query', variables('settingsFailureQuery'), 'visualization', 'table', 'noDataMessage', 'No host setting errors or warnings in this time range.'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "host-errors",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Errors and warnings by Linux host', 'query', variables('hostErrorQuery'), 'visualization', 'table', 'noDataMessage', 'No host errors in this time range, or the Azure Monitor agent is not installed yet.'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "nfs-failures",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'NFS home share failures', 'query', variables('nfsFailureQuery'), 'visualization', 'table', 'noDataMessage', 'No NFS mount failures in this time range.'))]"
+                        },
+                        {
+                          "type": 3,
+                          "name": "avd-events",
+                          "customWidth": "50",
+                          "content": "[union(variables('workbookBaseQuery'), createObject('title', 'Errors and warnings by AVD session host', 'query', variables('avdEventQuery'), 'visualization', 'table', 'noDataMessage', 'No AVD session host errors in this time range, or the Azure Monitor agent is not installed yet.'))]"
+                        }
+                      ],
+                      "fallbackResourceIds": [
+                        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                      ],
+                      "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+                    }
+                  },
+                  "resources": [
+                    {
+                      "type": "Microsoft.OperationalInsights/workspaces/tables",
+                      "apiVersion": "2023-09-01",
+                      "name": "[format('{0}/{1}', parameters('logAnalyticsWorkspaceName'), variables('hostLogTableName'))]",
+                      "properties": {
+                        "plan": "Analytics",
+                        "schema": {
+                          "name": "[variables('hostLogTableName')]",
+                          "columns": [
+                            {
+                              "name": "TimeGenerated",
+                              "type": "dateTime"
+                            },
+                            {
+                              "name": "RawData",
+                              "type": "string"
+                            },
+                            {
+                              "name": "FilePath",
+                              "type": "string"
+                            },
+                            {
+                              "name": "Computer",
+                              "type": "string"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Insights/dataCollectionRules",
+                      "apiVersion": "2023-03-11",
+                      "name": "[take(format('dcr-{0}-linux', parameters('namePrefix')), 64)]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "kind": "Linux",
+                      "properties": {
+                        "description": "Linux Broker logs, xrdp logs and syslog from the Linux hosts.",
+                        "streamDeclarations": {
+                          "[format('{0}', variables('hostLogStreamName'))]": {
+                            "columns": [
+                              {
+                                "name": "TimeGenerated",
+                                "type": "datetime"
+                              },
+                              {
+                                "name": "RawData",
+                                "type": "string"
+                              },
+                              {
+                                "name": "FilePath",
+                                "type": "string"
+                              },
+                              {
+                                "name": "Computer",
+                                "type": "string"
+                              }
+                            ]
+                          }
+                        },
+                        "dataSources": {
+                          "logFiles": [
+                            {
+                              "name": "linuxBrokerLogs",
+                              "streams": [
+                                "[variables('hostLogStreamName')]"
+                              ],
+                              "filePatterns": "[variables('linuxHostLogFiles')]",
+                              "format": "text",
+                              "settings": {
+                                "text": {
+                                  "recordStartTimestampFormat": "YYYY-MM-DD HH:MM:SS"
+                                }
+                              }
+                            }
+                          ],
+                          "syslog": [
+                            {
+                              "name": "authentication",
+                              "streams": [
+                                "Microsoft-Syslog"
+                              ],
+                              "facilityNames": [
+                                "auth",
+                                "authpriv"
+                              ],
+                              "logLevels": [
+                                "Info",
+                                "Notice",
+                                "Warning",
+                                "Error",
+                                "Critical",
+                                "Alert",
+                                "Emergency"
+                              ]
+                            },
+                            {
+                              "name": "kernelAndUser",
+                              "streams": [
+                                "Microsoft-Syslog"
+                              ],
+                              "facilityNames": [
+                                "kern",
+                                "user"
+                              ],
+                              "logLevels": [
+                                "Notice",
+                                "Warning",
+                                "Error",
+                                "Critical",
+                                "Alert",
+                                "Emergency"
+                              ]
+                            },
+                            {
+                              "name": "otherFacilities",
+                              "streams": [
+                                "Microsoft-Syslog"
+                              ],
+                              "facilityNames": [
+                                "cron",
+                                "daemon",
+                                "ftp",
+                                "local0",
+                                "local1",
+                                "local2",
+                                "local3",
+                                "local4",
+                                "local5",
+                                "local6",
+                                "local7",
+                                "lpr",
+                                "mail",
+                                "news",
+                                "syslog",
+                                "uucp"
+                              ],
+                              "logLevels": [
+                                "Warning",
+                                "Error",
+                                "Critical",
+                                "Alert",
+                                "Emergency"
+                              ]
+                            }
+                          ]
+                        },
+                        "destinations": {
+                          "logAnalytics": [
+                            {
+                              "name": "workspace",
+                              "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                            }
+                          ]
+                        },
+                        "dataFlows": [
+                          {
+                            "streams": [
+                              "[variables('hostLogStreamName')]"
+                            ],
+                            "destinations": [
+                              "workspace"
+                            ],
+                            "transformKql": "source",
+                            "outputStream": "[variables('hostLogStreamName')]"
+                          },
+                          {
+                            "streams": [
+                              "Microsoft-Syslog"
+                            ],
+                            "destinations": [
+                              "workspace"
+                            ]
+                          }
+                        ]
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.OperationalInsights/workspaces/tables', parameters('logAnalyticsWorkspaceName'), variables('hostLogTableName'))]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Insights/dataCollectionRules",
+                      "apiVersion": "2023-03-11",
+                      "name": "[take(format('dcr-{0}-avd', parameters('namePrefix')), 64)]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "kind": "Windows",
+                      "properties": {
+                        "description": "Connect-LinuxBroker.ps1 events and Remote Desktop client problems from the AVD session hosts.",
+                        "dataSources": {
+                          "windowsEventLogs": [
+                            {
+                              "name": "linuxBrokerEvents",
+                              "streams": [
+                                "Microsoft-Event"
+                              ],
+                              "xPathQueries": [
+                                "Application!*[System[Provider[@Name='LinuxBrokerScript']]]",
+                                "Microsoft-Windows-TerminalServices-RDPClient/Operational!*[System[(Level=1 or Level=2 or Level=3)]]"
+                              ]
+                            }
+                          ]
+                        },
+                        "destinations": {
+                          "logAnalytics": [
+                            {
+                              "name": "workspace",
+                              "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                            }
+                          ]
+                        },
+                        "dataFlows": [
+                          {
+                            "streams": [
+                              "Microsoft-Event"
+                            ],
+                            "destinations": [
+                              "workspace"
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Insights/workbooks",
+                      "apiVersion": "2023-06-01",
+                      "name": "[guid(resourceGroup().id, parameters('namePrefix'), 'linuxbroker-fleet-workbook')]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "kind": "shared",
+                      "properties": {
+                        "displayName": "[format('Linux Broker fleet ({0})', parameters('namePrefix'))]",
+                        "category": "workbook",
+                        "sourceId": "[toLower(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName')))]",
+                        "version": "Notebook/1.0",
+                        "serializedData": "[string(variables('workbookContent'))]"
+                      }
+                    },
+                    {
+                      "condition": "[not(empty(variables('alertEmailList')))]",
+                      "type": "Microsoft.Insights/actionGroups",
+                      "apiVersion": "2023-01-01",
+                      "name": "[format('ag-{0}', parameters('namePrefix'))]",
+                      "location": "Global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "copy": [
+                          {
+                            "name": "emailReceivers",
+                            "count": "[length(variables('alertEmailList'))]",
+                            "input": {
+                              "name": "[format('email-{0}', add(copyIndex('emailReceivers'), 1))]",
+                              "emailAddress": "[variables('alertEmailList')[copyIndex('emailReceivers')]]",
+                              "useCommonAlertSchema": true
+                            }
+                          }
+                        ],
+                        "groupShortName": "LinuxBroker",
+                        "enabled": true
+                      }
+                    },
+                    {
+                      "copy": {
+                        "name": "logAlertRules",
+                        "count": "[length(variables('logAlerts'))]"
+                      },
+                      "type": "Microsoft.Insights/scheduledQueryRules",
+                      "apiVersion": "2023-12-01",
+                      "name": "[format('alert-{0}-{1}', parameters('namePrefix'), variables('logAlerts')[copyIndex()].name)]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "kind": "LogAlert",
+                      "properties": {
+                        "displayName": "[variables('logAlerts')[copyIndex()].displayName]",
+                        "description": "[variables('logAlerts')[copyIndex()].description]",
+                        "severity": "[variables('logAlerts')[copyIndex()].severity]",
+                        "enabled": true,
+                        "evaluationFrequency": "PT5M",
+                        "windowSize": "PT15M",
+                        "scopes": [
+                          "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                        ],
+                        "skipQueryValidation": true,
+                        "autoMitigate": true,
+                        "criteria": {
+                          "allOf": [
+                            {
+                              "query": "[variables('logAlerts')[copyIndex()].query]",
+                              "timeAggregation": "Count",
+                              "operator": "[variables('logAlerts')[copyIndex()].operator]",
+                              "threshold": "[variables('logAlerts')[copyIndex()].threshold]",
+                              "failingPeriods": {
+                                "numberOfEvaluationPeriods": 1,
+                                "minFailingPeriodsToAlert": 1
+                              }
+                            }
+                          ]
+                        },
+                        "actions": {
+                          "actionGroups": "[variables('alertActionGroupIds')]"
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Insights/actionGroups', format('ag-{0}', parameters('namePrefix')))]"
+                      ]
+                    },
+                    {
+                      "condition": "[variables('monitorNfsShare')]",
+                      "type": "Microsoft.Insights/metricAlerts",
+                      "apiVersion": "2018-03-01",
+                      "name": "[format('alert-{0}-nfs-throttling', parameters('namePrefix'))]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "copy": [
+                          {
+                            "name": "actions",
+                            "count": "[length(variables('alertActionGroupIds'))]",
+                            "input": {
+                              "actionGroupId": "[variables('alertActionGroupIds')[copyIndex('actions')]]"
+                            }
+                          }
+                        ],
+                        "description": "Azure Files throttled requests to the NFS home share in the last 15 minutes. Users may see slow sign-ins and applications; see the sizing guide in DEPLOYMENT.md.",
+                        "severity": 2,
+                        "enabled": true,
+                        "scopes": [
+                          "[variables('nfsFileServiceId')]"
+                        ],
+                        "evaluationFrequency": "PT5M",
+                        "windowSize": "PT15M",
+                        "autoMitigate": true,
+                        "criteria": {
+                          "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+                          "allOf": [
+                            {
+                              "criterionType": "StaticThresholdCriterion",
+                              "name": "ThrottledTransactions",
+                              "metricNamespace": "Microsoft.Storage/storageAccounts/fileServices",
+                              "metricName": "Transactions",
+                              "dimensions": [
+                                {
+                                  "name": "ResponseType",
+                                  "operator": "Include",
+                                  "values": "[variables('nfsThrottlingResponseTypes')]"
+                                }
+                              ],
+                              "operator": "GreaterThan",
+                              "threshold": 0,
+                              "timeAggregation": "Total"
+                            }
+                          ]
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Insights/actionGroups', format('ag-{0}', parameters('namePrefix')))]"
+                      ]
+                    },
+                    {
+                      "condition": "[variables('monitorNfsShare')]",
+                      "type": "Microsoft.Insights/metricAlerts",
+                      "apiVersion": "2018-03-01",
+                      "name": "[format('alert-{0}-nfs-latency', parameters('namePrefix'))]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "copy": [
+                          {
+                            "name": "actions",
+                            "count": "[length(variables('alertActionGroupIds'))]",
+                            "input": {
+                              "actionGroupId": "[variables('alertActionGroupIds')[copyIndex('actions')]]"
+                            }
+                          }
+                        ],
+                        "description": "The NFS home share answered slowly on average over the last 15 minutes.",
+                        "severity": 3,
+                        "enabled": true,
+                        "scopes": [
+                          "[variables('nfsFileServiceId')]"
+                        ],
+                        "evaluationFrequency": "PT5M",
+                        "windowSize": "PT15M",
+                        "autoMitigate": true,
+                        "criteria": {
+                          "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+                          "allOf": [
+                            {
+                              "criterionType": "StaticThresholdCriterion",
+                              "name": "EndToEndLatency",
+                              "metricNamespace": "Microsoft.Storage/storageAccounts/fileServices",
+                              "metricName": "SuccessE2ELatency",
+                              "operator": "GreaterThan",
+                              "threshold": "[parameters('alertNfsLatencyThresholdMs')]",
+                              "timeAggregation": "Average"
+                            }
+                          ]
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Insights/actionGroups', format('ag-{0}', parameters('namePrefix')))]"
+                      ]
+                    }
+                  ],
+                  "outputs": {
+                    "linuxHostDataCollectionRuleId": {
+                      "type": "string",
+                      "value": "[resourceId('Microsoft.Insights/dataCollectionRules', take(format('dcr-{0}-linux', parameters('namePrefix')), 64))]"
+                    },
+                    "avdHostDataCollectionRuleId": {
+                      "type": "string",
+                      "value": "[resourceId('Microsoft.Insights/dataCollectionRules', take(format('dcr-{0}-avd', parameters('namePrefix')), 64))]"
+                    }
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Resources/deployments', 'nfsStorage')]",
+                "[resourceId('Microsoft.Resources/deployments', 'observability')]"
+              ]
             },
             {
               "type": "Microsoft.Resources/deployments",
@@ -2161,6 +3313,9 @@
                   },
                   "skuName": {
                     "value": "[parameters('appServicePlanSku')]"
+                  },
+                  "capacity": {
+                    "value": "[parameters('appServicePlanCapacity')]"
                   }
                 },
                 "template": {
@@ -2170,7 +3325,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "1639916006898550317"
+                      "templateHash": "10348306834059684448"
                     }
                   },
                   "parameters": {
@@ -2188,6 +3343,15 @@
                     "skuName": {
                       "type": "string",
                       "defaultValue": "P2mv3"
+                    },
+                    "capacity": {
+                      "type": "int",
+                      "defaultValue": 1,
+                      "minValue": 1,
+                      "maxValue": 30,
+                      "metadata": {
+                        "description": "Instances the plan runs. The portal, the API and the task function all run on every instance."
+                      }
                     }
                   },
                   "resources": [
@@ -2201,7 +3365,7 @@
                         "name": "[parameters('skuName')]",
                         "tier": "PremiumV3",
                         "size": "[parameters('skuName')]",
-                        "capacity": 1
+                        "capacity": "[parameters('capacity')]"
                       },
                       "kind": "linux",
                       "properties": {
@@ -2221,6 +3385,268 @@
                   }
                 }
               }
+            },
+            {
+              "condition": "[variables('usePortalRedis')]",
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
+              "name": "portalRedis",
+              "properties": {
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "kind": {
+                    "value": "[variables('cloudProfile').portalRedisKind]"
+                  },
+                  "name": {
+                    "value": "[variables('portalRedisName')]"
+                  },
+                  "location": {
+                    "value": "[parameters('location')]"
+                  },
+                  "cacheLocation": "[if(empty(parameters('portalRedisLocation')), createObject('value', parameters('location')), createObject('value', parameters('portalRedisLocation')))]",
+                  "tags": {
+                    "value": "[parameters('tags')]"
+                  },
+                  "skuName": {
+                    "value": "[parameters('portalRedisSku')]"
+                  },
+                  "virtualNetworkId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.vnetId.value]"
+                  },
+                  "privateEndpointSubnetId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.privateEndpointSubnetId.value]"
+                  },
+                  "privateDnsZoneName": {
+                    "value": "[variables('cloudProfile').portalRedisPrivateDnsZoneName]"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "11134019957083360765"
+                    }
+                  },
+                  "parameters": {
+                    "kind": {
+                      "type": "string",
+                      "allowedValues": [
+                        "managed",
+                        "cache"
+                      ],
+                      "metadata": {
+                        "description": "Azure Managed Redis (managed), or Azure Cache for Redis (cache) where Azure Managed Redis is not available, as in Azure Government."
+                      }
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 60,
+                      "metadata": {
+                        "description": "Name of the cache. It becomes part of a public DNS name, so it must be unique."
+                      }
+                    },
+                    "location": {
+                      "type": "string",
+                      "defaultValue": "[resourceGroup().location]",
+                      "metadata": {
+                        "description": "Region of the private endpoint, which must be the virtual network's region."
+                      }
+                    },
+                    "cacheLocation": {
+                      "type": "string",
+                      "defaultValue": "[parameters('location')]",
+                      "metadata": {
+                        "description": "Region of the cache. Defaults to the virtual network's region. The portal reaches a cache in another region through the same private endpoint."
+                      }
+                    },
+                    "tags": {
+                      "type": "object",
+                      "defaultValue": {}
+                    },
+                    "skuName": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Leave empty for the default size: Balanced_B0 for Azure Managed Redis, Standard_C1 for Azure Cache for Redis. Azure Cache for Redis sizes are written <tier>_<family><capacity>, such as Standard_C2 or Premium_P1."
+                      }
+                    },
+                    "virtualNetworkId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Virtual network the portal reaches the cache from."
+                      }
+                    },
+                    "privateEndpointSubnetId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Subnet the cache private endpoint is placed in."
+                      }
+                    },
+                    "privateDnsZoneName": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Private DNS zone of the cache private endpoint: privatelink.redis.azure.net for Azure Managed Redis, privatelink.redis.cache.<cloud suffix> for Azure Cache for Redis."
+                      }
+                    }
+                  },
+                  "variables": {
+                    "managed": "[equals(parameters('kind'), 'managed')]",
+                    "effectiveSku": "[if(empty(parameters('skuName')), if(variables('managed'), 'Balanced_B0', 'Standard_C1'), parameters('skuName'))]",
+                    "cacheSkuParts": "[split(variables('effectiveSku'), '_')]",
+                    "managedPort": 10000
+                  },
+                  "resources": [
+                    {
+                      "condition": "[variables('managed')]",
+                      "type": "Microsoft.Cache/redisEnterprise",
+                      "apiVersion": "2025-07-01",
+                      "name": "[parameters('name')]",
+                      "location": "[parameters('cacheLocation')]",
+                      "tags": "[parameters('tags')]",
+                      "sku": {
+                        "name": "[variables('effectiveSku')]"
+                      },
+                      "properties": {
+                        "minimumTlsVersion": "1.2",
+                        "publicNetworkAccess": "Disabled"
+                      }
+                    },
+                    {
+                      "condition": "[variables('managed')]",
+                      "type": "Microsoft.Cache/redisEnterprise/databases",
+                      "apiVersion": "2025-07-01",
+                      "name": "[format('{0}/{1}', parameters('name'), 'default')]",
+                      "properties": {
+                        "clientProtocol": "Encrypted",
+                        "port": "[variables('managedPort')]",
+                        "clusteringPolicy": "EnterpriseCluster",
+                        "evictionPolicy": "VolatileLRU",
+                        "accessKeysAuthentication": "Disabled"
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Cache/redisEnterprise', parameters('name'))]"
+                      ]
+                    },
+                    {
+                      "condition": "[not(variables('managed'))]",
+                      "type": "Microsoft.Cache/redis",
+                      "apiVersion": "2024-11-01",
+                      "name": "[parameters('name')]",
+                      "location": "[parameters('cacheLocation')]",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "sku": {
+                          "name": "[variables('cacheSkuParts')[0]]",
+                          "family": "[first(variables('cacheSkuParts')[1])]",
+                          "capacity": "[int(skip(variables('cacheSkuParts')[1], 1))]"
+                        },
+                        "enableNonSslPort": false,
+                        "minimumTlsVersion": "1.2",
+                        "publicNetworkAccess": "Disabled",
+                        "disableAccessKeyAuthentication": true,
+                        "redisConfiguration": {
+                          "aad-enabled": "true",
+                          "maxmemory-policy": "volatile-lru"
+                        }
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Network/privateEndpoints",
+                      "apiVersion": "2024-05-01",
+                      "name": "[format('pe-{0}', parameters('name'))]",
+                      "location": "[parameters('location')]",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "subnet": {
+                          "id": "[parameters('privateEndpointSubnetId')]"
+                        },
+                        "privateLinkServiceConnections": [
+                          {
+                            "name": "redis",
+                            "properties": {
+                              "privateLinkServiceId": "[if(variables('managed'), resourceId('Microsoft.Cache/redisEnterprise', parameters('name')), resourceId('Microsoft.Cache/redis', parameters('name')))]",
+                              "groupIds": [
+                                "[if(variables('managed'), 'redisEnterprise', 'redisCache')]"
+                              ]
+                            }
+                          }
+                        ]
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Cache/redis', parameters('name'))]",
+                        "[resourceId('Microsoft.Cache/redisEnterprise', parameters('name'))]",
+                        "[resourceId('Microsoft.Cache/redisEnterprise/databases', parameters('name'), 'default')]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Network/privateDnsZones",
+                      "apiVersion": "2024-06-01",
+                      "name": "[parameters('privateDnsZoneName')]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]"
+                    },
+                    {
+                      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+                      "apiVersion": "2024-06-01",
+                      "name": "[format('{0}/{1}', parameters('privateDnsZoneName'), format('link-{0}', last(split(parameters('virtualNetworkId'), '/'))))]",
+                      "location": "global",
+                      "tags": "[parameters('tags')]",
+                      "properties": {
+                        "registrationEnabled": false,
+                        "virtualNetwork": {
+                          "id": "[parameters('virtualNetworkId')]"
+                        }
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Network/privateDnsZones', parameters('privateDnsZoneName'))]"
+                      ]
+                    },
+                    {
+                      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+                      "apiVersion": "2024-05-01",
+                      "name": "[format('{0}/{1}', format('pe-{0}', parameters('name')), 'default')]",
+                      "properties": {
+                        "privateDnsZoneConfigs": [
+                          {
+                            "name": "redis",
+                            "properties": {
+                              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', parameters('privateDnsZoneName'))]"
+                            }
+                          }
+                        ]
+                      },
+                      "dependsOn": [
+                        "[resourceId('Microsoft.Network/privateDnsZones', parameters('privateDnsZoneName'))]",
+                        "[resourceId('Microsoft.Network/privateEndpoints', format('pe-{0}', parameters('name')))]"
+                      ]
+                    }
+                  ],
+                  "outputs": {
+                    "name": {
+                      "type": "string",
+                      "value": "[parameters('name')]"
+                    },
+                    "hostName": {
+                      "type": "string",
+                      "value": "[if(variables('managed'), reference(resourceId('Microsoft.Cache/redisEnterprise', parameters('name')), '2025-07-01').hostName, reference(resourceId('Microsoft.Cache/redis', parameters('name')), '2024-11-01').hostName)]"
+                    },
+                    "port": {
+                      "type": "int",
+                      "value": "[if(variables('managed'), variables('managedPort'), reference(resourceId('Microsoft.Cache/redis', parameters('name')), '2024-11-01').sslPort)]"
+                    }
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Resources/deployments', 'networking')]"
+              ]
             },
             {
               "type": "Microsoft.Resources/deployments",
@@ -2254,7 +3680,7 @@
                     "value": "[reference(resourceId('Microsoft.Resources/deployments', 'observability'), '2025-04-01').outputs.applicationInsightsConnectionString.value]"
                   },
                   "appSettings": {
-                    "value": "[variables('frontendSettings')]"
+                    "value": "[union(variables('frontendSettings'), if(variables('usePortalRedis'), union(createObject('SESSION_BACKEND', 'redis', 'REDIS_HOST', reference(resourceId('Microsoft.Resources/deployments', 'portalRedis'), '2025-04-01').outputs.hostName.value, 'REDIS_PORT', string(reference(resourceId('Microsoft.Resources/deployments', 'portalRedis'), '2025-04-01').outputs.port.value)), if(empty(variables('cloudProfile').portalRedisEntraResource), createObject(), createObject('REDIS_ENTRA_RESOURCE', variables('cloudProfile').portalRedisEntraResource))), createObject('SESSION_BACKEND', 'filesystem')))]"
                   },
                   "authSettings": {
                     "value": "[variables('frontendAuthSettings')]"
@@ -2267,6 +3693,10 @@
                   },
                   "useManagedIdentityForRegistry": {
                     "value": true
+                  },
+                  "virtualNetworkSubnetId": "[if(variables('usePortalRedis'), createObject('value', reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.appSubnetId.value), createObject('value', ''))]",
+                  "clientAffinityEnabled": {
+                    "value": "[not(variables('usePortalRedis'))]"
                   }
                 },
                 "template": {
@@ -2276,7 +3706,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "8972138919102563065"
+                      "templateHash": "1104947881100529762"
                     }
                   },
                   "parameters": {
@@ -2329,6 +3759,13 @@
                       "metadata": {
                         "description": "Delegated subnet for regional VNet integration. Leave empty to keep the app off the virtual network."
                       }
+                    },
+                    "clientAffinityEnabled": {
+                      "type": "bool",
+                      "defaultValue": false,
+                      "metadata": {
+                        "description": "Send each browser back to the instance that served it first (ARR affinity). Only an app that keeps state on the instance needs it."
+                      }
                     }
                   },
                   "variables": {
@@ -2348,6 +3785,7 @@
                       "properties": {
                         "serverFarmId": "[parameters('serverFarmId')]",
                         "httpsOnly": true,
+                        "clientAffinityEnabled": "[parameters('clientAffinityEnabled')]",
                         "virtualNetworkSubnetId": "[if(empty(parameters('virtualNetworkSubnetId')), null(), parameters('virtualNetworkSubnetId'))]",
                         "siteConfig": "[variables('webSiteConfig')]"
                       }
@@ -2424,7 +3862,93 @@
               "dependsOn": [
                 "[resourceId('Microsoft.Resources/deployments', 'appServicePlan')]",
                 "[resourceId('Microsoft.Resources/deployments', 'containerRegistry')]",
-                "[resourceId('Microsoft.Resources/deployments', 'observability')]"
+                "[resourceId('Microsoft.Resources/deployments', 'networking')]",
+                "[resourceId('Microsoft.Resources/deployments', 'observability')]",
+                "[resourceId('Microsoft.Resources/deployments', 'portalRedis')]"
+              ]
+            },
+            {
+              "condition": "[variables('usePortalRedis')]",
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
+              "name": "portalRedisAccess",
+              "properties": {
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "kind": {
+                    "value": "[variables('cloudProfile').portalRedisKind]"
+                  },
+                  "redisName": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'portalRedis'), '2025-04-01').outputs.name.value]"
+                  },
+                  "principalId": {
+                    "value": "[reference(resourceId('Microsoft.Resources/deployments', 'frontendApp'), '2025-04-01').outputs.principalId.value]"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "11694917012265494470"
+                    }
+                  },
+                  "parameters": {
+                    "kind": {
+                      "type": "string",
+                      "allowedValues": [
+                        "managed",
+                        "cache"
+                      ]
+                    },
+                    "redisName": {
+                      "type": "string"
+                    },
+                    "principalId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Object ID of the portal's system-assigned managed identity."
+                      }
+                    }
+                  },
+                  "variables": {
+                    "assignmentName": "[format('portal{0}', uniqueString(parameters('principalId')))]"
+                  },
+                  "resources": [
+                    {
+                      "condition": "[equals(parameters('kind'), 'managed')]",
+                      "type": "Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments",
+                      "apiVersion": "2025-07-01",
+                      "name": "[format('{0}/{1}/{2}', parameters('redisName'), 'default', variables('assignmentName'))]",
+                      "properties": {
+                        "accessPolicyName": "default",
+                        "user": {
+                          "objectId": "[parameters('principalId')]"
+                        }
+                      }
+                    },
+                    {
+                      "condition": "[equals(parameters('kind'), 'cache')]",
+                      "type": "Microsoft.Cache/redis/accessPolicyAssignments",
+                      "apiVersion": "2024-11-01",
+                      "name": "[format('{0}/{1}', parameters('redisName'), variables('assignmentName'))]",
+                      "properties": {
+                        "accessPolicyName": "Data Contributor",
+                        "objectId": "[parameters('principalId')]",
+                        "objectIdAlias": "[parameters('principalId')]"
+                      }
+                    }
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Resources/deployments', 'frontendApp')]",
+                "[resourceId('Microsoft.Resources/deployments', 'portalRedis')]"
               ]
             },
             {
@@ -2501,6 +4025,9 @@
                   },
                   "virtualNetworkSubnetId": {
                     "value": "[reference(resourceId('Microsoft.Resources/deployments', 'networking'), '2025-04-01').outputs.appSubnetId.value]"
+                  },
+                  "clientAffinityEnabled": {
+                    "value": false
                   }
                 },
                 "template": {
@@ -2510,7 +4037,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "8972138919102563065"
+                      "templateHash": "1104947881100529762"
                     }
                   },
                   "parameters": {
@@ -2563,6 +4090,13 @@
                       "metadata": {
                         "description": "Delegated subnet for regional VNet integration. Leave empty to keep the app off the virtual network."
                       }
+                    },
+                    "clientAffinityEnabled": {
+                      "type": "bool",
+                      "defaultValue": false,
+                      "metadata": {
+                        "description": "Send each browser back to the instance that served it first (ARR affinity). Only an app that keeps state on the instance needs it."
+                      }
                     }
                   },
                   "variables": {
@@ -2582,6 +4116,7 @@
                       "properties": {
                         "serverFarmId": "[parameters('serverFarmId')]",
                         "httpsOnly": true,
+                        "clientAffinityEnabled": "[parameters('clientAffinityEnabled')]",
                         "virtualNetworkSubnetId": "[if(empty(parameters('virtualNetworkSubnetId')), null(), parameters('virtualNetworkSubnetId'))]",
                         "siteConfig": "[variables('webSiteConfig')]"
                       }
@@ -2964,6 +4499,9 @@
                   },
                   "desktop": {
                     "value": "[parameters('linuxHostDesktop')]"
+                  },
+                  "skipExtensionVmNames": {
+                    "value": "[parameters('hostNamesNotRunning')]"
                   }
                 },
                 "template": {
@@ -2973,7 +4511,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "11700213154129506841"
+                      "templateHash": "4186961051720753174"
                     }
                   },
                   "parameters": {
@@ -3063,6 +4601,13 @@
                       "metadata": {
                         "description": "Desktop the hosts run in xrdp sessions. Changing it changes the extension command, which runs the bootstrap again on existing hosts."
                       }
+                    },
+                    "skipExtensionVmNames": {
+                      "type": "array",
+                      "defaultValue": [],
+                      "metadata": {
+                        "description": "Hosts whose bootstrap extension this deployment leaves out, because Azure refuses to change an extension on a VM that is not running. The preprovision hook passes the ones that are deallocated or stopped."
+                      }
                     }
                   },
                   "variables": {
@@ -3071,6 +4616,11 @@
                         "name": "vmNames",
                         "count": "[length(range(1, parameters('numberOfVMs')))]",
                         "input": "[format('{0}-{1}', parameters('vmNamePrefix'), padLeft(range(1, parameters('numberOfVMs'))[copyIndex('vmNames')], 2, '0'))]"
+                      },
+                      {
+                        "name": "skipExtensionVmNamesLower",
+                        "count": "[length(parameters('skipExtensionVmNames'))]",
+                        "input": "[toLower(parameters('skipExtensionVmNames')[copyIndex('skipExtensionVmNamesLower')])]"
                       }
                     ],
                     "normalizedScriptSourceRoot": "[if(endsWith(parameters('scriptSourceRoot'), '/'), take(parameters('scriptSourceRoot'), sub(length(parameters('scriptSourceRoot')), 1)), parameters('scriptSourceRoot'))]",
@@ -3226,6 +4776,7 @@
                         "name": "linuxCustomScriptExtension",
                         "count": "[length(variables('vmNames'))]"
                       },
+                      "condition": "[not(contains(variables('skipExtensionVmNamesLower'), toLower(variables('vmNames')[copyIndex()])))]",
                       "type": "Microsoft.Compute/virtualMachines/extensions",
                       "apiVersion": "2022-03-01",
                       "name": "[format('{0}/customScript', variables('vmNames')[copyIndex()])]",
@@ -3313,6 +4864,21 @@
                   },
                   "avdUsersGroupId": {
                     "value": "[parameters('avdUsersGroupId')]"
+                  },
+                  "linuxDesktopFullScreen": {
+                    "value": "[parameters('avdLinuxDesktopFullScreen')]"
+                  },
+                  "linuxDesktopMultiMonitor": {
+                    "value": "[parameters('avdLinuxDesktopMultiMonitor')]"
+                  },
+                  "startVmOnConnect": {
+                    "value": "[parameters('avdStartVmOnConnect')]"
+                  },
+                  "skipExtensionVmNames": {
+                    "value": "[parameters('hostNamesNotRunning')]"
+                  },
+                  "scalingExclusions": {
+                    "value": "[parameters('avdScalingExclusions')]"
                   }
                 },
                 "template": {
@@ -3322,7 +4888,7 @@
                     "_generator": {
                       "name": "bicep",
                       "version": "0.44.1.10279",
-                      "templateHash": "16448105144039973911"
+                      "templateHash": "945210851556391725"
                     }
                   },
                   "parameters": {
@@ -3465,10 +5031,50 @@
                       "metadata": {
                         "description": "Display name of the RemoteApp that connects users to a Linux host."
                       }
+                    },
+                    "linuxDesktopFullScreen": {
+                      "type": "bool",
+                      "defaultValue": true,
+                      "metadata": {
+                        "description": "Opens the Linux desktop full screen. False opens it in a window on one monitor. Turn it off only once every session host runs Connect-LinuxBroker.ps1 2.0.0 or later: older scripts refuse the argument and the Linux Desktop app fails to open."
+                      }
+                    },
+                    "linuxDesktopMultiMonitor": {
+                      "type": "bool",
+                      "defaultValue": true,
+                      "metadata": {
+                        "description": "Spreads a full-screen Linux desktop across every monitor. False keeps it on one monitor. Turn it off only once every session host runs Connect-LinuxBroker.ps1 2.0.0 or later: older scripts refuse the argument and the Linux Desktop app fails to open."
+                      }
+                    },
+                    "startVmOnConnect": {
+                      "type": "bool",
+                      "defaultValue": true,
+                      "metadata": {
+                        "description": "Starts a deallocated session host when a user opens the Linux Desktop app and no running session host can take the session. Azure Virtual Desktop needs Desktop Virtualization Power On Contributor, or Power On Off Contributor, to start it."
+                      }
+                    },
+                    "skipExtensionVmNames": {
+                      "type": "array",
+                      "defaultValue": [],
+                      "metadata": {
+                        "description": "Session hosts whose VM extensions this deployment leaves out, because Azure refuses to change an extension on a VM that is not running. The preprovision hook passes the ones that are deallocated or stopped."
+                      }
+                    },
+                    "scalingExclusions": {
+                      "type": "object",
+                      "defaultValue": {},
+                      "metadata": {
+                        "description": "Lowercase session host names, each mapped to the value of the excludeFromScaling tag it carries. A deployment replaces the tags of every VM it declares, so these are written back."
+                      }
                     }
                   },
                   "variables": {
                     "copy": [
+                      {
+                        "name": "skipExtensionVmNamesLower",
+                        "count": "[length(parameters('skipExtensionVmNames'))]",
+                        "input": "[toLower(parameters('skipExtensionVmNames')[copyIndex('skipExtensionVmNamesLower')])]"
+                      },
                       {
                         "name": "vmNames",
                         "count": "[length(range(1, parameters('sessionHostCount')))]",
@@ -3479,6 +5085,7 @@
                     "linuxBrokerConfigScriptUri": "[format('{0}/custom_script_extensions/Configure-AVD-Host.ps1', variables('normalizedScriptSourceRoot'))]",
                     "desktopVirtualizationUserRoleId": "1d18fff3-a72a-46b5-b4a9-0b38a3cd7e63",
                     "virtualMachineUserLoginRoleId": "fb879df8-f326-4884-b1cf-06f3ad86be52",
+                    "linuxDesktopDisplayArguments": "[format('{0}{1}', if(parameters('linuxDesktopFullScreen'), '', ' -FullScreen Off'), if(parameters('linuxDesktopMultiMonitor'), '', ' -MultiMonitor Off'))]",
                     "osImage": "microsoftwindowsdesktop:Windows-11:win11-24h2-avd:latest",
                     "storageAccountName": "wvdportalstorageblob",
                     "containerName": "galleryartifacts",
@@ -3502,7 +5109,7 @@
                         "loadBalancerType": "[parameters('loadBalancerType')]",
                         "maxSessionLimit": "[parameters('maxSessionLimit')]",
                         "customRdpProperty": "[parameters('customRdpProperty')]",
-                        "startVMOnConnect": false,
+                        "startVMOnConnect": "[parameters('startVmOnConnect')]",
                         "validationEnvironment": false,
                         "agentUpdate": "[parameters('agentUpdate')]",
                         "registrationInfo": {
@@ -3606,7 +5213,7 @@
                       "apiVersion": "2024-11-01",
                       "name": "[variables('vmNames')[copyIndex()]]",
                       "location": "[parameters('location')]",
-                      "tags": "[parameters('tags')]",
+                      "tags": "[if(contains(parameters('scalingExclusions'), toLower(variables('vmNames')[copyIndex()])), union(parameters('tags'), createObject('excludeFromScaling', parameters('scalingExclusions')[toLower(variables('vmNames')[copyIndex()])])), parameters('tags'))]",
                       "identity": {
                         "type": "SystemAssigned"
                       },
@@ -3665,6 +5272,7 @@
                         "name": "entraloginExtension",
                         "count": "[length(variables('vmNames'))]"
                       },
+                      "condition": "[not(contains(variables('skipExtensionVmNamesLower'), toLower(variables('vmNames')[copyIndex()])))]",
                       "type": "Microsoft.Compute/virtualMachines/extensions",
                       "apiVersion": "2024-11-01",
                       "name": "[format('{0}/AADLoginForWindows', variables('vmNames')[copyIndex()])]",
@@ -3686,6 +5294,7 @@
                         "name": "avdDscExtension",
                         "count": "[length(variables('vmNames'))]"
                       },
+                      "condition": "[not(contains(variables('skipExtensionVmNamesLower'), toLower(variables('vmNames')[copyIndex()])))]",
                       "type": "Microsoft.Compute/virtualMachines/extensions",
                       "apiVersion": "2024-11-01",
                       "name": "[format('{0}/Microsoft.PowerShell.DSC', variables('vmNames')[copyIndex()])]",
@@ -3729,6 +5338,7 @@
                         "name": "linuxBrokerConfig",
                         "count": "[length(variables('vmNames'))]"
                       },
+                      "condition": "[not(contains(variables('skipExtensionVmNamesLower'), toLower(variables('vmNames')[copyIndex()])))]",
                       "type": "Microsoft.Compute/virtualMachines/extensions",
                       "apiVersion": "2024-11-01",
                       "name": "[format('{0}/CustomScriptExtension', variables('vmNames')[copyIndex()])]",
@@ -3782,7 +5392,7 @@
                         "applicationType": "InBuilt",
                         "filePath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
                         "commandLineSetting": "Require",
-                        "commandLineArguments": "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\\Temp\\Connect-LinuxBroker.ps1",
+                        "commandLineArguments": "[format('-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\\Temp\\Connect-LinuxBroker.ps1{0}', variables('linuxDesktopDisplayArguments'))]",
                         "iconPath": "C:\\Windows\\System32\\mstsc.exe",
                         "iconIndex": 0,
                         "showInPortal": true
@@ -3830,7 +5440,7 @@
                             "value": "[parameters('customRdpProperty')]"
                           },
                           "startVMOnConnect": {
-                            "value": "[reference(resourceId('Microsoft.DesktopVirtualization/hostPools', parameters('hostPoolName')), '2024-04-03').startVMOnConnect]"
+                            "value": "[parameters('startVmOnConnect')]"
                           },
                           "validationEnvironment": {
                             "value": "[reference(resourceId('Microsoft.DesktopVirtualization/hostPools', parameters('hostPoolName')), '2024-04-03').validationEnvironment]"
@@ -4024,11 +5634,286 @@
             "nfsSharePath": {
               "type": "string",
               "value": "[variables('effectiveNfsShare')]"
+            },
+            "linuxHostDataCollectionRuleId": {
+              "type": "string",
+              "value": "[if(parameters('deployHostMonitoring'), reference(resourceId('Microsoft.Resources/deployments', 'hostMonitoring'), '2025-04-01').outputs.linuxHostDataCollectionRuleId.value, '')]"
+            },
+            "avdHostDataCollectionRuleId": {
+              "type": "string",
+              "value": "[if(parameters('deployHostMonitoring'), reference(resourceId('Microsoft.Resources/deployments', 'hostMonitoring'), '2025-04-01').outputs.avdHostDataCollectionRuleId.value, '')]"
+            },
+            "portalSessionStore": {
+              "type": "string",
+              "value": "[if(variables('usePortalRedis'), 'redis', 'filesystem')]"
+            },
+            "portalRedisName": {
+              "type": "string",
+              "value": "[if(variables('usePortalRedis'), reference(resourceId('Microsoft.Resources/deployments', 'portalRedis'), '2025-04-01').outputs.name.value, '')]"
             }
           }
         }
       },
       "dependsOn": [
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', variables('effectiveResourceGroupName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('deployAvdSessionHosts')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "avdScalingPlan",
+      "resourceGroup": "[variables('effectiveResourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[union(parameters('tags'), createObject('broker-role', 'avd-host'))]"
+          },
+          "name": {
+            "value": "[take(format('{0}-scaling-plan', parameters('avdHostPoolName')), 64)]"
+          },
+          "hostPoolName": {
+            "value": "[parameters('avdHostPoolName')]"
+          },
+          "enabled": {
+            "value": "[parameters('avdScalingPlanEnabled')]"
+          },
+          "timeZone": {
+            "value": "[parameters('avdScalingPlanTimeZone')]"
+          },
+          "rampUpStartTime": {
+            "value": "[parameters('avdScalingPlanRampUpStart')]"
+          },
+          "peakStartTime": {
+            "value": "[parameters('avdScalingPlanPeakStart')]"
+          },
+          "rampDownStartTime": {
+            "value": "[parameters('avdScalingPlanRampDownStart')]"
+          },
+          "offPeakStartTime": {
+            "value": "[parameters('avdScalingPlanOffPeakStart')]"
+          },
+          "rampUpMinimumHostsPct": {
+            "value": "[parameters('avdScalingPlanRampUpMinimumHostsPct')]"
+          },
+          "rampUpCapacityThresholdPct": {
+            "value": "[parameters('avdScalingPlanRampUpCapacityThresholdPct')]"
+          },
+          "rampDownMinimumHostsPct": {
+            "value": "[parameters('avdScalingPlanRampDownMinimumHostsPct')]"
+          },
+          "rampDownCapacityThresholdPct": {
+            "value": "[parameters('avdScalingPlanRampDownCapacityThresholdPct')]"
+          },
+          "weekendMinimumHostsPct": {
+            "value": "[parameters('avdScalingPlanWeekendMinimumHostsPct')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.44.1.10279",
+              "templateHash": "155344827278101734"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object",
+              "defaultValue": {}
+            },
+            "name": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 64
+            },
+            "friendlyName": {
+              "type": "string",
+              "defaultValue": "[parameters('name')]"
+            },
+            "hostPoolName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the pooled host pool the plan scales, in the same resource group."
+              }
+            },
+            "enabled": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Scales the host pool. False keeps the plan but assigns it to no host pool, so the session hosts are left as they are and another plan can be assigned instead."
+              }
+            },
+            "timeZone": {
+              "type": "string",
+              "defaultValue": "UTC",
+              "metadata": {
+                "description": "Windows time zone ID the schedule times are in, for example UTC or Eastern Standard Time."
+              }
+            },
+            "exclusionTag": {
+              "type": "string",
+              "defaultValue": "excludeFromScaling",
+              "metadata": {
+                "description": "Session hosts that carry this tag are never started, stopped or taken out of drain mode by autoscale."
+              }
+            },
+            "rampUpStartTime": {
+              "type": "string",
+              "defaultValue": "07:00",
+              "metadata": {
+                "description": "Weekday start of ramp-up, as HH:mm in timeZone. The weekend uses the same times."
+              }
+            },
+            "peakStartTime": {
+              "type": "string",
+              "defaultValue": "09:00",
+              "metadata": {
+                "description": "Start of peak hours, as HH:mm. Must come after ramp-up."
+              }
+            },
+            "rampDownStartTime": {
+              "type": "string",
+              "defaultValue": "18:00",
+              "metadata": {
+                "description": "Start of ramp-down, as HH:mm. Must come after peak."
+              }
+            },
+            "offPeakStartTime": {
+              "type": "string",
+              "defaultValue": "20:00",
+              "metadata": {
+                "description": "Start of off-peak hours, as HH:mm. Must come after ramp-down."
+              }
+            },
+            "rampUpMinimumHostsPct": {
+              "type": "int",
+              "defaultValue": 20,
+              "minValue": 0,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Share of the session hosts kept on from ramp-up until ramp-down on weekdays, rounded up to whole hosts."
+              }
+            },
+            "rampUpCapacityThresholdPct": {
+              "type": "int",
+              "defaultValue": 60,
+              "minValue": 1,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Share of the running hosts' sessions that makes autoscale start another host during ramp-up and peak hours."
+              }
+            },
+            "rampDownMinimumHostsPct": {
+              "type": "int",
+              "defaultValue": 10,
+              "minValue": 0,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Share of the session hosts kept on from ramp-down until the next ramp-up on weekdays, rounded up to whole hosts."
+              }
+            },
+            "rampDownCapacityThresholdPct": {
+              "type": "int",
+              "defaultValue": 90,
+              "minValue": 1,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Share of the running hosts' sessions that makes autoscale start another host during ramp-down and off-peak hours."
+              }
+            },
+            "weekendMinimumHostsPct": {
+              "type": "int",
+              "defaultValue": 0,
+              "minValue": 0,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Share of the session hosts kept on through Saturday and Sunday. 0 lets every host turn off, and Start VM on Connect starts one for the first user."
+              }
+            }
+          },
+          "variables": {
+            "rampUpTime": "[split(parameters('rampUpStartTime'), ':')]",
+            "peakTime": "[split(parameters('peakStartTime'), ':')]",
+            "rampDownTime": "[split(parameters('rampDownStartTime'), ':')]",
+            "offPeakTime": "[split(parameters('offPeakStartTime'), ':')]",
+            "sharedScheduleSettings": {
+              "rampUpStartTime": {
+                "hour": "[int(variables('rampUpTime')[0])]",
+                "minute": "[int(variables('rampUpTime')[1])]"
+              },
+              "rampUpLoadBalancingAlgorithm": "BreadthFirst",
+              "rampUpCapacityThresholdPct": "[parameters('rampUpCapacityThresholdPct')]",
+              "peakStartTime": {
+                "hour": "[int(variables('peakTime')[0])]",
+                "minute": "[int(variables('peakTime')[1])]"
+              },
+              "peakLoadBalancingAlgorithm": "BreadthFirst",
+              "rampDownStartTime": {
+                "hour": "[int(variables('rampDownTime')[0])]",
+                "minute": "[int(variables('rampDownTime')[1])]"
+              },
+              "rampDownLoadBalancingAlgorithm": "DepthFirst",
+              "rampDownCapacityThresholdPct": "[parameters('rampDownCapacityThresholdPct')]",
+              "rampDownForceLogoffUsers": false,
+              "rampDownStopHostsWhen": "ZeroSessions",
+              "rampDownWaitTimeMinutes": 30,
+              "rampDownNotificationMessage": "This session host is about to shut down. Save your work and sign out.",
+              "offPeakStartTime": {
+                "hour": "[int(variables('offPeakTime')[0])]",
+                "minute": "[int(variables('offPeakTime')[1])]"
+              },
+              "offPeakLoadBalancingAlgorithm": "DepthFirst"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.DesktopVirtualization/scalingPlans",
+              "apiVersion": "2024-04-03",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "friendlyName": "[parameters('friendlyName')]",
+                "description": "Starts and stops the Linux Desktop session hosts on a schedule.",
+                "hostPoolType": "Pooled",
+                "timeZone": "[parameters('timeZone')]",
+                "exclusionTag": "[parameters('exclusionTag')]",
+                "hostPoolReferences": "[if(parameters('enabled'), createArray(createObject('hostPoolArmPath', resourceId('Microsoft.DesktopVirtualization/hostPools', parameters('hostPoolName')), 'scalingPlanEnabled', true())), createArray())]",
+                "schedules": [
+                  "[union(variables('sharedScheduleSettings'), createObject('name', 'weekdays', 'daysOfWeek', createArray('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'), 'rampUpMinimumHostsPct', parameters('rampUpMinimumHostsPct'), 'rampDownMinimumHostsPct', parameters('rampDownMinimumHostsPct')))]",
+                  "[union(variables('sharedScheduleSettings'), createObject('name', 'weekend', 'daysOfWeek', createArray('Saturday', 'Sunday'), 'rampUpMinimumHostsPct', parameters('weekendMinimumHostsPct'), 'rampDownMinimumHostsPct', parameters('weekendMinimumHostsPct')))]"
+                ]
+              }
+            }
+          ],
+          "outputs": {
+            "name": {
+              "type": "string",
+              "value": "[parameters('name')]"
+            },
+            "id": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.DesktopVirtualization/scalingPlans', parameters('name'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[subscriptionResourceId('Microsoft.Authorization/roleAssignments', guid(subscription().id, parameters('avdServicePrincipalObjectId'), variables('avdPowerOnOffContributorRoleGuid')))]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources')]",
         "[subscriptionResourceId('Microsoft.Resources/resourceGroups', variables('effectiveResourceGroupName'))]"
       ]
     }
@@ -4089,6 +5974,22 @@
     "nfsSharePath": {
       "type": "string",
       "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.nfsSharePath.value]"
+    },
+    "linuxHostDataCollectionRuleId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.linuxHostDataCollectionRuleId.value]"
+    },
+    "avdHostDataCollectionRuleId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.avdHostDataCollectionRuleId.value]"
+    },
+    "portalSessionStore": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.portalSessionStore.value]"
+    },
+    "portalRedisName": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('effectiveResourceGroupName')), 'Microsoft.Resources/deployments', 'resources'), '2025-04-01').outputs.portalRedisName.value]"
     }
   }
 }

@@ -232,6 +232,13 @@ const SCALING_POLICY = {
   Schedules: [{ ...SCHEDULE_BASE, ScheduleID: 1, Name: 'Business hours', StartTime: '08:00', EndTime: '18:00' }],
   NextChange: { InMinutes: 465, AtLocal: 'Thursday 18:00', PhaseName: 'Default rule', ScheduleID: null },
   LastRun: null,
+  StartOnDemandEnabled: true,
+  MaxPendingStarts: 2,
+  ZeroMinimumCount: 0,
+  AvdHostScripts: {
+    Seen: 3, Outdated: 1, OutdatedHostnames: ['avd-03'], CurrentVersion: '2.0.0',
+    Versions: [{ ClientVersion: '2.0.0', AvdHosts: 2, Current: true }],
+  },
 };
 
 let scalingPolicy: typeof SCALING_POLICY | { Available: false } = SCALING_POLICY;
@@ -411,9 +418,14 @@ function stubFetch() {
     if (url.startsWith('/api/ui/scaling/log')) return jsonResponse(EMPTY_PAGE);
     if (url.startsWith('/api/ui/scaling/rules')) return jsonResponse(RULES);
     if (url.startsWith('/api/ui/scaling/policy')) {
-      return method === 'POST'
-        ? jsonResponse({ TimeZone: 'Eastern Standard Time', message: 'Schedules are now read in Eastern Standard Time.' })
-        : jsonResponse(scalingPolicy);
+      if (method !== 'POST') return jsonResponse(scalingPolicy);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return 'startondemandenabled' in body
+        ? jsonResponse({
+            Result: 'Updated', StartOnDemandEnabled: body.startondemandenabled, MaxPendingStarts: body.maxpendingstarts,
+            ZeroMinimumCount: 0, message: `Start on demand is now ${body.startondemandenabled ? 'on' : 'off'}.`,
+          })
+        : jsonResponse({ Result: 'Updated', TimeZone: 'Eastern Standard Time', message: 'Schedules are now read in Eastern Standard Time.' });
     }
     if (url.startsWith('/api/ui/scaling/preview')) return jsonResponse(method === 'POST' ? PROPOSED_PREVIEW : PREVIEW);
     if (url.startsWith('/api/ui/scaling/timezones')) return jsonResponse(TIME_ZONES);
@@ -1390,6 +1402,94 @@ describe('App', () => {
     expect(screen.queryByRole('link', { name: 'Add a window' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit Business hours' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Time zone')).not.toBeInTheDocument();
+    expect(screen.getByText('On. Up to 2 hosts start at once for waiting users.')).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Start a host when a user finds none free' })).not.toBeInTheDocument();
+  });
+
+  it('shows start on demand and which AVD hosts cannot wait for a host', async () => {
+    renderApp('/scaling');
+
+    expect(await screen.findByRole('heading', { name: 'Start on demand' })).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Start a host when a user finds none free' })).toBeChecked();
+    expect(screen.getByText(/1 AVD host runs a script that cannot wait for a host to start: avd-03\./)).toBeInTheDocument();
+    expect(screen.getByText('deploy/Update-AvdHostBrokerScript.ps1')).toBeInTheDocument();
+    const scripts = screen.getByRole('region', { name: 'AVD host scripts' });
+    expect(within(scripts).getByText('Current')).toBeInTheDocument();
+    expect(within(scripts).getByText('Cannot wait')).toBeInTheDocument();
+  });
+
+  it('turns start on demand off only after warning about minimums of 0', async () => {
+    scalingPolicy = { ...SCALING_POLICY, ZeroMinimumCount: 2 };
+    renderApp('/scaling');
+
+    await userEvent.click(await screen.findByRole('switch', { name: 'Start a host when a user finds none free' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save start on demand' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/2 rules and windows keep a minimum of 0 hosts/)).toBeInTheDocument();
+    const posted = () =>
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url, init]) => String(url) === '/api/ui/scaling/policy' && init?.method === 'POST',
+      );
+    expect(posted()).toBeUndefined();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Turn it off' }));
+
+    await waitFor(() => expect(JSON.parse(String(posted()?.[1]?.body))).toEqual({ startondemandenabled: false, maxpendingstarts: 2 }));
+    expect(await screen.findByText('Start on demand is now off.')).toBeInTheDocument();
+  });
+
+  it('saves how many hosts may start at once and refuses a limit outside 1 to 20', async () => {
+    renderApp('/scaling');
+    const limit = await screen.findByLabelText('Hosts that may start at once');
+    const save = screen.getByRole('button', { name: 'Save start on demand' });
+    expect(save).toBeDisabled();
+
+    await userEvent.clear(limit);
+    await userEvent.type(limit, '25');
+    expect(screen.getByText('Enter a whole number from 1 to 20.')).toBeInTheDocument();
+    expect(save).toBeDisabled();
+
+    await userEvent.clear(limit);
+    await userEvent.type(limit, '4');
+    await userEvent.click(save);
+    await waitFor(() => {
+      const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([url, init]) => String(url) === '/api/ui/scaling/policy' && init?.method === 'POST',
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ startondemandenabled: true, maxpendingstarts: 4 });
+    });
+    // Leaving it on needs no confirmation.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('says when a broker cannot start hosts on demand yet', async () => {
+    const older: Record<string, unknown> = { ...SCALING_POLICY };
+    for (const key of ['StartOnDemandEnabled', 'MaxPendingStarts', 'ZeroMinimumCount', 'AvdHostScripts']) {
+      delete older[key];
+    }
+    scalingPolicy = older as typeof SCALING_POLICY;
+    renderApp('/scaling');
+    expect(await screen.findByText(/This broker does not support start on demand yet/)).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Start a host when a user finds none free' })).not.toBeInTheDocument();
+  });
+
+  it('lets a rule keep a minimum of 0 only while start on demand is on', async () => {
+    renderApp('/scaling/rules/create');
+    const minimum = await screen.findByLabelText('Minimum VMs');
+    await waitFor(() => expect(minimum).toHaveAttribute('min', '0'));
+    await userEvent.type(minimum, '0');
+    expect(screen.getByText(/With a minimum of 0, no host runs while nobody needs one/)).toBeInTheDocument();
+    expect(minimum).not.toHaveAttribute('aria-invalid');
+  });
+
+  it('flags a minimum of 0 while start on demand is off', async () => {
+    scalingPolicy = { ...SCALING_POLICY, StartOnDemandEnabled: false };
+    renderApp('/scaling/rules/create');
+    const minimum = await screen.findByLabelText('Minimum VMs');
+    await userEvent.type(minimum, '0');
+    expect(await screen.findByText(/A minimum of 0 needs start on demand, which is off/)).toBeInTheDocument();
+    expect(minimum).toHaveAttribute('aria-invalid', 'true');
+    expect(minimum).toHaveAttribute('min', '1');
   });
 
   it('changes the policy time zone', async () => {

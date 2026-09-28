@@ -19,6 +19,7 @@ install_deps() {
     command -v useradd >/dev/null 2>&1 || need+=(passwd)
     command -v loginctl >/dev/null 2>&1 || need+=(systemd)
     command -v flock >/dev/null 2>&1 || need+=(util-linux)
+    command -v logrotate >/dev/null 2>&1 || need+=(logrotate)
 
     if ! command -v shellcheck >/dev/null 2>&1; then
         need+=(shellcheck)

@@ -44,6 +44,27 @@ function Figure({
   );
 }
 
+/**
+ * Users who waited while start on demand started a host: how long those who got one waited,
+ * and how many are waiting now.
+ */
+export function describeWaits(stats: CheckoutStats): string {
+  const waits = stats.Waits ?? 0;
+  const served = stats.WaitsServed ?? 0;
+  const waitingNow = stats.WaitingNow ?? 0;
+  const parts: string[] = [];
+  if (served) {
+    parts.push(`Median ${formatDuration(stats.WaitP50Seconds)} · 95% within ${formatDuration(stats.WaitP95Seconds)}`);
+  }
+  if (waits > served) {
+    parts.push(`${formatNumber(waits - served)} without a host yet`);
+  }
+  if (waitingNow) {
+    parts.push(`${formatNumber(waitingNow)} waiting now`);
+  }
+  return parts.length ? parts.join(' · ') : 'Nobody waited for a host to start';
+}
+
 /** How checkouts went: unmet demand, how long users waited, and how long hosts take to start. */
 export function CheckoutHealthCard({
   stats,
@@ -98,6 +119,13 @@ export function CheckoutHealthCard({
                 : 'No host was started'
             }
           />
+          {stats.Waits !== undefined ? (
+            <Figure
+              label="Waited for a host"
+              value={formatNumber(stats.Waits)}
+              detail={describeWaits(stats)}
+            />
+          ) : null}
           {failed ? (
             <Figure
               label="Failed checkouts"

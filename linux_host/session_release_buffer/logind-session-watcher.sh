@@ -4,9 +4,12 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # The Linux Broker host agent version. Every script in linux_host/ declares the same value
 # and the heartbeat reports it; bump them together with HOST_AGENT_VERSION in api/config.py.
-LINUXBROKER_AGENT_VERSION="1.2.0"
+LINUXBROKER_AGENT_VERSION="1.3.0"
 
 WATCHER_LOG_FILE="/var/log/release-session-watcher.log"
+# As for release-session.sh's log: never readable by the users signed in to the host, and readable
+# by the syslog group, which Azure Monitor Agent may collect logs as, where that group exists.
+LOG_READER_GROUP="syslog"
 STATE_DIRECTORY="/var/lib/linuxbroker-release-session"
 RECONCILE_SCRIPT="/usr/local/bin/release-session.sh"
 LAST_TRIGGER_FILE="$STATE_DIRECTORY/logind-watcher.last_trigger"
@@ -18,10 +21,18 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - [logind-watcher] - $1" | tee -a "$WATCHER_LOG_FILE"
 }
 
+protect_log_file() {
+    if getent group "$LOG_READER_GROUP" >/dev/null 2>&1 && chgrp "$LOG_READER_GROUP" "$1" 2>/dev/null; then
+        chmod 640 "$1"
+    else
+        chmod 600 "$1"
+    fi
+}
+
 ensure_state_files() {
     mkdir -p "$STATE_DIRECTORY"
     touch "$WATCHER_LOG_FILE"
-    chmod 600 "$WATCHER_LOG_FILE"
+    protect_log_file "$WATCHER_LOG_FILE"
 }
 
 read_last_trigger() {
@@ -76,6 +87,9 @@ trigger_reconciliation() {
     fi
 
     write_last_trigger "$now"
+    # The reader group may appear after the watcher started, when the Azure Monitor agent is
+    # installed, so each wake-up brings the log's access up to date.
+    protect_log_file "$WATCHER_LOG_FILE"
     log "Received $reason from logind. Waiting $SETTLE_SECONDS seconds before reconciliation."
     sleep "$SETTLE_SECONDS"
 
@@ -146,4 +160,6 @@ main() {
     exit 1
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main
+fi

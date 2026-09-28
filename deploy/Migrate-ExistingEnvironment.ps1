@@ -46,6 +46,9 @@ param(
     [string[]]$LinuxHostNames,
 
     [Parameter(Mandatory = $false)]
+    [string[]]$AvdHostNames,
+
+    [Parameter(Mandatory = $false)]
     [ValidateRange(1, 300)]
     [int]$WatcherDebounceSeconds = 10,
 
@@ -57,7 +60,10 @@ param(
     [switch]$SkipPostProvision,
 
     [Parameter(Mandatory = $false)]
-    [switch]$SkipLinuxHostReleaseAgentMigration
+    [switch]$SkipLinuxHostReleaseAgentMigration,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipAvdHostScriptUpdate
 )
 
 Set-StrictMode -Version Latest
@@ -132,23 +138,58 @@ if (-not $SkipPostProvision) {
         -LinuxHostGroupId $LinuxHostGroupId
 }
 
-if (-not $SkipLinuxHostReleaseAgentMigration) {
-    if ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhiteSpace($ApiBaseUrl) -or [string]::IsNullOrWhiteSpace($ApiClientId)) {
-        throw 'Linux host release-agent migration requires ResourceGroupName, ApiBaseUrl, and ApiClientId.'
-    }
+if ((-not $SkipLinuxHostReleaseAgentMigration -or -not $SkipAvdHostScriptUpdate) -and
+    ([string]::IsNullOrWhiteSpace($ResourceGroupName) -or [string]::IsNullOrWhiteSpace($ApiBaseUrl) -or [string]::IsNullOrWhiteSpace($ApiClientId))) {
+    throw 'Updating the Linux hosts and the AVD session hosts requires ResourceGroupName, ApiBaseUrl, and ApiClientId.'
+}
 
+# Neither host update stops the other, so a Linux host that fails does not leave the AVD session
+# hosts on a Connect-LinuxBroker.ps1 that cannot wait for a host to start. Both scripts name the
+# hosts to retry, and the failures end the migration together.
+$failedSteps = New-Object System.Collections.Generic.List[string]
+
+if (-not $SkipLinuxHostReleaseAgentMigration) {
     Write-Host 'Migrating existing Linux hosts to the current release-agent layout.'
 
-    & "$PSScriptRoot/Migrate-LinuxHostReleaseAgent.ps1" `
-        -ResourceGroupName $ResourceGroupName `
-        -ApiBaseUrl $ApiBaseUrl `
-        -ApiClientId $ApiClientId `
-        -SubscriptionId $SubscriptionId `
-        -EnvironmentName $EnvironmentName `
-        -ScriptSourceRoot $ScriptSourceRoot `
-        -LinuxHostNames $LinuxHostNames `
-        -WatcherDebounceSeconds $WatcherDebounceSeconds `
-        -WatcherSettleSeconds $WatcherSettleSeconds
+    try {
+        & "$PSScriptRoot/Migrate-LinuxHostReleaseAgent.ps1" `
+            -ResourceGroupName $ResourceGroupName `
+            -ApiBaseUrl $ApiBaseUrl `
+            -ApiClientId $ApiClientId `
+            -SubscriptionId $SubscriptionId `
+            -EnvironmentName $EnvironmentName `
+            -ScriptSourceRoot $ScriptSourceRoot `
+            -LinuxHostNames $LinuxHostNames `
+            -WatcherDebounceSeconds $WatcherDebounceSeconds `
+            -WatcherSettleSeconds $WatcherSettleSeconds
+    }
+    catch {
+        Write-Warning $_.Exception.Message
+        $failedSteps.Add('the Linux host migration')
+    }
+}
+
+if (-not $SkipAvdHostScriptUpdate) {
+    Write-Host 'Updating Connect-LinuxBroker.ps1 on the existing AVD session hosts.'
+
+    try {
+        & "$PSScriptRoot/Update-AvdHostBrokerScript.ps1" `
+            -ResourceGroupName $ResourceGroupName `
+            -ApiBaseUrl $ApiBaseUrl `
+            -ApiClientId $ApiClientId `
+            -SubscriptionId $SubscriptionId `
+            -EnvironmentName $EnvironmentName `
+            -ScriptSourceRoot $ScriptSourceRoot `
+            -AvdHostNames $AvdHostNames
+    }
+    catch {
+        Write-Warning $_.Exception.Message
+        $failedSteps.Add('the AVD session host update')
+    }
+}
+
+if ($failedSteps.Count -gt 0) {
+    throw "Existing environment migration failed in $($failedSteps -join ' and '). The warnings above name the hosts to retry."
 }
 
 Write-Host 'Existing environment migration completed.'
