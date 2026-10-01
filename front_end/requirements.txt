@@ -8,5 +8,5 @@ Flask-Session==0.8.0
 redis==8.1.0
 redis-entraid==1.2.1
 Flask-WTF==1.3.0
-pyjwt==2.13.0
+pyjwt==2.15.0
 cryptography==50.0.0
